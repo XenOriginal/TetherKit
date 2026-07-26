@@ -8,7 +8,9 @@ add_executable(
   tetherkit_bench
   bench_main.cc
   bench_common.cc
+  bench_rndis.cc
   harness.cc)
 
-target_link_libraries(tetherkit_bench PRIVATE tetherkit_base tk_version tk_common)
+# tk_core PUBLIC 链接了其余全部模块（基准要用到 rndis 编解码与 net loopback）。
+target_link_libraries(tetherkit_bench PRIVATE tetherkit_base tk_version tk_core)
 target_include_directories(tetherkit_bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

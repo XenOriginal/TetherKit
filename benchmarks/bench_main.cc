@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "bench_common.h"
+#include "bench_rndis.h"
 #include "harness.h"
 #include "tetherkit/common/scheduling.h"
 #include "tetherkit/version.h"
@@ -28,13 +29,19 @@ int main() {
 
   tetherkit::bench::PrintEnvironment();
 
-  tetherkit::bench::Runner runner;
-  tetherkit::bench::RegisterCommonBenchmarks(runner);
-
   std::fprintf(stderr, "开始测量……\n");
-  const std::vector<tetherkit::bench::Result> results = runner.RunAll();
-  std::fprintf(stderr, "测量完成。\n");
 
-  tetherkit::bench::PrintMarkdownReport(results, "基础设施层（tk_common）");
+  {
+    tetherkit::bench::Runner runner;
+    tetherkit::bench::RegisterCommonBenchmarks(runner);
+    tetherkit::bench::PrintMarkdownReport(runner.RunAll(), "基础设施层（tk_common）");
+  }
+  {
+    tetherkit::bench::Runner runner;
+    tetherkit::bench::RegisterRndisBenchmarks(runner);
+    tetherkit::bench::PrintMarkdownReport(runner.RunAll(), "RNDIS 编解码（tk_rndis）");
+  }
+
+  std::fprintf(stderr, "测量完成。\n");
   return 0;
 }
