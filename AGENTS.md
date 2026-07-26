@@ -39,7 +39,7 @@ macOS **用户态** RNDIS 驱动：USB 侧用 libusb 与 RNDIS 设备（Android 
 | pkg-config | 可用。注意头文件目录是 `.../include/libusb-1.0`（非常规），`FindLibUSB.cmake` 已处理 |
 | hotplug | `libusb_has_capability(LIBUSB_CAP_HAS_HOTPLUG)` 返回 **1**，支持 |
 | 链接依赖 | darwin 后端需要 `IOKit`、`CoreFoundation`、`Security` 三个 framework |
-| **本机 USB 设备数** | **0**（`libusb_get_device_list` 返回 0，`ioreg -c IOUSBHostDevice` 也是 0 条）。**开发机上没有任何 USB 设备可用于真机测试** → 所有 USB 逻辑必须能用 mock 后端离线测试 |
+| **本机 USB 设备** | 立项时为 **0**（`libusb_get_device_list` 与 `ioreg -c IOUSBHostDevice` 都是 0 条），架构因此按「USB 逻辑必须能用 mock 后端离线测试」来设计。后来接上过真实 RNDIS 设备做验证（见第 6 节），但**这个设计约束仍然有效** —— 不要假设跑测试时一定有设备 |
 
 ### 2.3 BPF（Darwin）
 
@@ -88,9 +88,10 @@ macOS **用户态** RNDIS 驱动：USB 侧用 libusb 与 RNDIS 设备（Android 
 
 - **无 root**：当前会话以 uid 501 运行，无法创建 feth、无法打开 `/dev/bpf*`。
   → 需要 root 的测试必须**可选、可跳过**，并在 CI/本地用 `TETHERKIT_ROOT_TESTS=1` 之类的开关控制。
-- **无 USB 设备**：无法做真机 RNDIS 联调。
+- **不保证有 USB 设备**：立项时开发机上一个都没有，后来才接上过真实设备做验证。
   → USB 后端必须抽象成接口，提供内存 loopback mock，端到端测试与吞吐基准都跑在 mock 上。
-- 未验证的事项统一记录在本文件第 6 节「待验证清单」。
+  自动化测试**不得依赖设备在场**。
+- 验证状态与仍未验证的事项统一记录在本文件第 6 节。
 
 ---
 
@@ -173,7 +174,7 @@ tetherkit（可执行）← core
 
 ### 当前状态
 
-- **代码量**：库与应用 9378 行、测试 3886 行、基准 852 行、文档 1576 行
+- **代码量**：库与应用 9378 行、测试 3886 行、基准 852 行、文档 1577 行
 - **测试**：16 个 ctest 用例 / 15 个 doctest test-suite，共 168 个用例、6453 条断言，全部通过
 - **构建**：`-Werror` 零告警；ThreadSanitizer 下全绿
 - **可运行**：`--version` / `--help` / `--list` 均正常；非 root 启动给出清晰提示
@@ -304,8 +305,8 @@ RNDIS 协商完成（版本 1.0、MTU 1500）→ 查到设备 MAC 与链路速�
 6. **BPF 遍历必须用 `bh_hdrlen`**，不能用 `sizeof(struct bpf_hdr)` —— 头部后面有对齐填充。
 7. **libusb 在 macOS 上没有 `detach_kernel_driver`**。若接口被内核驱动占用，只能走
    codeless kext / dext 或 re-enumerate，不能靠 libusb 解决。
-8. 开发机上**既无 USB 设备也无 root**，所以「跑不起来」不等于「代码错了」；
-   离线可验证的部分必须全部覆盖到 mock 测试里。
+8. **别默认跑测试时有设备、有 root**，所以「跑不起来」不等于「代码错了」；
+   离线可验证的部分必须全部覆盖到 mock 测试里，需要 root 的用例要能干净跳过。
 9. **CTest 的 `add_test` 里绝不能给参数加引号。** 写
    `COMMAND tetherkit_tests --test-suite="${_suite}"` 时，CMake 会把引号当作参数
    内容原样传下去（`ctest -V` 可见传的是 `"--test-suite="foo""`），doctest 匹配不到
