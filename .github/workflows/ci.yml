@@ -1,0 +1,122 @@
+# CI —— 构建、测试、私有 ABI 漂移监测
+#
+# 本项目只能在 macOS 上编译：源码直接使用 Darwin BPF（net/bpf.h）与 xnu 的
+# 私有 if_fake ABI，CMakeLists 顶部对非 Apple 平台直接 FATAL_ERROR。
+# GitHub 托管的 macOS runner 是真机（Apple Silicon 虚拟化），因此完全可用。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的旧任务在有新提交时取消，省 macOS runner 配额（计费是 Linux 的 10 倍）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # 主构建与单元测试。
+  #
+  # 168 个用例全部不需要 root、不需要 USB 设备：feth/BPF 那部分在非 root 下
+  # 自动跳过（见 tests/test_net_link.cc 的 RootTestsEnabled）。
+  # ----------------------------------------------------------------------------
+  build-test:
+    name: ${{ matrix.os }} · ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+        build_type: [RelWithDebInfo, Release]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 libusb
+        run: brew install libusb
+
+      - name: 记录工具链版本
+        run: |
+          sw_vers
+          cmake --version
+          c++ --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DTETHERKIT_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: 冒烟测试（--list 不需要 root）
+        run: |
+          ./build/bin/tetherkit --version
+          ./build/bin/tetherkit --list
+
+  # ----------------------------------------------------------------------------
+  # ThreadSanitizer —— 无锁队列与多线程数据路径的正确性靠它兜底。
+  # ----------------------------------------------------------------------------
+  tsan:
+    name: ThreadSanitizer
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 libusb
+        run: brew install libusb
+
+      - name: Configure & Build
+        run: |
+          cmake -S . -B build-tsan -DTETHERKIT_ENABLE_TSAN=ON
+          cmake --build build-tsan -j"$(sysctl -n hw.ncpu)"
+
+      - name: Test
+        run: ctest --test-dir build-tsan --output-on-failure
+
+  # ----------------------------------------------------------------------------
+  # 私有 ABI 漂移监测。
+  #
+  # 这个项目最大的长期风险是 xnu 的 struct if_fake_request 布局在某次 macOS
+  # 更新后变化。跑一次真实的 feth 创建/销毁就能提前发现。
+  #
+  # 标成 continue-on-error 的理由：runner 是虚拟化环境，if_fake 在其中的可用性
+  # 不由本项目保证，不该因为跑不起来就把整条流水线判红。它是**信号**不是**门禁**。
+  # ----------------------------------------------------------------------------
+  abi-check:
+    name: feth 私有 ABI 检查 · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 libusb
+        run: brew install libusb
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: 关掉 feth 硬件校验和卸载
+        # 这批开关在 feth 创建时被快照，必须在创建前设好。
+        run: sudo sysctl -w net.link.fake.hwcsum=0
+
+      - name: 以 root 跑 feth/BPF 用例
+        run: |
+          sudo env TETHERKIT_ROOT_TESTS=1 \
+            ctest --test-dir build --output-on-failure -R 'net\.'
