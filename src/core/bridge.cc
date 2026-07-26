@@ -102,6 +102,24 @@ void Bridge::Stop() {
 // RX 注入线程：FrameRing → 链路
 // =============================================================================
 
+void Bridge::SetPaused(bool paused) noexcept {
+  paused_.store(paused, std::memory_order_release);
+  if (!paused) {
+    return;
+  }
+
+  // 等 RX 注入线程确认它确实停住了。没有这一步，本函数返回之后 worker 仍可能
+  // 把一批已经取出的帧写到链路上：它可能刚过完上面那个标志检查。
+  //
+  // 只在线程确实在跑的时候等 —— Start() 之前或 Stop() 之后没人会来置位，
+  // 无条件等会永远不返回。
+  while (running_.load(std::memory_order_acquire) &&
+         !stop_requested_.load(std::memory_order_acquire) &&
+         !rx_paused_ack_.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+}
+
 void Bridge::RunReceiveInjector() noexcept {
   ConfigureCurrentThread("rx-inject", ThreadRole::kDataPath);
   TETHERKIT_DEBUG("RX 注入线程已启动");
@@ -109,8 +127,16 @@ void Bridge::RunReceiveInjector() noexcept {
   std::uint32_t idle_spins = 0;
 
   while (!stop_requested_.load(std::memory_order_acquire)) {
+    // 先撤销确认位，再判断是否暂停。顺序不能反 —— 留着上一轮的 true 会让
+    // SetPaused(true) 误以为本线程已经停住，而它其实正要去取帧。
+    rx_paused_ack_.store(false, std::memory_order_release);
+
     if (paused_.load(std::memory_order_acquire)) {
       // 复位期间：不搬运，但也不丢弃 —— 队列里的帧等恢复后继续发。
+      //
+      // 置确认位是给 SetPaused(true) 看的：从这里到下一轮看见 paused_ 变回
+      // false 之前，本线程不会碰 rx_ring_，所以这个确认是可信的。
+      rx_paused_ack_.store(true, std::memory_order_release);
       std::this_thread::yield();
       continue;
     }
@@ -200,6 +226,14 @@ void Bridge::RunTransmitExtractor() noexcept {
     // 分批提交给 USB。
     std::size_t offset = 0;
     while (offset < batch->frames.size()) {
+      // 每个分片前重新查一次：暂停可能在上面那次检查之后才落下来。
+      // TX 拿不到 RX 那样的强保证（它必须持续把 BPF 读空，没法真的停下），
+      // 但把漏发窗口从「一整批」收窄到「一个分片」是免费的。
+      if (paused_.load(std::memory_order_acquire)) {
+        counters_.tx.AddDroppedFull(batch->frames.size() - offset);
+        break;
+      }
+
       const std::size_t chunk =
           std::min<std::size_t>(config_.tx_submit_batch, batch->frames.size() - offset);
       const std::span<const FrameView> slice = batch->frames.subspan(offset, chunk);

@@ -275,6 +275,44 @@ TEST_CASE("暂停期间不搬运，恢复后 RX 队列里的帧继续送出") {
   bridge.Stop();
 }
 
+TEST_CASE("SetPaused 在任何生命周期阶段都不会挂死") {
+  // SetPaused(true) 会等 RX 注入线程确认它停住了。这个等待有两种挂死风险，
+  // 都比它要修的漏帧问题严重得多（挂的是控制路径：链路状态变化、设备软复位）：
+  //   * 线程压根没在跑时没人来置确认位；
+  //   * 确认位残留导致等待逻辑本身出错。
+  // 这里把三个阶段都走一遍，任何一处挂死都会让本用例超时而不是静默通过。
+  MockDataChannel channel;
+  LoopbackLink link(LoopbackConfig{.sent_capacity = 4096});
+  Bridge bridge(channel, link, TestConfig());
+
+  // 阶段一：Start() 之前。
+  bridge.SetPaused(true);
+  CHECK(bridge.Paused());
+  bridge.SetPaused(false);
+
+  REQUIRE(bridge.Start().has_value());
+
+  // 阶段二：运行中快速 toggle。确认位每轮循环开头清零，后一次 SetPaused(true)
+  // 才不会读到上一轮的残留值就提前返回 —— 提前返回等于保证失效。
+  for (int i = 0; i < 50; ++i) {
+    bridge.SetPaused(true);
+    bridge.SetPaused(false);
+  }
+
+  // toggle 之后仍然拿得到真实的暂停保证。
+  bridge.SetPaused(true);
+  constexpr std::uint32_t kCount = 16;
+  CHECK(channel.InjectFromDevice(MakeFrames(kCount, 256)) == kCount);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  CHECK(link.TotalSentFrames() == 0);
+
+  bridge.Stop();
+
+  // 阶段三：Stop() 之后。
+  bridge.SetPaused(true);
+  CHECK(bridge.Paused());
+}
+
 TEST_CASE("暂停期间 TX 方向的帧被丢弃并计数") {
   // 与 RX 不同：TX 侧暂停时必须丢，因为 RNDIS 复位期间设备会丢弃所有未完成的
   // 数据包，攒着只是浪费内存。

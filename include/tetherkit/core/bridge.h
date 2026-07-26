@@ -138,7 +138,21 @@ class Bridge {
   ///
   /// 用于 RNDIS 软复位期间：设备会丢弃所有未完成的数据包，这期间继续往它发帧
   /// 只是浪费，而且可能撞上设备重建内部状态的窗口。
-  void SetPaused(bool paused) noexcept { paused_.store(paused, std::memory_order_release); }
+  ///
+  /// `SetPaused(true)` 是**同步**的：返回后保证 RX 注入线程已经停在暂停分支上，
+  /// 既不会再碰 rx_ring_、也不会再往链路写帧。
+  ///
+  /// 这个同步是必需的，光靠标志位给不了保证：worker 可能刚过完标志检查、正准备
+  /// 把一批取出的帧写出去，调用方却以为已经停了。曾经就是这样漏过一个
+  /// rx_write_batch（16 帧）出去。
+  ///
+  /// TX 方向拿不到同样强的保证 —— 它必须持续把 BPF 读空，否则内核缓冲会堆满
+  /// 转成内核侧丢包。暂停期间它改为读出即丢弃，并在每个提交分片前重新检查，
+  /// 因此本函数返回后最多只可能有一个已在途的分片继续提交完。
+  ///
+  /// ⚠️ 不可从 RX/TX 工作线程内部调用 —— 会自等死锁。现有调用方都在控制路径上
+  /// （链路状态变化、设备软复位），满足这个前提。
+  void SetPaused(bool paused) noexcept;
 
   [[nodiscard]] bool Paused() const noexcept { return paused_.load(std::memory_order_acquire); }
 
@@ -166,6 +180,13 @@ class Bridge {
   std::atomic<bool> running_{false};
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> paused_{false};
+
+  /// RX 注入线程对 paused_ 的确认位，SetPaused(true) 等的就是它。
+  ///
+  /// 由 RX 注入线程**独占写入**：每轮循环开头先清零、确认停住后再置位。
+  /// 每轮都清零是关键 —— 否则 SetPaused(false) 紧接 SetPaused(true) 时，
+  /// 后者可能读到上一轮残留的 true 就直接返回，保证当场失效。
+  std::atomic<bool> rx_paused_ack_{false};
 
   /// RX 注入线程复用的帧视图数组，避免每批都分配。
   std::vector<FrameView> rx_batch_;
