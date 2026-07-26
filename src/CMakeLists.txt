@@ -31,4 +31,5 @@ target_link_libraries(tk_version PUBLIC tetherkit_base)
 
 add_subdirectory(common)
 add_subdirectory(rndis)
+add_subdirectory(net)
 add_subdirectory(app)

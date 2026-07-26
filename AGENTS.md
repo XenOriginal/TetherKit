@@ -50,7 +50,16 @@ macOS **用户态** RNDIS 驱动：USB 侧用 libusb 与 RNDIS 设备（Android 
 | `struct bpf_hdr` | `{ struct BPF_TIMEVAL bh_tstamp; bpf_u_int32 bh_caplen; bpf_u_int32 bh_datalen; u_short bh_hdrlen; }` —— 遍历时**必须**用 `bh_hdrlen` 而非 `sizeof(bpf_hdr)` |
 | 对齐宏 | `BPF_ALIGNMENT = sizeof(int32_t) = 4`，`BPF_WORDALIGN(x) = ((x)+3) & ~3` |
 | 设备节点 | `/dev/bpf0..3` 存在（Darwin 按需克隆更多节点） |
-| **批量写** | Darwin BPF **不支持**批量写，`write()` 一次一帧。这是 RX 方向的主要成本，架构上必须正视 |
+| **批量写** | ✅ **支持**（macOS 14+）：私有 ioctl `BIOCSBATCHWRITE = _IOW('B',143,int) = 0x8004428f`。缓冲格式与 read 对称（连续的 `bpf_hdr + 帧`，每条按 `BPF_WORDALIGN` 对齐），前置条件是 `BIOCSHDRCMPLT=1`。macOS 13 及更早**没有**此 ioctl → 必须运行时特性探测，失败回落逐帧 write |
+| 私有 ioctl 编号（实测核对） | `BIOCSBATCHWRITE`=0x8004428f、`BIOCSNOTSTAMP`=0x80044291（关时间戳，省每帧一次 microtime）、`BIOCSWRITEMAX`=0x8004428c、`BIOCSDIRECTION`=0x8004428a、`BIOCSHEADDROP`=0x80044280。macOS 26 把它们从 `net/bpf.h` 挪到了 `net/bpf_private.h`（**SDK 未提供该文件**） |
+| `BIOCSBLEN` 上限 | `sysctl debug.bpf_bufsize_cap` = **33554432（32 MiB）**。超限**不报错**，静默截断并通过 `_IOWR` 把实际值**写回参数** |
+| `read()` 缓冲长度 | **必须精确等于** `bd_bufsize`，否则 `bpfread` 开头就返回 `EINVAL`。必须用 `BIOCSBLEN` 的写回值 |
+| `BIOCSHDRCMPLT` | **必须设为 1**。=0 时 `bpfwrite` 会剥掉前 14 字节重建帧头（源 MAC 被驱动改写）；=1 才走 `DLIL_OUTPUT_FLAGS_RAW` 原样透传。批量写也硬性要求它是 1 |
+| 单帧写入长度上限 | `BPF_WRITE_LEEWAY = 18`，`hdrcmplt=1` 时整帧长度必须 ≤ 接口 MTU + 18（MTU=1500 → 1518） |
+| `BIOCSRTIMEOUT` 分辨率 | **10 ms**（内核存 `tvtohz(tv)-1` 个 tick，实测 `kern.clockrate hz=100`）。传 `{0,0}` 会变成**永久阻塞** |
+| 最优读取模型 | `BIOCIMMEDIATE=1` + **专用线程阻塞 `read()`**，不要用 kqueue。immediate 下每来一包就唤醒，`read()` 醒来时一次性交付期间累积的全部包（低速低延迟、高速自动大批量，行为类似 NAPI），每批只一次系统调用；kqueue 的就绪判据完全一样却要多一次 `kevent()` |
+| `/dev/bpf` 克隆节点 | **不存在**（实测 `ls /dev/bpf` → No such file）。必须遍历 `/dev/bpf%d`：`EBUSY` 试下一个、`ENOENT` 到上限。打开当前最后一个节点时内核会按需再造一个。上限 `sysctl debug.bpf_maxdevices` = 256 |
+| `access_bpf` 组 | macOS **没有**（那是 FreeBSD 的做法，实测 `dscl . -list /Groups` 无匹配）。`/dev/bpf*` 是 `0600 root:wheel`，只能 root |
 
 ### 2.4 feth（if_fake）
 
@@ -59,8 +68,19 @@ macOS **用户态** RNDIS 驱动：USB 侧用 libusb 与 RNDIS 设备（Android 
 | 是否存在 | **存在**，`sysctl net.link.fake.*` 可见 |
 | 关键 sysctl | `net.link.fake.max_mtu = 2048`、`tx_headroom = 32`、`buflet_size = 512`、`qset_cnt = 4`、`link_layer_aggregation_factor = 96` |
 | 创建权限 | **需要 root**：非 root 下 `ifconfig feth0 create` 返回 `SIOCIFCREATE2: Operation not permitted` |
-| `struct ifdrv` | **不在**公开 SDK 的 `net/if.h` 中，必须自行声明 |
-| `net/if_fake_var.h` | **不在**公开 SDK 中，`struct if_fake_request` 与 `IF_FAKE_S_CMD_*` 必须自行声明（私有 ABI，有版本漂移风险 → 需要降级到 `/sbin/ifconfig` 的方案） |
+| `struct ifdrv` | **不在**公开 SDK 的 `net/if.h` 中，必须自行声明。带 `#pragma pack(4)`，LP64 下 `sizeof == 40`（偏移 16/24/32）。**大小参与 ioctl 编号计算**，算错就得到不存在的 ioctl 号 → 已用 `static_assert` 钉死。实测 `SIOCSDRVSPEC = 0x8028697b`、`SIOCGDRVSPEC = 0xc028697b` |
+| `net/if_fake_var.h` | **不在**公开 SDK 中。`struct if_fake_request` = `uint64_t reserved[4]`（32 字节，**内核校验必须全零**）+ 128 字节 union，**总 160 字节**。`IF_FAKE_S_CMD_SET_PEER = 1`、`IF_FAKE_G_CMD_GET_PEER = 1` |
+| 私有 ABI 的版本风险 | **极低，无需降级到 ifconfig**：`if_fake_var.h` 在 xnu-7195(macOS 11) → xnu-12377(macOS 26) 的所有发布 tag 下文件 md5 完全相同，从未变动。Apple 自己的 `ifconfig fethN peer fethM` 走的就是这套 ABI |
+| SET_PEER 的内核校验 | 五项，任一不满足返回 `EINVAL`：① `ifd_len >= 160`；② `reserved` 全零；③ peer 必须也是 feth（`ifnet_name()=="feth"` 且 `IFT_ETHER`）；④ 双方都不能已有 peer；⑤ 需要 root |
+| **数据流向语义**（已对照 `feth_output_common()` 源码确认） | 主机从 feth0 发出的帧 → 在 feth1 上是 **input** 方向；我们向 feth1 的 BPF `write()` 一帧 → 走 feth1 的 output → 进入 feth0 的 **input** → 被主机 IP 栈收到，**不会** loopback 回 feth1。所以 BPF 只挂 feth1 一个描述符就能同时收发 |
+| `BIOCSSEESENT=0` 的作用 | → `bd_direction = BPF_D_IN`，恰好滤掉**我们自己写进去的帧**（它们在 feth1 上是 output 方向）。**不设会形成回环** |
+| `IFF_UP` 要求 | `bpfwrite` 里有硬检查 `if ((ifp->if_flags & IFF_UP) == 0) return ENETDOWN` → feth1 必须 UP；feth0 也必须 UP 才能让 IP 栈处理收到的帧 |
+| **创建期 sysctl 快照** | ⚠️ `hwcsum` / `fcs` / `tso_support` / `lro` / `trailer_length` / `separate_frame_header` / `max_mtu` 等开关在 `feth_clone_create()` 那一刻被快照进接口，**创建后再改 sysctl 无效**。若 `hwcsum=1`，我们读到的帧校验和是留给硬件算的假值！本机实测默认全部为 0（正是我们要的），但代码里仍在创建前显式校验（`VerifyFethSysctls()`） |
+| 内核分配的 MAC | `'f','e','t','h', unit>>8, unit&0xff` → feth0 = `66:65:74:68:00:00`（0x66 的 bit1=1 → 本地管理地址，合法） |
+| MAC 设置策略 | 应把**系统侧**（feth0）的 MAC 设为设备汇报的 `OID_802_3_PERMANENT_ADDRESS`（RNDIS 语义下设备就是这块网卡，对端 ARP/DHCP 都按它建）；**驱动侧必须保留内核分配的不同 MAC**，否则两侧 IPv6 链路本地地址相同会触发 DAD 冲突。改 MAC 必须在 `IFF_UP` 之前 |
+| `BIOCPROMISC` | 对 feth **不需要**：`feth_output_common` 无条件把帧投给 peer 并 tap，不做 MAC 过滤，能否读到只由方向决定 |
+| DHCP | `sudo ipconfig set feth0 DHCP`（临时服务，只活到下次网络配置变更，不出现在系统设置里）。拆除 `sudo ipconfig set feth0 NONE`。`networksetup` 用不了 —— feth 不在 `SCNetworkInterface` 列表里 |
+| 性能上限警示 | 社区报告 feth 路径在超过约 5–8 Gbps 后会出现内核 mbuf 溢出并 panic。对本项目风险很低：RNDIS over USB 2.0 HS 实测约 200–300 Mbps，USB 3 下也难超 1–2 Gbps |
 | 相关 ioctl（**在**公开 `sys/sockio.h` 中） | `SIOCSIFFLAGS`(i,16) `SIOCGIFFLAGS`(i,17) `SIOCSIFMTU`(i,52) `SIOCSIFLLADDR`(i,60) `SIOCIFCREATE`(i,120) `SIOCIFDESTROY`(i,121) `SIOCIFCREATE2`(i,122) `SIOCSDRVSPEC`(i,123) `SIOCGDRVSPEC`(i,123) |
 | `IFNAMSIZ` | 16 |
 
@@ -179,7 +199,11 @@ tetherkit（可执行）← core
    落在同一缓存行上，false sharing 依旧存在。项目统一用 `kCacheLineSize = 128`。
 2. **`std::format` 需要部署目标 ≥ 13.3**，否则报 `to_chars unavailable`。CMake 已强制。
 3. **`std::hardware_destructive_interference_size` 在 Apple libc++ 上不存在**，别用。
-4. **BPF 没有零拷贝**，别去找 `BIOCSETZBUF`。
+4. **BPF 没有零拷贝**，别去找 `BIOCSETZBUF`。但**有批量写** —— 见下一条。
+4b. ~~「Darwin BPF 不支持批量写」是错的~~。第 2 节最初记录的这条结论已更正：
+   macOS 14+ 有私有 ioctl `BIOCSBATCHWRITE`，一次 `write()` 能发多帧。
+   本项目已实现并做特性探测（`BpfLink::WriteFramesBatched`），
+   macOS 13 及更早自动回落到逐帧 write。
 5. **BPF `BIOCSBLEN` 必须在 `BIOCSETIF` 之前设置**，顺序错了缓冲区大小不生效。
 6. **BPF 遍历必须用 `bh_hdrlen`**，不能用 `sizeof(struct bpf_hdr)` —— 头部后面有对齐填充。
 7. **libusb 在 macOS 上没有 `detach_kernel_driver`**。若接口被内核驱动占用，只能走
