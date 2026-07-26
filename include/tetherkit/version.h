@@ -22,4 +22,10 @@ Version GetVersion() noexcept;
 /// 返回形如 "TetherKit 0.1.0 (C++23, macOS 13.3+)" 的可读版本串。
 std::string_view GetVersionString() noexcept;
 
+/// 返回构建配置描述，形如
+/// "RelWithDebInfo, AppleClang 21.0.0, C++23, LTO=off, sanitizers=none"。
+///
+/// 性能基准报告必须带上它 —— 脱离构建配置的 ns/op 数字没有意义。
+std::string_view GetBuildDescription() noexcept;
+
 }  // namespace tetherkit

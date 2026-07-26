@@ -33,8 +33,11 @@ endif()
 
 if(_tk_san_list)
   list(JOIN _tk_san_list "," _tk_san_flags)
+  set(TETHERKIT_SANITIZER_SUMMARY "${_tk_san_flags}")
   target_compile_options(tetherkit_sanitizers INTERFACE -fsanitize=${_tk_san_flags}
                                                         -fno-omit-frame-pointer -g)
   target_link_options(tetherkit_sanitizers INTERFACE -fsanitize=${_tk_san_flags})
   message(STATUS "已启用消毒器: ${_tk_san_flags}")
+else()
+  set(TETHERKIT_SANITIZER_SUMMARY "none")
 endif()

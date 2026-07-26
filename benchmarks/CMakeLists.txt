@@ -4,7 +4,11 @@
 # 自带的轻量 harness（见 benchmarks/harness.h）足够，且能直接输出 Markdown
 # 汇总表写进 docs/BENCHMARKS.md，省掉一层解析。
 
-add_executable(tetherkit_bench bench_main.cc)
+add_executable(
+  tetherkit_bench
+  bench_main.cc
+  bench_common.cc
+  harness.cc)
 
-target_link_libraries(tetherkit_bench PRIVATE tetherkit_base tk_version)
+target_link_libraries(tetherkit_bench PRIVATE tetherkit_base tk_version tk_common)
 target_include_directories(tetherkit_bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
