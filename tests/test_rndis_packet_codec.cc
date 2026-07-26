@@ -166,23 +166,26 @@ TEST_CASE("多包聚合：填充归入上一个消息，最后一个不含外部
                              {.max_transfer_bytes = 8192, .max_messages = 3, .alignment_bytes = 8},
                              512);
 
-  // 帧长 61 → 消息长 44+61 = 105，不是 8 的倍数，下一个消息前需要 3 字节填充。
+  // 帧长 61 → 消息长 44+61 = 105。105 不是 8 的倍数，向上对齐到 112（14×8），
+  // 所以下一个消息前需要 7 字节填充，且这 7 字节要被吞进**第一个**消息的
+  // MessageLength。
   REQUIRE(writer.TryAppend(MakeFrame(61, 0xA0)));
   REQUIRE(writer.TryAppend(MakeFrame(70, 0xB0)));
   REQUIRE(writer.TryAppend(MakeFrame(64, 0xC0)));
   const std::uint32_t total = writer.Finish();
 
-  // 第一个消息：105 → 被扩到 108（吞掉 3 字节填充）。
-  CHECK(LoadLe32(transfer.data() + kMessageLengthOffset) == 108);
-  CHECK(108 % 8 == 0);
+  // 第一个消息：105 → 被扩到 112（吞掉 7 字节填充）。
+  CHECK(LoadLe32(transfer.data() + kMessageLengthOffset) == 112);
+  CHECK(112 % 8 == 0);
 
-  // 第二个消息从 108 开始：44+70 = 114 → 被扩到 120。
-  CHECK(LoadLe32(transfer.data() + 108 + kMessageLengthOffset) == 120);
-  CHECK((108 + 120) % 8 == 0);
+  // 第二个消息从 112 开始：44+70 = 114 → 累计 226，向上对齐到 232，
+  // 于是第二个消息的 MessageLength 被扩到 114 + 6 = 120。
+  CHECK(LoadLe32(transfer.data() + 112 + kMessageLengthOffset) == 120);
+  CHECK((112 + 120) % 8 == 0);
 
-  // 第三个（最后一个）消息从 228 开始：44+64 = 108，**不含**外部填充。
-  CHECK(LoadLe32(transfer.data() + 228 + kMessageLengthOffset) == 108);
-  CHECK(total == 228 + 108);
+  // 第三个（最后一个）消息从 232 开始：44+64 = 108，**不含**外部填充。
+  CHECK(LoadLe32(transfer.data() + 232 + kMessageLengthOffset) == 108);
+  CHECK(total == 232 + 108);
   CHECK(writer.PayloadBytes() == 61 + 70 + 64);
 }
 
@@ -398,6 +401,7 @@ TEST_CASE("解码：前几帧有效、中途畸形时保留已解出的帧") {
   const std::uint32_t total = writer.Finish();
 
   // 破坏第三个消息的类型字段。
+  // 对齐 1 字节时消息紧邻排布，第三个消息的偏移就是前两个之和。
   const std::size_t third_offset = std::size_t{2} * (kPacketMsgHeaderBytes + 64);
   StoreLe32(transfer.data() + third_offset + kMessageTypeOffset, 0xDEAD'BEEFU);
 

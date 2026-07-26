@@ -1,5 +1,10 @@
 // RNDIS 控制通道抽象。
 //
+// 为什么这个接口放在 rndis 层而不是 usb 层：它描述的是**RNDIS 协议**的控制通道
+// 语义（发一条消息、取一条消息、等一个「有响应了」的通知），而不是 USB 的语义。
+// 状态机（tk_rndis）依赖它，libusb 实现（tk_usb）提供它 —— 这样依赖方向就是
+// 正确的 rndis ← usb，而不会出现 tk_rndis 反向依赖 tk_usb。
+//
 // RNDIS 的控制消息不走 bulk 端点，而是走 USB 控制端点（EP0）的两个类请求：
 //   SEND_ENCAPSULATED_COMMAND  (bmRequestType=0x21, bRequest=0x00)
 //   GET_ENCAPSULATED_RESPONSE  (bmRequestType=0xA1, bRequest=0x01)
@@ -18,10 +23,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 #include "tetherkit/common/error.h"
 
-namespace tetherkit::usb {
+namespace tetherkit::rndis {
 
 /// 等待通知的结果。
 enum class NotificationResult : std::uint8_t {
@@ -74,4 +80,4 @@ class ControlChannel {
   [[nodiscard]] virtual std::string_view Describe() const noexcept = 0;
 };
 
-}  // namespace tetherkit::usb
+}  // namespace tetherkit::rndis

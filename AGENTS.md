@@ -210,6 +210,19 @@ tetherkit（可执行）← core
    codeless kext / dext 或 re-enumerate，不能靠 libusb 解决。
 8. 开发机上**既无 USB 设备也无 root**，所以「跑不起来」不等于「代码错了」；
    离线可验证的部分必须全部覆盖到 mock 测试里。
+9. **CTest 的 `add_test` 里绝不能给参数加引号。** 写
+   `COMMAND tetherkit_tests --test-suite="${_suite}"` 时，CMake 会把引号当作参数
+   内容原样传下去（`ctest -V` 可见传的是 `"--test-suite="foo""`），doctest 匹配不到
+   任何用例 → 跑 0 个用例 → doctest 对零匹配返回退出码 0 → ctest 报 Passed。
+   **整套测试静默失效却全绿**，实际掩盖了 4 个真实失败。
+   正确写法是 `--test-suite=${_suite}`（无引号）。
+10. **给 ctest 用例加「至少跑到一条断言」的保险时，必须用
+   `FAIL_REGULAR_EXPRESSION` 而不是 `PASS_REGULAR_EXPRESSION`。** 后者会
+   **取代**退出码判定（CMake 的文档行为），一旦设上，真实的断言失败反而被忽略 ——
+   等于把上一条刚修好的坑又挖回来。`FAIL_` 是叠加在退出码之上的。
+11. 时间相关的类**不要在构造函数里自己读时钟**。`PeriodicTimer` 原来那样写，
+   导致构造函数读到的时刻比调用方手里的 `now` 略晚，「now + period」反而还没到期，
+   单元测试随机失败且不可复现。改成显式传入计时起点（默认值保留便利写法）。
 
 ---
 

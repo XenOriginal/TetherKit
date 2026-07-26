@@ -482,9 +482,9 @@ Result<std::span<const std::byte>> UsbControlChannel::ReceiveMessage() {
                                     static_cast<std::size_t>(transferred)};
 }
 
-NotificationResult UsbControlChannel::WaitForNotification(std::uint32_t timeout_millis) {
+rndis::NotificationResult UsbControlChannel::WaitForNotification(std::uint32_t timeout_millis) {
   if (device_->InterruptInEndpoint() == 0) {
-    return NotificationResult::kNotSupported;
+    return rndis::NotificationResult::kNotSupported;
   }
 
   int transferred = 0;
@@ -494,18 +494,18 @@ NotificationResult UsbControlChannel::WaitForNotification(std::uint32_t timeout_
       static_cast<int>(notification_buffer_.size()), &transferred, timeout_millis);
 
   if (rc == LIBUSB_ERROR_TIMEOUT) {
-    return NotificationResult::kTimeout;
+    return rndis::NotificationResult::kTimeout;
   }
   if (rc != LIBUSB_SUCCESS) {
     // 中断端点出错不该让整条链路失败 —— Linux 的 host 驱动干脆完全不用它。
     // 降级为「当作超时」，调用方会去轮询控制端点。
     TETHERKIT_DEBUG("中断 IN 传输返回 {}，退化为轮询控制端点", ::libusb_error_name(rc));
-    return NotificationResult::kTimeout;
+    return rndis::NotificationResult::kTimeout;
   }
   if (static_cast<std::uint32_t>(transferred) < rndis::kNotificationBytes) {
     TETHERKIT_DEBUG("中断 IN 只收到 {} 字节（期望 {}），退化为轮询", transferred,
                     rndis::kNotificationBytes);
-    return NotificationResult::kTimeout;
+    return rndis::NotificationResult::kTimeout;
   }
 
   // 通知是两个 LE32：[0] = Notification，[4] = Reserved。
@@ -514,9 +514,9 @@ NotificationResult UsbControlChannel::WaitForNotification(std::uint32_t timeout_
       LoadLe32(notification_buffer_.data() + rndis::kNotificationValueOffset);
   if (notification != rndis::kNotificationResponseAvailable) {
     TETHERKIT_DEBUG("中断 IN 收到未知通知 {:#010x}，忽略", notification);
-    return NotificationResult::kTimeout;
+    return rndis::NotificationResult::kTimeout;
   }
-  return NotificationResult::kResponseAvailable;
+  return rndis::NotificationResult::kResponseAvailable;
 }
 
 }  // namespace tetherkit::usb

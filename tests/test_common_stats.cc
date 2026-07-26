@@ -88,9 +88,19 @@ TEST_CASE("秒表读数单调不减") {
   CHECK(watch.ElapsedMillis() >= 1.0);
 }
 
+TEST_CASE("周期定时器的默认构造仍然是「构造即开始计时」") {
+  PeriodicTimer timer(50 * kNanosPerMilli);
+  // 刚构造完不该到期。
+  CHECK_FALSE(timer.Expired());
+  CHECK(timer.RemainingNanos(MonotonicNanos()) > 0);
+  CHECK(timer.Period() == 50 * kNanosPerMilli);
+}
+
 TEST_CASE("周期定时器按累加期限推进，不随调度延迟漂移") {
   const tetherkit::Nanos now = MonotonicNanos();
-  PeriodicTimer timer(10 * kNanosPerMilli);
+  // 必须把 `now` 作为计时起点显式传进去。若让构造函数自己读时钟，它读到的时刻
+  // 会比这里的 `now` 略晚，于是「now + period」反而还没到期，断言就会随机失败。
+  PeriodicTimer timer(10 * kNanosPerMilli, now);
 
   CHECK_FALSE(timer.Expired(now));
   CHECK(timer.RemainingNanos(now) > 0);
@@ -105,7 +115,7 @@ TEST_CASE("周期定时器按累加期限推进，不随调度延迟漂移") {
 
 TEST_CASE("周期定时器落后超过一个周期时不补发一串触发") {
   const tetherkit::Nanos now = MonotonicNanos();
-  PeriodicTimer timer(10 * kNanosPerMilli);
+  PeriodicTimer timer(10 * kNanosPerMilli, now);
 
   // 线程被挂起 1 秒后才醒来：应该只触发一次，然后对齐到当前时刻之后。
   const tetherkit::Nanos late = now + 1000 * kNanosPerMilli;

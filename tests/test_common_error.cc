@@ -71,14 +71,17 @@ TEST_CASE("libusb 域渲染出 libusb 错误名") {
   CHECK(text.find("LIBUSB_ERROR_ACCESS") != std::string::npos);
 }
 
-TEST_CASE("RNDIS 域把已知状态码翻译成名字") {
-  const Error known = Error::FromRndisStatus(0xC00000BBU, "查询 OID 失败");
-  const std::string known_text = known.ToString();
-  CHECK(known_text.find("RNDIS_STATUS_NOT_SUPPORTED") != std::string::npos);
-
-  const Error unknown = Error::FromRndisStatus(0xDEADBEEFU, "未知状态");
-  const std::string unknown_text = unknown.ToString();
-  CHECK(unknown_text.find("0xdeadbeef") != std::string::npos);
+TEST_CASE("RNDIS 域输出原始状态码数值") {
+  // tk_common **刻意不认识** RNDIS 状态码的符号名 —— 那张表只存在于
+  // rndis/protocol.cc 一处（单一来源，避免两处不一致）。因此 Error::ToString()
+  // 这里只负责输出十六进制数值；符号名由 rndis 层在构造 Error 时拼进上下文串
+  // （见 rndis/messages.cc 的 MakeStatusError）。
+  const Error error = Error::FromRndisStatus(0xC00000BBU, "查询 OID 失败");
+  const std::string text = error.ToString();
+  CHECK(text.find("查询 OID 失败") != std::string::npos);
+  CHECK(text.find("0xc00000bb") != std::string::npos);
+  CHECK(error.Domain() == ErrorDomain::kRndis);
+  CHECK(error.Code() == 0xC00000BB);
 }
 
 TEST_CASE("WithContext 形成外层到内层的原因链") {

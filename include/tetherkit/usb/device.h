@@ -52,7 +52,7 @@
 #include "tetherkit/common/error.h"
 #include "tetherkit/rndis/protocol.h"
 #include "tetherkit/usb/context.h"
-#include "tetherkit/usb/control_channel.h"
+#include "tetherkit/rndis/control_channel.h"
 
 namespace tetherkit::usb {
 
@@ -191,13 +191,13 @@ class Device {
 /// **必须从一个非 libusb 事件线程的专用线程上使用** —— 同步 API
 /// （libusb_control_transfer / libusb_interrupt_transfer）在事件线程上会返回
 /// LIBUSB_ERROR_BUSY（usbi_handling_events 是 TLS 判断）。
-class UsbControlChannel final : public ControlChannel {
+class UsbControlChannel final : public rndis::ControlChannel {
  public:
   explicit UsbControlChannel(Device& device, std::uint32_t timeout_millis);
 
   [[nodiscard]] Status SendMessage(std::span<const std::byte> message) override;
   [[nodiscard]] Result<std::span<const std::byte>> ReceiveMessage() override;
-  [[nodiscard]] NotificationResult WaitForNotification(std::uint32_t timeout_millis) override;
+  [[nodiscard]] rndis::NotificationResult WaitForNotification(std::uint32_t timeout_millis) override;
 
   [[nodiscard]] std::uint32_t TimeoutMillis() const noexcept override { return timeout_millis_; }
 

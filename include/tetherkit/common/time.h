@@ -54,8 +54,15 @@ class Stopwatch {
 /// 只需要一个便宜的「时候到了吗」判断。
 class PeriodicTimer {
  public:
-  explicit PeriodicTimer(Nanos period) noexcept
-      : period_(period), next_deadline_(MonotonicNanos() + period) {}
+  /// @param period 触发周期。
+  /// @param start  计时起点。**显式传入而不是内部读时钟**，这样：
+  ///               ① 单元测试可以注入确定的时间基准（否则构造函数自己读到的
+  ///                  时刻会比调用方手里的 `now` 略晚，导致「now + period」
+  ///                  反而还没到期，测试结果不可复现）；
+  ///               ② 调用方在一个循环里创建多个定时器时能共用同一个时间基准。
+  ///               默认值保留「构造即开始计时」的便利写法。
+  explicit PeriodicTimer(Nanos period, Nanos start = MonotonicNanos()) noexcept
+      : period_(period), next_deadline_(start + period) {}
 
   /// 到期则返回 true 并把下一次期限推进一个周期。
   ///
