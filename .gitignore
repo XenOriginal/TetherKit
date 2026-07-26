@@ -46,3 +46,6 @@ _deps/
 *.pcap
 /benchmark-results/
 build-tsan/
+build-asan/
+build-rel/
+build2/
