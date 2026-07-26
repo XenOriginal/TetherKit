@@ -122,13 +122,14 @@ jobs:
   # 这个项目最大的长期风险是 xnu 的 struct if_fake_request 布局在某次 macOS
   # 更新后变化。跑一次真实的 feth 创建/销毁就能提前发现。
   #
-  # 标成 continue-on-error 的理由：runner 是虚拟化环境，if_fake 在其中的可用性
-  # 不由本项目保证，不该因为跑不起来就把整条流水线判红。它是**信号**不是**门禁**。
+  # 这个 job 是**门禁**而不是信号：ABI 漂移必须直接把流水线判红，否则等同于没查。
+  # 曾经短暂设过 continue-on-error（担心 runner 虚拟化环境跑不起 if_fake），
+  # 实测 macos-14/15/26 连续多轮都能真实建出 feth 对，依据不成立，已去掉。
+  # 将来某个 runner 镜像真的不支持了，这里红一次远比一直假绿要好。
   # ----------------------------------------------------------------------------
   abi-check:
     name: feth 私有 ABI 检查 · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
