@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-14, macos-15, macos-26]
         build_type: [RelWithDebInfo, Release]
 
     steps:
@@ -62,6 +62,39 @@ jobs:
         run: |
           ./build/bin/tetherkit --version
           ./build/bin/tetherkit --list
+
+  # ----------------------------------------------------------------------------
+  # 验证 README 声称的 macOS 13.3 下限。
+  #
+  # macos-13 runner 已下线，没法真的在 13.3 的机器上跑。但 CMakeLists 里担心的
+  # std::to_chars availability 标注是**编译期**按部署目标校验的，所以把
+  # CMAKE_OSX_DEPLOYMENT_TARGET 显式压到 13.3 就能验证这条下限还成不成立。
+  #
+  # ⚠️ 这只证明「能为 13.3 编译」，不证明「在 13.3 上跑得起来」——
+  # 后者需要一台真的跑 13.3 的机器，GitHub 托管 runner 已经给不了了。
+  #
+  # 这里刻意不开 warnings-as-errors：Homebrew 的 libusb 按宿主版本构建，
+  # 压低部署目标必然出现 "building for macOS-13.3, but linking with dylib
+  # which was built for newer version" 的链接告警，属预期噪声而非回归。
+  # ----------------------------------------------------------------------------
+  deployment-target:
+    name: 为 macOS 13.3 编译
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 libusb
+        run: brew install libusb
+
+      - name: Configure & Build
+        run: |
+          cmake -S . -B build-min \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3
+          cmake --build build-min -j"$(sysctl -n hw.ncpu)"
+
+      - name: Test
+        run: ctest --test-dir build-min --output-on-failure
 
   # ----------------------------------------------------------------------------
   # ThreadSanitizer —— 无锁队列与多线程数据路径的正确性靠它兜底。
@@ -99,7 +132,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-14, macos-15, macos-26]
 
     steps:
       - uses: actions/checkout@v5
