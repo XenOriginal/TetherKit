@@ -2,6 +2,7 @@
 
 add_executable(tetherkit main.cc)
 
-target_link_libraries(tetherkit PRIVATE tetherkit_base tk_version tk_common)
+# tk_core PUBLIC 链接了其余全部模块。
+target_link_libraries(tetherkit PRIVATE tetherkit_base tk_version tk_core)
 
 install(TARGETS tetherkit RUNTIME DESTINATION bin)
