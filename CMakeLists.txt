@@ -21,17 +21,25 @@ endif()
 # 选 C++23 的理由（实测于 Apple clang 21 / macOS 26.5）：
 #   * std::expected —— 初始化路径的错误传播主力，避免异常与错误码混用。
 #   * std::byteswap —— RNDIS 线格式是小端，跨端序时需要显式转换。
-# 部署目标必须 >= 13.3：libc++ 的 std::to_chars（std::format 浮点格式化的底层）
-# 带 availability 标注，低于 13.3 会编译失败。
 # ------------------------------------------------------------------------------
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-  set(CMAKE_OSX_DEPLOYMENT_TARGET
-      "13.3"
-      CACHE STRING "最低 macOS 版本（libc++ std::to_chars 要求 >= 13.3）" FORCE)
+# 部署目标：
+#   * 不主动设置，让 CMake 取宿主 macOS 版本 —— 否则会和 Homebrew 的 libusb
+#     （按宿主版本构建）产生 "building for macOS-13.3, but linking with dylib
+#     which was built for newer version" 链接告警。
+#   * 但必须校验下限 13.3：libc++ 的 std::to_chars（std::format 浮点格式化的
+#     底层实现）带 availability 标注，更低的部署目标会直接编译失败。
+set(TETHERKIT_MIN_MACOS_VERSION "13.3")
+
+if(CMAKE_OSX_DEPLOYMENT_TARGET AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS
+                                   TETHERKIT_MIN_MACOS_VERSION)
+  message(
+    FATAL_ERROR
+      "CMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET} 过低，"
+      "至少需要 ${TETHERKIT_MIN_MACOS_VERSION}（libc++ 的 std::to_chars 带 availability 标注）。")
 endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -95,7 +103,12 @@ message(STATUS "")
 message(STATUS "==== TetherKit ${PROJECT_VERSION} 构建配置 ====")
 message(STATUS "  构建类型          : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ 标准          : C++${CMAKE_CXX_STANDARD}")
-message(STATUS "  部署目标          : macOS ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+if(CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(_tk_deploy "macOS ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+else()
+  set(_tk_deploy "宿主默认")
+endif()
+message(STATUS "  部署目标          : ${_tk_deploy}（下限 ${TETHERKIT_MIN_MACOS_VERSION}）")
 message(STATUS "  编译器            : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  libusb            : ${LibUSB_VERSION} (${LibUSB_LIBRARY})")
 message(STATUS "  单元测试          : ${TETHERKIT_BUILD_TESTS}")

@@ -2,6 +2,6 @@
 
 add_executable(tetherkit main.cc)
 
-target_link_libraries(tetherkit PRIVATE tetherkit_base tk_version)
+target_link_libraries(tetherkit PRIVATE tetherkit_base tk_version tk_common)
 
 install(TARGETS tetherkit RUNTIME DESTINATION bin)

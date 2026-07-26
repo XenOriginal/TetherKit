@@ -5,12 +5,26 @@
 #  * 通过 doctest 的 --test-suite 过滤即可按模块运行；
 #  * CTest 侧按 test-suite 注册多个用例，失败定位仍然精确。
 
-add_executable(tetherkit_tests test_main.cc test_version.cc)
+add_executable(
+  tetherkit_tests
+  test_main.cc
+  test_version.cc
+  test_common_byte_order.cc
+  test_common_error.cc
+  test_common_frame_ring.cc
+  test_common_spsc_ring.cc
+  test_common_stats.cc)
 
-target_link_libraries(tetherkit_tests PRIVATE tetherkit_base doctest tk_version)
+target_link_libraries(tetherkit_tests PRIVATE tetherkit_base doctest tk_version tk_common)
 
-# 按 test-suite 注册 CTest 用例，方便 `ctest -R rndis` 之类的过滤。
-set(TETHERKIT_TEST_SUITES version)
+# 按 test-suite 注册 CTest 用例，方便 `ctest -R common` 之类的过滤。
+set(TETHERKIT_TEST_SUITES
+    version
+    common.byte_order
+    common.error
+    common.frame_ring
+    common.spsc_ring
+    common.stats)
 
 foreach(_suite IN LISTS TETHERKIT_TEST_SUITES)
   add_test(NAME "${_suite}" COMMAND tetherkit_tests --test-suite="${_suite}" --no-intro=true)

@@ -8,7 +8,7 @@ Version GetVersion() noexcept {
 }
 
 std::string_view GetVersionString() noexcept {
-  return "TetherKit @TetherKit_VERSION@ (C++@CMAKE_CXX_STANDARD@, macOS @CMAKE_OSX_DEPLOYMENT_TARGET@+)";
+  return "TetherKit @TetherKit_VERSION@ (C++@CMAKE_CXX_STANDARD@, macOS @TETHERKIT_MIN_MACOS_VERSION@+)";
 }
 
 }  // namespace tetherkit

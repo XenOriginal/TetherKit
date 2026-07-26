@@ -29,4 +29,5 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/version.cc.in" "${CMAKE_CURRENT_BINA
 add_library(tk_version STATIC "${CMAKE_CURRENT_BINARY_DIR}/version.cc")
 target_link_libraries(tk_version PUBLIC tetherkit_base)
 
+add_subdirectory(common)
 add_subdirectory(app)
