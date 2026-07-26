@@ -7,7 +7,7 @@ Windows Phone、嵌入式 Linux gadget 等）变成一张 macOS 系统可见的�
 - **网卡侧**：macOS 的 `feth`（`if_fake`）虚拟网卡对 + BPF，直接读写原始以太帧。
 - **无内核代码**：纯用户态 C++23，不需要 kext、不需要 DriverKit、不需要关 SIP。
 
-> ⚠️ **状态**：全部模块已实现，168 个测试用例（6453 条断言）在
+> ⚠️ **状态**：全部模块已实现，169 个测试用例（6458 条断言）在
 > 普通构建与 ThreadSanitizer 构建下均通过。已在一台真实 RNDIS 设备上跑通
 > RNDIS 握手、feth 建对、BPF 挂载与优雅停机；`feth` 私有 ABI 与
 > 「BPF 写入能让对侧 IP 栈收到帧」这个核心前提也已实测确认。
@@ -67,7 +67,33 @@ macOS 内核**没有** RNDIS 驱动。插上开了 USB 网络共享的 Android �
 
 ---
 
-## 构建
+## 安装
+
+```bash
+brew install XiaoMiku01/tap/tetherkit
+```
+
+从源码构建，十几秒装完，`libusb` 会被自动带上。tap 仓库在
+[XiaoMiku01/homebrew-tap](https://github.com/XiaoMiku01/homebrew-tap)。
+
+升级：
+
+```bash
+brew upgrade tetherkit
+```
+
+也可以从 [Releases](https://github.com/XiaoMiku01/TetherKit/releases) 直接下预编译二进制
+（仅 arm64）。但它**没有签名**，浏览器下载后会被 Gatekeeper 隔离，得手动解除：
+
+```bash
+xattr -d com.apple.quarantine tetherkit
+```
+
+介意这一步的话就走上面的 Homebrew，或者按下一节自己构建 —— 本地构建的产物不带隔离属性。
+
+---
+
+## 从源码构建
 
 依赖：macOS 13.3+、Xcode 命令行工具（Apple clang 支持 C++23）、CMake ≥ 3.24、libusb 1.0。
 
@@ -129,15 +155,18 @@ cmake --build build-rel -j
 
 ```bash
 # 先看看设备有没有被识别（**不需要 root**）
-./build/bin/tetherkit --list
+tetherkit --list
 
 # 启动驱动
-sudo ./build/bin/tetherkit
+sudo tetherkit
 
 # 另开一个终端，给新出现的网卡配 IP（RNDIS 设备通常自带 DHCP 服务器）
 sudo ipconfig set feth0 DHCP
 ipconfig getifaddr feth0
 ```
+
+> 下面的命令都按已安装（`tetherkit` 在 PATH 里）来写。从源码构建的话把
+> `tetherkit` 换成 `./build/bin/tetherkit` 即可。
 
 启动成功后程序会打印它创建的网卡名与后续命令。按 `Ctrl-C` 优雅退出
 （会先让设备退出 RNDIS，再销毁网卡）。
