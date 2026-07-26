@@ -93,6 +93,9 @@ void PrintUsage() {
       "\n"
       "性能调优：\n"
       "  --rx-transfers <n>    并发在飞的 bulk IN 传输数，默认 16\n"
+      "  --tx-transfers <n>    并发在飞的 bulk OUT 传输数，默认 4。设备若汇报\n"
+      "                       MaxPacketsPerMessage=1，则每帧都是一次独立 USB\n"
+      "                       传输，调大此值无益；仅对可聚合多包的设备有意义\n"
       "  --rx-transfer-kb <n>  每个 bulk IN 缓冲的 KiB 数，默认 16\n"
       "  --max-transfer-kb <n> 在 INITIALIZE 里宣称的 MaxTransferSize（KiB），\n"
       "                       默认 16。这是让设备聚合多包的唯一手段，是吞吐的\n"
@@ -210,6 +213,11 @@ struct ParsedArguments {
     if (argument == "--rx-transfers") {
       TETHERKIT_ASSIGN_OR_RETURN(const auto text, take_value(i, argument));
       TETHERKIT_ASSIGN_OR_RETURN(parsed.config.data_channel.rx_transfer_count, ParseUint(text));
+      continue;
+    }
+    if (argument == "--tx-transfers") {
+      TETHERKIT_ASSIGN_OR_RETURN(const auto text, take_value(i, argument));
+      TETHERKIT_ASSIGN_OR_RETURN(parsed.config.data_channel.tx_transfer_count, ParseUint(text));
       continue;
     }
     if (argument == "--rx-transfer-kb") {

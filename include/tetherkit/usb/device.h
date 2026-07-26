@@ -43,6 +43,7 @@
 
 #include <libusb.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -189,11 +190,46 @@ class Device {
 /// 基于 libusb 的控制通道实现。
 ///
 /// **必须从一个非 libusb 事件线程的专用线程上使用** —— 同步 API
-/// （libusb_control_transfer / libusb_interrupt_transfer）在事件线程上会返回
-/// LIBUSB_ERROR_BUSY（usbi_handling_events 是 TLS 判断）。
+/// （libusb_control_transfer）在事件线程上会返回 LIBUSB_ERROR_BUSY
+/// （usbi_handling_events 是 TLS 判断）。
+///
+/// ★ 中断通知走**异步**传输，这不是优化而是必须 ★
+///
+///   若 WaitForNotification 改用同步 libusb_interrupt_transfer，
+///   **控制线程会永久卡死**，栈是：
+///       Poll → WaitForNotification → do_sync_bulk_transfer
+///            → sync_transfer_wait_for_completion → handle_events → poll(∞)
+///
+///   原因链：
+///     1. darwin 后端给所有 transfer 打 USBI_TRANSFER_OS_HANDLES_TIMEOUT，
+///        表示「超时交给 IOKit 管，libusb 自己不计时」；于是
+///        libusb_get_next_timeout 跳过它们、返回「无超时」，
+///        sync_transfer_wait_for_completion 里的 poll() 无限期阻塞；
+///     2. 而 IOKit 侧，darwin 的 submit_interrupt_transfer 用的是
+///        **ReadPipeAsync（无超时变体）**，不是 bulk 用的 ReadPipeAsyncTO ——
+///        **中断传输的 timeout 参数根本不被遵守**；
+///     3. 于是端点上没有数据时，这个同步传输永远不会完成。
+///
+///   把 timeout 从 0 改成 1 ms 是**没用的**（第 2 条决定了它对中断端点无效）。
+///   唯一的正确解法是：
+///   提交一个常驻的**异步**中断传输，让它在 libusb 事件线程上完成，
+///   WaitForNotification 只查一个原子标志，永不进入 libusb 的等待路径。
 class UsbControlChannel final : public rndis::ControlChannel {
  public:
-  explicit UsbControlChannel(Device& device, std::uint32_t timeout_millis);
+  UsbControlChannel(Device& device, std::uint32_t timeout_millis);
+
+  UsbControlChannel(const UsbControlChannel&) = delete;
+  UsbControlChannel& operator=(const UsbControlChannel&) = delete;
+  UsbControlChannel(UsbControlChannel&&) = delete;
+  UsbControlChannel& operator=(UsbControlChannel&&) = delete;
+
+  ~UsbControlChannel() override;
+
+  /// 提交常驻的异步中断传输。设备没有中断端点时是空操作。
+  [[nodiscard]] Status StartNotificationListener();
+
+  /// 取消中断传输并等回调回收完毕。**不能从 libusb 事件线程调用。**
+  void StopNotificationListener();
 
   [[nodiscard]] Status SendMessage(std::span<const std::byte> message) override;
   [[nodiscard]] Result<std::span<const std::byte>> ReceiveMessage() override;
@@ -206,6 +242,9 @@ class UsbControlChannel final : public rndis::ControlChannel {
   }
 
  private:
+  static void NotificationCallbackTrampoline(::libusb_transfer* transfer);
+  void OnNotificationComplete() noexcept;
+
   Device* device_;
   std::uint32_t timeout_millis_;
 
@@ -213,6 +252,14 @@ class UsbControlChannel final : public rndis::ControlChannel {
   std::vector<std::byte> response_buffer_;
   /// 中断 IN 的通知缓冲（8 字节）。
   std::vector<std::byte> notification_buffer_;
+
+  /// 常驻的异步中断传输。
+  ::libusb_transfer* notification_transfer_ = nullptr;
+  /// 设备是否通报了「有响应可取」。由事件线程置位，控制线程消费。
+  std::atomic<bool> notification_pending_{false};
+  /// 中断传输是否在飞。用于停机时等待回调回收（避免 use-after-free）。
+  std::atomic<bool> notification_in_flight_{false};
+  std::atomic<bool> notification_stopping_{false};
 };
 
 }  // namespace tetherkit::usb

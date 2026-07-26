@@ -173,8 +173,8 @@ tetherkit（可执行）← core
 
 ### 当前状态
 
-- **代码量**：库与应用 9189 行、测试 3841 行、基准 852 行、文档 1453 行
-- **测试**：15 个 ctest 用例 / 16 个 doctest test-suite，共 166 个用例、6437 条断言，全部通过
+- **代码量**：库与应用 9374 行、测试 3886 行、基准 852 行、文档 1472 行
+- **测试**：16 个 ctest 用例 / 15 个 doctest test-suite，共 168 个用例、6453 条断言，全部通过
 - **构建**：`-Werror` 零告警；ThreadSanitizer 下全绿
 - **可运行**：`--version` / `--help` / `--list` 均正常；非 root 启动给出清晰提示
 - **未验证**：真机联调（开发机无 USB 设备）、需 root 的 feth/BPF 路径
@@ -226,6 +226,25 @@ tetherkit（可执行）← core
 11. 时间相关的类**不要在构造函数里自己读时钟**。`PeriodicTimer` 原来那样写，
    导致构造函数读到的时刻比调用方手里的 `now` 略晚，「now + period」反而还没到期，
    单元测试随机失败且不可复现。改成显式传入计时起点（默认值保留便利写法）。
+12. **⚠️ macOS 上的同步 libusb 中断传输会永久阻塞，timeout 参数根本不被遵守。**
+   一旦踩上，症状是控制线程卡死、统计不再输出、连 SIGTERM 都响应不了、
+   退出时 feth 接口残留。栈长这样：
+   ```
+   Poll → WaitForNotification → do_sync_bulk_transfer
+        → sync_transfer_wait_for_completion → handle_events → poll(∞)
+   ```
+   原因链两层（均可在 libusb 源码里核对）：① darwin 后端给所有 transfer 打
+   `USBI_TRANSFER_OS_HANDLES_TIMEOUT`，于是 `libusb_get_next_timeout` 跳过它们、
+   返回「无超时」，同步等待里的 `poll()` 无限期阻塞；② 而 IOKit 侧 darwin 的
+   `submit_interrupt_transfer` 用的是 **`ReadPipeAsync`（无超时变体）**，
+   不是 bulk 用的 `ReadPipeAsyncTO` —— 所以中断传输的 timeout **压根不生效**。
+   **把 timeout 从 0 改成 1 ms 并不能解决**：第 ② 条决定了它对中断端点自始至终无效。
+   唯一正确解法：提交常驻的**异步**中断传输，让它在事件线程上完成，
+   `WaitForNotification` 只查一个原子标志，永不进入 libusb 的等待路径。
+   → 已如此实现，见 `UsbControlChannel::StartNotificationListener`。
+13. 顺带记住：`timeout = 0` 在 libusb/darwin 上表示**无限等待**，不是「不等待」。
+   想「只探一下」要用非零的最小值（`kProbeOnlyTimeoutMillis`），
+   而且如上所述对中断端点连这个都不管用。
 
 ---
 

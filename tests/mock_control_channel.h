@@ -66,8 +66,11 @@ class MockControlChannel final : public rndis::ControlChannel {
   }
 
   [[nodiscard]] rndis::NotificationResult WaitForNotification(
-      std::uint32_t /*timeout_millis*/) override {
+      std::uint32_t timeout_millis) override {
     ++notification_call_count_;
+    // 记录下来供回归测试断言：**任何一次传 0 都是 bug** ——
+    // libusb 在 darwin 上 timeout=0 表示无限等待，会把控制线程永久卡死。
+    notification_timeouts_.push_back(timeout_millis);
     if (!has_interrupt_endpoint_) {
       return rndis::NotificationResult::kNotSupported;
     }
@@ -161,6 +164,11 @@ class MockControlChannel final : public rndis::ControlChannel {
 
   [[nodiscard]] std::uint32_t ReceiveCallCount() const noexcept { return receive_call_count_; }
 
+  /// 历次 WaitForNotification 收到的超时值。用于断言从不传 0。
+  [[nodiscard]] const std::vector<std::uint32_t>& NotificationTimeouts() const noexcept {
+    return notification_timeouts_;
+  }
+
   [[nodiscard]] std::size_t PendingResponseCount() const noexcept {
     return pending_responses_.size();
   }
@@ -180,6 +188,7 @@ class MockControlChannel final : public rndis::ControlChannel {
   std::uint32_t receive_failure_countdown_ = 0;
   std::uint32_t receive_call_count_ = 0;
   std::uint32_t notification_call_count_ = 0;
+  std::vector<std::uint32_t> notification_timeouts_;
 };
 
 // =============================================================================

@@ -81,6 +81,11 @@ Status Runtime::Start() {
   control_channel_ = std::make_unique<usb::UsbControlChannel>(
       *device_, config_.rndis.control_timeout_millis);
 
+  // 中断通知必须走异步传输，否则控制线程会永久卡死 —— 详见
+  // include/tetherkit/usb/device.h 里 UsbControlChannel 的说明。
+  // 必须在状态机 Start() **之前**启动，因为初始化握手本身就要等通知。
+  TETHERKIT_RETURN_IF_ERROR(control_channel_->StartNotificationListener());
+
   // 让 RNDIS 协商用上真实的端点最大包长（影响 MaxTransferSize 的推导）。
   rndis::StateMachineConfig rndis_config = config_.rndis;
   rndis_config.requested_mtu = config_.mtu;
@@ -253,7 +258,11 @@ void Runtime::Stop() {
     state_machine_->Stop();
     state_machine_.reset();
   }
-  control_channel_.reset();
+  // 先停中断监听（它会等在飞的异步 transfer 回收完），再销毁通道对象。
+  if (control_channel_ != nullptr) {
+    control_channel_->StopNotificationListener();
+    control_channel_.reset();
+  }
 
   // 5. 释放接口并关闭设备句柄。
   device_.reset();

@@ -1,7 +1,10 @@
 #include "tetherkit/usb/device.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <format>
+#include <thread>
 
 #include "tetherkit/common/byte_order.h"
 #include "tetherkit/common/logging.h"
@@ -425,7 +428,135 @@ Status Device::ClearHalt(std::uint8_t endpoint) {
 UsbControlChannel::UsbControlChannel(Device& device, std::uint32_t timeout_millis)
     : device_(&device), timeout_millis_(timeout_millis) {
   response_buffer_.resize(rndis::kControlBufferBytes);
-  notification_buffer_.resize(rndis::kNotificationBytes);
+  // 缓冲取端点实际的 wMaxPacketSize（RNDIS 通知是 8 字节，但别假死这个值）。
+  notification_buffer_.resize(
+      std::max<std::size_t>(rndis::kNotificationBytes, device.InterruptMaxPacketSize()));
+}
+
+UsbControlChannel::~UsbControlChannel() {
+  StopNotificationListener();
+  if (notification_transfer_ != nullptr) {
+    ::libusb_free_transfer(notification_transfer_);
+    notification_transfer_ = nullptr;
+  }
+}
+
+// =============================================================================
+// 异步中断通知监听
+//
+// 详见 device.h 里那段说明：同步中断传输在 macOS 上会永久阻塞，
+// 因为 darwin 用的是 ReadPipeAsync（无超时变体），timeout 参数不被遵守。
+// =============================================================================
+
+Status UsbControlChannel::StartNotificationListener() {
+  if (device_->InterruptInEndpoint() == 0) {
+    TETHERKIT_DEBUG("设备没有中断端点，通知监听跳过（将退化为轮询控制端点）");
+    return Ok();
+  }
+  if (notification_transfer_ != nullptr) {
+    return std::unexpected(Error::Generic("通知监听已启动"));
+  }
+
+  notification_transfer_ = ::libusb_alloc_transfer(0);
+  if (notification_transfer_ == nullptr) {
+    return std::unexpected(Error::Generic("为中断通知分配 libusb transfer 失败"));
+  }
+
+  // timeout 传 0：中断端点上本来就是「有事才来」，无限等待正是我们要的语义。
+  // 这里不会卡住任何线程 —— 完成回调跑在 libusb 事件线程上。
+  ::libusb_fill_interrupt_transfer(
+      notification_transfer_, device_->Handle(), device_->InterruptInEndpoint(),
+      reinterpret_cast<unsigned char*>(notification_buffer_.data()),
+      static_cast<int>(notification_buffer_.size()),
+      &UsbControlChannel::NotificationCallbackTrampoline, this, /*timeout=*/0);
+
+  notification_in_flight_.store(true, std::memory_order_release);
+  const int rc = ::libusb_submit_transfer(notification_transfer_);
+  if (rc != LIBUSB_SUCCESS) {
+    notification_in_flight_.store(false, std::memory_order_release);
+    return std::unexpected(Error::FromLibUsb(rc, "提交中断通知传输失败"));
+  }
+  TETHERKIT_DEBUG("中断通知监听已启动（端点 0x{:02x}）", device_->InterruptInEndpoint());
+  return Ok();
+}
+
+void UsbControlChannel::StopNotificationListener() {
+  if (notification_transfer_ == nullptr) {
+    return;
+  }
+  notification_stopping_.store(true, std::memory_order_release);
+
+  if (notification_in_flight_.load(std::memory_order_acquire)) {
+    const int rc = ::libusb_cancel_transfer(notification_transfer_);
+    if (rc != LIBUSB_SUCCESS && rc != LIBUSB_ERROR_NOT_FOUND) {
+      TETHERKIT_DEBUG("取消中断通知传输返回 {}", ::libusb_error_name(rc));
+    }
+  }
+
+  // 等回调回来。⚠️ 与数据通道同理：**不能从 libusb 事件线程调用本函数**，
+  // 否则就是自己等自己。超时后不释放 transfer（宁可泄漏也不 use-after-free）。
+  constexpr int kMaxWaitMillis = 2000;
+  for (int waited = 0;
+       notification_in_flight_.load(std::memory_order_acquire) && waited < kMaxWaitMillis;
+       ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  if (notification_in_flight_.load(std::memory_order_acquire)) {
+    TETHERKIT_ERROR("等待中断通知传输回收超时，为避免 use-after-free 不释放它");
+    notification_transfer_ = nullptr;  // 故意泄漏
+  }
+}
+
+void UsbControlChannel::NotificationCallbackTrampoline(::libusb_transfer* transfer) {
+  static_cast<UsbControlChannel*>(transfer->user_data)->OnNotificationComplete();
+}
+
+void UsbControlChannel::OnNotificationComplete() noexcept {
+  // 本函数在 libusb 事件线程上执行，只做极轻的工作。
+  const ::libusb_transfer* transfer = notification_transfer_;
+  bool resubmit = true;
+
+  switch (transfer->status) {
+    case LIBUSB_TRANSFER_COMPLETED:
+      if (static_cast<std::uint32_t>(transfer->actual_length) >= rndis::kNotificationBytes) {
+        const std::uint32_t notification =
+            LoadLe32(notification_buffer_.data() + rndis::kNotificationValueOffset);
+        if (notification == rndis::kNotificationResponseAvailable) {
+          notification_pending_.store(true, std::memory_order_release);
+        } else {
+          TETHERKIT_TRACE("中断端点收到未知通知 {:#010x}，忽略", notification);
+        }
+      }
+      break;
+
+    case LIBUSB_TRANSFER_CANCELLED:
+    case LIBUSB_TRANSFER_NO_DEVICE:
+      resubmit = false;
+      break;
+
+    case LIBUSB_TRANSFER_STALL:
+      // 中断端点 STALL：清掉后继续。清不掉就放弃监听，退化为轮询控制端点
+      // （Linux 的 host 驱动本来就完全不用中断端点，所以这不致命）。
+      if (const auto status = device_->ClearHalt(device_->InterruptInEndpoint()); !status) {
+        TETHERKIT_WARN("清除中断端点 halt 失败，改为轮询控制端点：{}",
+                       status.error().ToString());
+        resubmit = false;
+      }
+      break;
+
+    default:
+      TETHERKIT_TRACE("中断通知传输 status={}，继续监听",
+                      static_cast<int>(transfer->status));
+      break;
+  }
+
+  if (notification_stopping_.load(std::memory_order_acquire)) {
+    resubmit = false;
+  }
+  if (resubmit && ::libusb_submit_transfer(notification_transfer_) == LIBUSB_SUCCESS) {
+    return;  // 仍在飞
+  }
+  notification_in_flight_.store(false, std::memory_order_release);
 }
 
 Status UsbControlChannel::SendMessage(std::span<const std::byte> message) {
@@ -483,40 +614,28 @@ Result<std::span<const std::byte>> UsbControlChannel::ReceiveMessage() {
 }
 
 rndis::NotificationResult UsbControlChannel::WaitForNotification(std::uint32_t timeout_millis) {
-  if (device_->InterruptInEndpoint() == 0) {
+  if (device_->InterruptInEndpoint() == 0 || notification_transfer_ == nullptr) {
     return rndis::NotificationResult::kNotSupported;
   }
 
-  int transferred = 0;
-  const int rc = ::libusb_interrupt_transfer(
-      device_->Handle(), device_->InterruptInEndpoint(),
-      reinterpret_cast<unsigned char*>(notification_buffer_.data()),
-      static_cast<int>(notification_buffer_.size()), &transferred, timeout_millis);
-
-  if (rc == LIBUSB_ERROR_TIMEOUT) {
-    return rndis::NotificationResult::kTimeout;
+  // 只查（并消费）由事件线程置位的原子标志。**绝不进入 libusb 的等待路径** ——
+  // 那正是控制线程卡死的成因（详见 device.h 的说明）。
+  if (notification_pending_.exchange(false, std::memory_order_acq_rel)) {
+    return rndis::NotificationResult::kResponseAvailable;
   }
-  if (rc != LIBUSB_SUCCESS) {
-    // 中断端点出错不该让整条链路失败 —— Linux 的 host 驱动干脆完全不用它。
-    // 降级为「当作超时」，调用方会去轮询控制端点。
-    TETHERKIT_DEBUG("中断 IN 传输返回 {}，退化为轮询控制端点", ::libusb_error_name(rc));
-    return rndis::NotificationResult::kTimeout;
-  }
-  if (static_cast<std::uint32_t>(transferred) < rndis::kNotificationBytes) {
-    TETHERKIT_DEBUG("中断 IN 只收到 {} 字节（期望 {}），退化为轮询", transferred,
-                    rndis::kNotificationBytes);
+  if (timeout_millis == 0) {
     return rndis::NotificationResult::kTimeout;
   }
 
-  // 通知是两个 LE32：[0] = Notification，[4] = Reserved。
-  // 注意这**不是** CDC 的 usb_cdc_notification 结构，而是 RNDIS 自有格式。
-  const std::uint32_t notification =
-      LoadLe32(notification_buffer_.data() + rndis::kNotificationValueOffset);
-  if (notification != rndis::kNotificationResponseAvailable) {
-    TETHERKIT_DEBUG("中断 IN 收到未知通知 {:#010x}，忽略", notification);
-    return rndis::NotificationResult::kTimeout;
+  // 需要等一会儿时，用自己的小步睡眠轮询这个标志，而不是让 libusb 去等。
+  // 这样最坏情况只是多等 1 ms，绝不会永久阻塞。
+  for (std::uint32_t waited = 0; waited < timeout_millis; ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (notification_pending_.exchange(false, std::memory_order_acq_rel)) {
+      return rndis::NotificationResult::kResponseAvailable;
+    }
   }
-  return rndis::NotificationResult::kResponseAvailable;
+  return rndis::NotificationResult::kTimeout;
 }
 
 }  // namespace tetherkit::usb

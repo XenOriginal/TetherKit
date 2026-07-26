@@ -7,7 +7,7 @@ Windows Phone、嵌入式 Linux gadget 等）变成一张 macOS 系统可见的�
 - **网卡侧**：macOS 的 `feth`（`if_fake`）虚拟网卡对 + BPF，直接读写原始以太帧。
 - **无内核代码**：纯用户态 C++23，不需要 kext、不需要 DriverKit、不需要关 SIP。
 
-> ⚠️ **状态**：全部模块已实现，166 个测试用例（6437 条断言）在
+> ⚠️ **状态**：全部模块已实现，168 个测试用例（6453 条断言）在
 > 普通构建与 ThreadSanitizer 构建下均通过。但**尚未在真实 RNDIS 设备上联调过**
 > —— 开发机没有任何 USB 设备。待验证清单见 [AGENTS.md](AGENTS.md) 第 6 节。
 

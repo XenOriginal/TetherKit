@@ -29,6 +29,15 @@
 
 namespace tetherkit::rndis {
 
+/// 「只探一下、不要真等」时应传的超时值。
+///
+/// ⚠️ **不能传 0。** libusb 在 darwin 上把 timeout 同时作为 noDataTimeout 与
+/// completionTimeout 传给 IOKit，而 **0 表示无限等待** —— 传 0 会让调用线程
+/// 永久阻塞在 `libusb_wait_for_event` 上，整个控制循环卡死、连停机信号都响应不了。
+/// （详见 AGENTS.md 第 7 节第 12、13 条。）
+/// libusb 的同步 API 没有真正的非阻塞模式，能做到的最短等待就是 1 ms。
+inline constexpr std::uint32_t kProbeOnlyTimeoutMillis = 1;
+
 /// 等待通知的结果。
 enum class NotificationResult : std::uint8_t {
   kResponseAvailable,  ///< 设备明确通知有响应可取。
@@ -71,6 +80,10 @@ class ControlChannel {
   ///     轮询最多 10 次、每次间隔 40 ms。
   /// 而且反过来还存在**某些设备必须先被中断端点读过一次才会在控制端点上作答**。
   /// 所以正确策略是：先等通知，超时后仍然去轮询一次。kTimeout 因此不是错误。
+  ///
+  /// @param timeout_millis 等待上限。**传 0 表示无限等待**（与 libusb 的语义
+  ///        一致）—— 想「只探一下」请传 kProbeOnlyTimeoutMillis，不要传 0。
+  ///        实现应对 0 做防御性钳位，见 UsbControlChannel。
   [[nodiscard]] virtual NotificationResult WaitForNotification(std::uint32_t timeout_millis) = 0;
 
   /// 控制传输的超时（毫秒）。

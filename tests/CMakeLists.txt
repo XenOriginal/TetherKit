@@ -59,6 +59,7 @@ set(TETHERKIT_TEST_SUITES
     rndis.messages
     rndis.packet_codec
     rndis.state_machine
+    rndis.state_machine_timeout
     net.abi
     net.loopback
     net.feth

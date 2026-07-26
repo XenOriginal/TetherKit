@@ -570,3 +570,39 @@ TEST_CASE("MillisUntilNextPoll 在保活周期内返回正值") {
 }
 
 }  // TEST_SUITE("rndis.state_machine")
+
+TEST_SUITE("rndis.state_machine_timeout") {
+
+// ★ 针对一类「mock 测不出来」的挂死缺陷的回归用例 ★
+//
+// 缺陷：Poll() 里写了 WaitForNotification(0)，意图是「不等待、只探一下」，
+//       但 libusb 在 darwin 上把 timeout 同时作为 noDataTimeout 与
+//       completionTimeout 传给 IOKit，**0 表示无限等待** ——
+//       控制循环会永久卡死在 libusb_wait_for_event 上，连 SIGTERM 都响应不了。
+// mock 之所以测不出来，是因为它对任何超时都立即返回。
+// 所以这里改为直接断言「传下去的超时值」本身。
+
+TEST_CASE("绝不给 WaitForNotification 传 0（0 在 darwin 上是无限等待）") {
+  MockControlChannel channel;
+  channel.SetRequestHandler(MakeWellBehavedDevice(kDeviceMac));
+  RecordingObserver observer;
+  // 刻意用把 response_poll_interval_millis 设成 0 的配置 —— 这正是当初
+  // Transact() 里 min(control_timeout, interval*4) 算出 0 的那条路径。
+  auto config = FastConfig();
+  config.response_poll_interval_millis = 0;
+  StateMachine machine(channel, observer, config);
+  REQUIRE(machine.Start().has_value());
+  REQUIRE(machine.Poll().has_value());
+
+  REQUIRE_FALSE(channel.NotificationTimeouts().empty());
+  for (const std::uint32_t timeout : channel.NotificationTimeouts()) {
+    CHECK_MESSAGE(timeout > 0,
+                  "WaitForNotification 收到了 0 —— 在 darwin 上等于无限等待，会卡死控制线程");
+  }
+}
+
+TEST_CASE("kProbeOnlyTimeoutMillis 本身必须非零") {
+  CHECK(kProbeOnlyTimeoutMillis > 0);
+}
+
+}  // TEST_SUITE("rndis.state_machine_timeout")

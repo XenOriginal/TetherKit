@@ -144,8 +144,11 @@ Result<StateMachine::Exchange> StateMachine::Transact(std::span<const std::byte>
   //   * 但也存在「必须先被中断端点读过一次才会在控制端点上作答」的设备；
   //   * 而 Linux 干脆完全忽略中断端点，直接轮询控制端点。
   // 所以：有中断端点就先等一次通知（超时也不算错），然后无论如何都去轮询。
+  // 同样不能为 0（timeout=0 在 darwin 上是无限等待）。注意 response_poll_interval
+  // 可以被配成 0（测试里就是），所以这里必须用 max 兜底。
   const std::uint32_t notification_timeout =
-      std::min(config_.control_timeout_millis, config_.response_poll_interval_millis * 4);
+      std::max(kProbeOnlyTimeoutMillis,
+               std::min(config_.control_timeout_millis, config_.response_poll_interval_millis * 4));
   const NotificationResult notification =
       channel_->WaitForNotification(notification_timeout);
   if (notification == NotificationResult::kResponseAvailable) {
@@ -498,7 +501,12 @@ Status StateMachine::Poll() {
   //
   // 只在有中断通知时才去读控制端点 —— 否则每次 Poll 都要发一次
   // GET_ENCAPSULATED_RESPONSE，而 Apple Silicon 上这是毫秒级开销。
-  if (channel_->WaitForNotification(0) == NotificationResult::kResponseAvailable) {
+  //
+  // ⚠️ 这里**绝不能传 0**：libusb 在 darwin 上 timeout=0 表示无限等待，
+  // 会把控制线程永久卡死。用 kProbeOnlyTimeoutMillis（1 ms）——
+  // Poll 本身每几百毫秒才跑一次，1 ms 的阻塞可以忽略。
+  if (channel_->WaitForNotification(kProbeOnlyTimeoutMillis) ==
+      NotificationResult::kResponseAvailable) {
     std::span<const std::byte> ignored;
     // 最多排 8 条，避免设备疯狂推送时卡在这里。
     for (int i = 0; i < 8; ++i) {
@@ -509,7 +517,8 @@ Status StateMachine::Poll() {
       }
       // PumpOnce 在没有更多消息时返回 false 且不报错，无法区分「空了」和
       // 「处理了一条推送」。用通知状态再判一次。
-      if (channel_->WaitForNotification(0) != NotificationResult::kResponseAvailable) {
+      if (channel_->WaitForNotification(kProbeOnlyTimeoutMillis) !=
+          NotificationResult::kResponseAvailable) {
         break;
       }
     }
