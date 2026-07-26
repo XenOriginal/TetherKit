@@ -1,0 +1,14 @@
+// 由 CMake 从 src/version.cc.in 生成，请勿手工编辑。
+#include "tetherkit/version.h"
+
+namespace tetherkit {
+
+Version GetVersion() noexcept {
+  return Version{@TetherKit_VERSION_MAJOR@, @TetherKit_VERSION_MINOR@, @TetherKit_VERSION_PATCH@};
+}
+
+std::string_view GetVersionString() noexcept {
+  return "TetherKit @TetherKit_VERSION@ (C++@CMAKE_CXX_STANDARD@, macOS @CMAKE_OSX_DEPLOYMENT_TARGET@+)";
+}
+
+}  // namespace tetherkit

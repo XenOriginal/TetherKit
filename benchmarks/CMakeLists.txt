@@ -1,0 +1,10 @@
+# benchmarks —— 性能基准
+#
+# 不引入 google/benchmark：本项目只需要「每帧纳秒数 / pps / Gbps」这三类指标，
+# 自带的轻量 harness（见 benchmarks/harness.h）足够，且能直接输出 Markdown
+# 汇总表写进 docs/BENCHMARKS.md，省掉一层解析。
+
+add_executable(tetherkit_bench bench_main.cc)
+
+target_link_libraries(tetherkit_bench PRIVATE tetherkit_base tk_version)
+target_include_directories(tetherkit_bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

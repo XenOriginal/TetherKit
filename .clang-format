@@ -1,0 +1,57 @@
+# TetherKit 代码格式配置
+# 以 Google 风格为基线，放宽行宽到 100 列以容纳协议常量表与长类型名。
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+
+ColumnLimit: 100
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+AccessModifierOffset: -1
+
+# 指针/引用贴类型：TetherKit 统一写 `Foo* p` 而非 `Foo *p`
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# 大括号：函数与控制流的左括号不换行（Attach）
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+InsertBraces: true
+
+# 构造函数初始化列表每行一个，便于 diff
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+PackConstructorInitializers: NextLine
+
+# 头文件分组：本项目头 > 第三方 > 系统/平台 > 标准库
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"tetherkit/'
+    Priority: 1
+  - Regex: '^<(doctest|libusb)'
+    Priority: 2
+  - Regex: '^<(sys|net|netinet|mach|pthread|IOKit|CoreFoundation)/'
+    Priority: 3
+  - Regex: '^<[a-z_]+\.h>'
+    Priority: 3
+  - Regex: '^<'
+    Priority: 4
+  - Regex: '.*'
+    Priority: 5
+
+# 其它
+AlwaysBreakTemplateDeclarations: Yes
+EmptyLineBeforeAccessModifier: LogicalBlock
+FixNamespaceComments: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+SeparateDefinitionBlocks: Always
+SpacesBeforeTrailingComments: 2
+QualifierAlignment: Left
