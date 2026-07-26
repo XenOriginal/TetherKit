@@ -173,26 +173,119 @@ tetherkit（可执行）← core
 
 ### 当前状态
 
-- **代码量**：库与应用 9374 行、测试 3886 行、基准 852 行、文档 1472 行
+- **代码量**：库与应用 9378 行、测试 3886 行、基准 852 行、文档 1576 行
 - **测试**：16 个 ctest 用例 / 15 个 doctest test-suite，共 168 个用例、6453 条断言，全部通过
 - **构建**：`-Werror` 零告警；ThreadSanitizer 下全绿
 - **可运行**：`--version` / `--help` / `--list` 均正常；非 root 启动给出清晰提示
-- **未验证**：真机联调（开发机无 USB 设备）、需 root 的 feth/BPF 路径
+- **已验证**：USB 侧在真实 RNDIS 设备上跑通（枚举、声明接口、RNDIS 握手），
+  且 USB 这一侧**不需要 root**；feth 私有 ABI、两个私有 BPF ioctl、
+  以及「BPF 写入能让对侧 IP 栈收到帧」这个核心前提都已实测确认。详见第 6 节
+- **未验证**：端到端吞吐（至今未做过任何压测）
 
-## 6. 待验证清单（需要 root 或真实 RNDIS 设备）
+## 6. 验证清单（需要 root 或真实 RNDIS 设备）
 
-这些事项在当前开发机上**无法验证**，实现时按设计文档的结论编码，并在代码里留下
-清晰的 `// 待真机验证:` 注释。
+### 6.1 已验证：USB 侧（**无需 root**）
 
-- [ ] `feth` peer 配对的私有 ABI（`SIOCSDRVSPEC` + `struct if_fake_request`）在 macOS 26 上是否可用。
-- [ ] BPF 挂在 `feth1` 上时的方向语义：`write()` 是否真能让 `feth0` 侧的 IP 栈收到帧；
-      `BIOCSSEESENT=0` 是否正确过滤掉自己写入的帧。
-- [ ] `BIOCSBLEN` 在 macOS 上的实际上限值。
-- [ ] macOS 是否会有内核驱动（AppleUSBCDC 等）抢占 RNDIS 设备的 CDC 通信接口，
-      导致 `libusb_claim_interface` 失败。
-- [ ] 非 root 下 `libusb_open` 是否返回 `LIBUSB_ERROR_ACCESS`。
-- [ ] 真机吞吐（USB 2.0 high-speed 下能否接近 ~300 Mbps 实测上限）。
+已在一台真实 RNDIS 设备上实测。结论按平台事实记录 —— 它们是 macOS/libusb 的行为，
+不依赖具体设备型号。
+
+**① 非 root 下 `libusb_open` 不会返回 `LIBUSB_ERROR_ACCESS`，而是直接成功。**
+
+原先的假设是错的。macOS 打开 USB 设备**不需要 root**（不同于 Linux 的 udev 权限
+模型）。整个 USB 侧 —— 枚举、`libusb_open`、声明接口、收发传输 —— 都能以普通用户
+运行；root **只**为创建 feth 与打开 `/dev/bpf*` 而需要。`--list` 因此明确标注了
+「不需要 root」。
+
+**② ⚠️ `libusb_kernel_driver_active() == 1` 在 macOS 上并不预示 `claim` 会失败。**
+
+这是本节最容易踩错的一条。同一台复合设备上实测：
+
+| 接口签名 | 匹配到的驱动 | `kernel_driver_active` | `libusb_claim_interface` |
+|---|---|---|---|
+| `02/02/ff` RNDIS 通信 | **无** | 0 | ✅ 成功 |
+| `0a/00/00` RNDIS 数据 | `AppleUserECMData`（DriverKit dext） | **1** | ✅ **仍然成功** |
+| `02/02/01` CDC-ACM 控制 | `AppleUSBACMControl`（kext） | 1 | ❌ `LIBUSB_ERROR_ACCESS` |
+| `03/00/00` HID | `AppleUserUSBHostHIDDevice` | 1 | ❌ `LIBUSB_ERROR_ACCESS` |
+| `ff/42/01` 厂商自定义 | 有 | 1 | ❌ `LIBUSB_ERROR_ACCESS` |
+
+`kernel_driver_active` 只反映 IOKit 里有驱动**匹配（matched）**，**不**反映该驱动是否
+**独占持有**接口。DriverKit dext（`com.apple.DriverKit.AppleUserECM`）匹配上 `0a/00/00`
+数据接口后并不独占，claim 照样成功；而 kext（ACM/HID）是真独占。
+
+**所以：不要拿 `kernel_driver_active` 做预检并提前报错**，那会把本来能用的设备误判成
+不可用。唯一可靠的判定是直接 claim 看返回值。又因为 macOS 上没有
+`libusb_detach_kernel_driver`（见第 7 节第 7 条），claim 失败就确实无解。
+
+好消息是 RNDIS **通信**接口（`02/02/ff`）压根没有驱动匹配 —— 印证了「macOS 没有
+RNDIS 内核驱动」这个立项前提。
+
+复现方法：`--list` 看识别结果；接口级细节用 `ioreg -c IOUSBHostInterface -r -l`
+查驱动匹配，再用一段十几行的 libusb 程序逐接口 `claim` 看返回值。
+
+### 6.2 已验证：feth / BPF 侧（**需 root**）
+
+③④⑦ 的复现方法：`sudo TETHERKIT_ROOT_TESTS=1 build/bin/tetherkit_tests --test-suite=net.feth`
+（不设该环境变量时这些用例**跳过而非失败**，跳过原因会打印出来），以及直接
+`sudo build/bin/tetherkit` 跑一次。⑤⑥ 目前**没有**进测试套件，是用一次性探针测的
+（做法写在各条里，⑥ 的缺口已记进 6.3）。
+
+**③ `feth` 配对的私有 ABI 在 macOS 26 上可用。**
+
+`SIOCSDRVSPEC` + `struct if_fake_request` 这条路径完全成立：创建、配对、设 MTU/MAC、
+UP、销毁全流程通过。第 2 节里用 `static_assert` 钉死的那些 ioctl 编号和结构体大小
+是对的 —— 编号算错的话这里会直接失败。
+
+**④ 两个私有 BPF ioctl 在 macOS 26 上都可用。**
+
+- `BIOCSBATCHWRITE`（一次 `write()` 发多帧）→ 生效，运行日志里显示「批量写 已启用」。
+  这坐实了第 7 节第 4b 条的更正：「Darwin BPF 不支持批量写」确实是错的。
+- `BIOCSNOTSTAMP`（关每帧时间戳）→ 生效，日志显示「时间戳 已关闭」。
+
+**⑤ `BIOCSBLEN` 的实际上限是 32 MiB，`debug.bpf_maxbufsize` 不是它的约束值。**
+
+按 `BIOCSBLEN` → `BIOCSETIF` → `BIOCGBLEN` 的顺序实测（即挂上接口后读回**有效**值）：
+
+| 请求 | 挂接口后的有效值 |
+|---|---|
+| 4 KiB / 1 / 4 / 8 / 16 / 32 MiB | 原样生效，一字不改 |
+| 64 MiB、2 GiB | 都被钳到 **32 MiB**（`0x2000000`） |
+
+⚠️ 反直觉的一点：`sysctl debug.bpf_maxbufsize` 在本机报的是 **512 KiB**，
+比实际能设的小 64 倍 —— **别拿这个 sysctl 去推 `BIOCSBLEN` 的上限**，对不上。
+（`debug.bpf_bufsize` 报的 4 KiB 倒确实是默认值。）
+另外 32 MiB 只是「设得进去」，不等于「值得设这么大」：默认的 4 MiB 已经够用。
+
+**⑥ BPF `write()` 确实能让对侧 feth 的 IP 栈收到帧 —— 整个方案的核心前提成立。**
+
+用 ARP 往返闭环验证：系统侧 feth 配 `10.99.99.1`，从**驱动侧** feth 的 BPF 写一个
+问 `10.99.99.1` 的 ARP 请求，随即在同一个 BPF 上读到了系统侧 IP 栈发回的
+**ARP reply**（源 MAC 正是系统侧 feth 的 MAC，宣称拥有该 IP）。
+
+这一个实验同时证明了两件事：
+
+- `write()` 到驱动侧 → 帧穿过 feth 对 → **对侧 IP 栈真的收到并处理了**（否则不会应答）；
+- `BIOCSSEESENT=0` 的回环抑制正确 —— 读回来的只有 input 方向的 reply，
+  没有我们自己刚写进去的那个 request。
+
+⚠️ 但这条路有个前置条件，见第 7 节第 14 条（`BIOCSHDRCMPLT`）。
+
+**⑦ 端到端：RNDIS 握手 → feth 建对 → BPF 挂载 → 优雅停机，全程跑通。**
+
+一次完整启动的关键节点：声明接口拿到 bulk IN/OUT（`wMaxPacketSize` 512）与中断 IN →
+RNDIS 协商完成（版本 1.0、MTU 1500）→ 查到设备 MAC 与链路速率 → 状态机进入
+「数据已就绪」→ feth 对创建并配对、系统侧 MAC 改为设备 MAC → BPF 挂上驱动侧。
+
+`SIGTERM` 后拆除顺序正确，**feth 接口无残留，默认路由全程未被改动**。
+
+### 6.3 待验证
+
+- [ ] 端到端吞吐（USB 2.0 high-speed 下能达到多少）。尚未做过任何压测 ——
+      至今每次运行 RX/TX 都是 0 pps（没配 IP、没造流量）。
+- [ ] `net.feth` 套件目前**没有**覆盖第 6.2 节 ⑦ 的 ARP 往返闭环 ——
+      现有用例只断言「读不回自己写的帧」，不能证明对侧真的收到了。
+      该闭环值得补成一个 root 用例，否则这条结论只活在本文档里。
 - [ ] Android 各版本的 RNDIS quirk（`MaxTransferSize` / `PacketAlignmentFactor` 异常值）。
+      → 手头没有 Android 设备，暂时无法验证。
 
 ---
 
@@ -245,6 +338,15 @@ tetherkit（可执行）← core
 13. 顺带记住：`timeout = 0` 在 libusb/darwin 上表示**无限等待**，不是「不等待」。
    想「只探一下」要用非零的最小值（`kProbeOnlyTimeoutMillis`），
    而且如上所述对中断端点连这个都不管用。
+14. **不设 `BIOCSHDRCMPLT = 1` 的话，往 feth 上的 BPF `write()` 直接返回 `ENXIO`
+   （"Device not configured"），根本不是「帧头被改写」这么轻。** 做过对照实验：
+   同一段代码、同一个接口，唯一差别就是设不设这个 ioctl —— 不设必 `ENXIO`，
+   设了 `write` 立刻成功。
+   `bpf_link.cc` 里原来的注释只说了 `hdrcmplt=0` 会「剥掉前 14 字节重建帧头」，
+   那是 `hdrcmplt` 的**语义**；在 feth 上的**实际后果**是写操作压根不成立
+   （`if_fake` 的输出路径处理不了 `AF_UNSPEC` 那条重建分支）。
+   排查 `ENXIO` 时很容易误以为是接口没起来或名字写错 —— 先查这个 ioctl。
+   顺序上它必须在 `BIOCSETIF` 之前，且批量写（`BIOCSBATCHWRITE`）硬性要求它是 1。
 
 ---
 

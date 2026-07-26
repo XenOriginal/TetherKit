@@ -8,8 +8,10 @@ Windows Phone、嵌入式 Linux gadget 等）变成一张 macOS 系统可见的�
 - **无内核代码**：纯用户态 C++23，不需要 kext、不需要 DriverKit、不需要关 SIP。
 
 > ⚠️ **状态**：全部模块已实现，168 个测试用例（6453 条断言）在
-> 普通构建与 ThreadSanitizer 构建下均通过。但**尚未在真实 RNDIS 设备上联调过**
-> —— 开发机没有任何 USB 设备。待验证清单见 [AGENTS.md](AGENTS.md) 第 6 节。
+> 普通构建与 ThreadSanitizer 构建下均通过。已在一台真实 RNDIS 设备上跑通
+> RNDIS 握手、feth 建对、BPF 挂载与优雅停机；`feth` 私有 ABI 与
+> 「BPF 写入能让对侧 IP 栈收到帧」这个核心前提也已实测确认。
+> **端到端吞吐尚未做过任何压测。** 验证清单见 [AGENTS.md](AGENTS.md) 第 6 节。
 
 ---
 

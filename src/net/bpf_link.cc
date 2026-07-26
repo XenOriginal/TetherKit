@@ -141,6 +141,10 @@ Result<std::unique_ptr<BpfLink>> BpfLink::Open(std::string_view interface_name,
   //
   // hdrcmplt=0 时 bpfwrite 会剥掉前 14 字节重建帧头（源 MAC 被驱动改写）；
   // =1 才走 DLIL_OUTPUT_FLAGS_RAW 原样透传。批量写还硬性要求它是 1。
+  //
+  // ⚠️ 而且在 feth 上后果比「帧头被改写」严重得多：**不设这个 ioctl，write()
+  // 直接返回 ENXIO**（if_fake 的输出路径处理不了 AF_UNSPEC 那条重建分支）。
+  // 对照实验见 AGENTS.md 第 7 节第 14 条。排查 ENXIO 时别去怀疑接口名。
   // ---------------------------------------------------------------------------
   int header_complete = 1;
   TETHERKIT_RETURN_IF_ERROR(
