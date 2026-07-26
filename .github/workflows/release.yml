@@ -127,13 +127,13 @@ jobs:
             --verify-tag \
             "${{ steps.pkg.outputs.name }}"
 
-      - name: 输出 Homebrew formula 需要的字段
-        run: |
-          {
-            echo "### 更新 Homebrew formula"
-            echo ''
-            echo '```ruby'
-            echo "url \"https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz\""
-            echo "sha256 \"${{ steps.src.outputs.sha256 }}\""
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+  # Release 建好之后，把 Homebrew tap 同步到新版本。
+  #
+  # 拆成独立 job 而不是塞进上面的步骤里：tap 推送失败不该让一个已经发好的
+  # Release 显示成失败，而且拆开之后可以单独 workflow_dispatch 补跑。
+  update-tap:
+    needs: release
+    uses: ./.github/workflows/update-tap.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
