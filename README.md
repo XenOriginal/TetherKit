@@ -1,5 +1,7 @@
 # TetherKit
 
+[English](README.en.md) | **简体中文**
+
 **macOS 用户态 RNDIS 驱动** —— 不写内核扩展，把 RNDIS 设备（Android 手机的 USB 网络共享、
 Windows Phone、嵌入式 Linux gadget 等）变成一张 macOS 系统可见的网卡。
 
