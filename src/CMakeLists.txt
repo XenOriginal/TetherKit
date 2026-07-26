@@ -30,4 +30,5 @@ add_library(tk_version STATIC "${CMAKE_CURRENT_BINARY_DIR}/version.cc")
 target_link_libraries(tk_version PUBLIC tetherkit_base)
 
 add_subdirectory(common)
+add_subdirectory(rndis)
 add_subdirectory(app)

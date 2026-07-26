@@ -1,0 +1,229 @@
+#include "tetherkit/rndis/protocol.h"
+
+namespace tetherkit::rndis {
+
+std::string_view MessageTypeName(std::uint32_t message_type) noexcept {
+  switch (static_cast<MessageType>(message_type)) {
+    case MessageType::kPacket:
+      return "REMOTE_NDIS_PACKET_MSG";
+    case MessageType::kInitialize:
+      return "REMOTE_NDIS_INITIALIZE_MSG";
+    case MessageType::kHalt:
+      return "REMOTE_NDIS_HALT_MSG";
+    case MessageType::kQuery:
+      return "REMOTE_NDIS_QUERY_MSG";
+    case MessageType::kSet:
+      return "REMOTE_NDIS_SET_MSG";
+    case MessageType::kReset:
+      return "REMOTE_NDIS_RESET_MSG";
+    case MessageType::kIndicateStatus:
+      return "REMOTE_NDIS_INDICATE_STATUS_MSG";
+    case MessageType::kKeepAlive:
+      return "REMOTE_NDIS_KEEPALIVE_MSG";
+    case MessageType::kInitializeComplete:
+      return "REMOTE_NDIS_INITIALIZE_CMPLT";
+    case MessageType::kQueryComplete:
+      return "REMOTE_NDIS_QUERY_CMPLT";
+    case MessageType::kSetComplete:
+      return "REMOTE_NDIS_SET_CMPLT";
+    case MessageType::kResetComplete:
+      return "REMOTE_NDIS_RESET_CMPLT";
+    case MessageType::kKeepAliveComplete:
+      return "REMOTE_NDIS_KEEPALIVE_CMPLT";
+    case MessageType::kBus:
+      return "RNDIS_MSG_BUS";
+  }
+
+  // CONDIS（面向连接）消息族：本项目不支持，但要能明确报出来。
+  switch (static_cast<CondisMessageType>(message_type & ~kMessageCompletionFlag)) {
+    case CondisMessageType::kCreateVc:
+      return "RNDIS_MSG_MP_CREATE_VC";
+    case CondisMessageType::kDeleteVc:
+      return "RNDIS_MSG_MP_DELETE_VC";
+    case CondisMessageType::kActivateVc:
+      return "RNDIS_MSG_MP_ACTIVATE_VC";
+    case CondisMessageType::kDeactivateVc:
+      return "RNDIS_MSG_MP_DEACTIVATE_VC";
+    case CondisMessageType::kIndicateStatus:
+      return "RNDIS_MSG_CONDIS_INDICATE_STATUS";
+  }
+  return {};
+}
+
+std::string_view StatusName(std::uint32_t status) noexcept {
+  switch (static_cast<StatusCode>(status)) {
+    case StatusCode::kSuccess:
+      return "RNDIS_STATUS_SUCCESS";
+    case StatusCode::kPending:
+      return "RNDIS_STATUS_PENDING";
+    case StatusCode::kNotRecognized:
+      return "RNDIS_STATUS_NOT_RECOGNIZED";
+    case StatusCode::kNotCopied:
+      return "RNDIS_STATUS_NOT_COPIED";
+    case StatusCode::kNotAccepted:
+      return "RNDIS_STATUS_NOT_ACCEPTED";
+    case StatusCode::kCallActive:
+      return "RNDIS_STATUS_CALL_ACTIVE";
+    case StatusCode::kOnline:
+      return "RNDIS_STATUS_ONLINE";
+    case StatusCode::kResetStart:
+      return "RNDIS_STATUS_RESET_START";
+    case StatusCode::kResetEnd:
+      return "RNDIS_STATUS_RESET_END";
+    case StatusCode::kRingStatus:
+      return "RNDIS_STATUS_RING_STATUS";
+    case StatusCode::kClosed:
+      return "RNDIS_STATUS_CLOSED";
+    case StatusCode::kWanLineUp:
+      return "RNDIS_STATUS_WAN_LINE_UP";
+    case StatusCode::kWanLineDown:
+      return "RNDIS_STATUS_WAN_LINE_DOWN";
+    case StatusCode::kWanFragment:
+      return "RNDIS_STATUS_WAN_FRAGMENT";
+    case StatusCode::kMediaConnect:
+      return "RNDIS_STATUS_MEDIA_CONNECT";
+    case StatusCode::kMediaDisconnect:
+      return "RNDIS_STATUS_MEDIA_DISCONNECT";
+    case StatusCode::kHardwareLineUp:
+      return "RNDIS_STATUS_HARDWARE_LINE_UP";
+    case StatusCode::kHardwareLineDown:
+      return "RNDIS_STATUS_HARDWARE_LINE_DOWN";
+    case StatusCode::kInterfaceUp:
+      return "RNDIS_STATUS_INTERFACE_UP";
+    case StatusCode::kInterfaceDown:
+      return "RNDIS_STATUS_INTERFACE_DOWN";
+    case StatusCode::kMediaBusy:
+      return "RNDIS_STATUS_MEDIA_BUSY";
+    case StatusCode::kMediaSpecificIndication:
+      return "RNDIS_STATUS_MEDIA_SPECIFIC_INDICATION";
+    case StatusCode::kLinkSpeedChange:
+      return "RNDIS_STATUS_LINK_SPEED_CHANGE";
+    case StatusCode::kNetworkChange:
+      return "RNDIS_STATUS_NETWORK_CHANGE";
+    case StatusCode::kBufferOverflow:
+      return "RNDIS_STATUS_BUFFER_OVERFLOW";
+    case StatusCode::kNotResettable:
+      return "RNDIS_STATUS_NOT_RESETTABLE";
+    case StatusCode::kSoftErrors:
+      return "RNDIS_STATUS_SOFT_ERRORS";
+    case StatusCode::kHardErrors:
+      return "RNDIS_STATUS_HARD_ERRORS";
+    case StatusCode::kFailure:
+      return "RNDIS_STATUS_FAILURE";
+    case StatusCode::kResources:
+      return "RNDIS_STATUS_RESOURCES";
+    case StatusCode::kNotSupported:
+      return "RNDIS_STATUS_NOT_SUPPORTED";
+    case StatusCode::kClosing:
+      return "RNDIS_STATUS_CLOSING";
+    case StatusCode::kBadVersion:
+      return "RNDIS_STATUS_BAD_VERSION";
+    case StatusCode::kBadCharacteristics:
+      return "RNDIS_STATUS_BAD_CHARACTERISTICS";
+    case StatusCode::kAdapterNotFound:
+      return "RNDIS_STATUS_ADAPTER_NOT_FOUND";
+    case StatusCode::kOpenFailed:
+      return "RNDIS_STATUS_OPEN_FAILED";
+    case StatusCode::kDeviceFailed:
+      return "RNDIS_STATUS_DEVICE_FAILED";
+    case StatusCode::kMulticastFull:
+      return "RNDIS_STATUS_MULTICAST_FULL";
+    case StatusCode::kMulticastExists:
+      return "RNDIS_STATUS_MULTICAST_EXISTS";
+    case StatusCode::kMulticastNotFound:
+      return "RNDIS_STATUS_MULTICAST_NOT_FOUND";
+    case StatusCode::kRequestAborted:
+      return "RNDIS_STATUS_REQUEST_ABORTED";
+    case StatusCode::kResetInProgress:
+      return "RNDIS_STATUS_RESET_IN_PROGRESS";
+    case StatusCode::kClosingIndicating:
+      return "RNDIS_STATUS_CLOSING_INDICATING";
+    case StatusCode::kInvalidPacket:
+      return "RNDIS_STATUS_INVALID_PACKET";
+    case StatusCode::kOpenListFull:
+      return "RNDIS_STATUS_OPEN_LIST_FULL";
+    case StatusCode::kAdapterNotReady:
+      return "RNDIS_STATUS_ADAPTER_NOT_READY";
+    case StatusCode::kAdapterNotOpen:
+      return "RNDIS_STATUS_ADAPTER_NOT_OPEN";
+    case StatusCode::kNotIndicating:
+      return "RNDIS_STATUS_NOT_INDICATING";
+    case StatusCode::kInvalidLength:
+      return "RNDIS_STATUS_INVALID_LENGTH";
+    case StatusCode::kInvalidData:
+      return "RNDIS_STATUS_INVALID_DATA";
+    case StatusCode::kBufferTooShort:
+      return "RNDIS_STATUS_BUFFER_TOO_SHORT";
+    case StatusCode::kInvalidOid:
+      return "RNDIS_STATUS_INVALID_OID";
+    case StatusCode::kAdapterRemoved:
+      return "RNDIS_STATUS_ADAPTER_REMOVED";
+    case StatusCode::kUnsupportedMedia:
+      return "RNDIS_STATUS_UNSUPPORTED_MEDIA";
+    case StatusCode::kGroupAddressInUse:
+      return "RNDIS_STATUS_GROUP_ADDRESS_IN_USE";
+    case StatusCode::kNoCable:
+      return "RNDIS_STATUS_NO_CABLE";
+    case StatusCode::kTokenRingOpenError:
+      return "RNDIS_STATUS_TOKEN_RING_OPEN_ERROR";
+  }
+  return {};
+}
+
+std::string_view OidName(std::uint32_t oid) noexcept {
+  switch (static_cast<Oid>(oid)) {
+    case Oid::kGenSupportedList:
+      return "OID_GEN_SUPPORTED_LIST";
+    case Oid::kGenHardwareStatus:
+      return "OID_GEN_HARDWARE_STATUS";
+    case Oid::kGenMediaSupported:
+      return "OID_GEN_MEDIA_SUPPORTED";
+    case Oid::kGenMediaInUse:
+      return "OID_GEN_MEDIA_IN_USE";
+    case Oid::kGenMaximumFrameSize:
+      return "OID_GEN_MAXIMUM_FRAME_SIZE";
+    case Oid::kGenLinkSpeed:
+      return "OID_GEN_LINK_SPEED";
+    case Oid::kGenTransmitBlockSize:
+      return "OID_GEN_TRANSMIT_BLOCK_SIZE";
+    case Oid::kGenReceiveBlockSize:
+      return "OID_GEN_RECEIVE_BLOCK_SIZE";
+    case Oid::kGenVendorId:
+      return "OID_GEN_VENDOR_ID";
+    case Oid::kGenVendorDescription:
+      return "OID_GEN_VENDOR_DESCRIPTION";
+    case Oid::kGenCurrentPacketFilter:
+      return "OID_GEN_CURRENT_PACKET_FILTER";
+    case Oid::kGenMaximumTotalSize:
+      return "OID_GEN_MAXIMUM_TOTAL_SIZE";
+    case Oid::kGenMacOptions:
+      return "OID_GEN_MAC_OPTIONS";
+    case Oid::kGenMediaConnectStatus:
+      return "OID_GEN_MEDIA_CONNECT_STATUS";
+    case Oid::kGenPhysicalMedium:
+      return "OID_GEN_PHYSICAL_MEDIUM";
+    case Oid::kGenXmitOk:
+      return "OID_GEN_XMIT_OK";
+    case Oid::kGenRcvOk:
+      return "OID_GEN_RCV_OK";
+    case Oid::kGenXmitError:
+      return "OID_GEN_XMIT_ERROR";
+    case Oid::kGenRcvError:
+      return "OID_GEN_RCV_ERROR";
+    case Oid::kGenRcvNoBuffer:
+      return "OID_GEN_RCV_NO_BUFFER";
+    case Oid::kEthernetPermanentAddress:
+      return "OID_802_3_PERMANENT_ADDRESS";
+    case Oid::kEthernetCurrentAddress:
+      return "OID_802_3_CURRENT_ADDRESS";
+    case Oid::kEthernetMulticastList:
+      return "OID_802_3_MULTICAST_LIST";
+    case Oid::kEthernetMaximumListSize:
+      return "OID_802_3_MAXIMUM_LIST_SIZE";
+    case Oid::kEthernetMacOptions:
+      return "OID_802_3_MAC_OPTIONS";
+  }
+  return {};
+}
+
+}  // namespace tetherkit::rndis

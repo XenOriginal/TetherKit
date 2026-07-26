@@ -3,7 +3,9 @@
 # 取舍说明：
 #  * 本项目是与内核 ABI / USB 线格式打交道的底层驱动，必然出现大量 reinterpret_cast、
 #    C 风格数组、位运算与魔数常量，因此关掉一批对系统编程不适用的检查。
-#  * 数据路径要求零分配、无虚函数开销，因此保留 performance-* 全组。
+#  * 数据路径要求零分配、无虚函数开销，因此保留 performance-* 组，但关掉
+#    performance-enum-size —— 本项目的协议枚举底层类型**必须**精确等于线格式
+#    的字段宽度（RNDIS 全是 LE32），按检查建议缩小会直接写坏线格式。
 #  * 并发正确性是本项目的核心风险，因此保留 concurrency-* 与 bugprone-* 全组。
 ---
 Checks: >
@@ -32,6 +34,7 @@ Checks: >
   -cppcoreguidelines-pro-type-union-access,
   -cppcoreguidelines-pro-type-vararg,
   -misc-include-cleaner,
+  -performance-enum-size,
   -misc-non-private-member-variables-in-classes,
   -misc-no-recursion,
   -modernize-avoid-c-arrays,

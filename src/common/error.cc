@@ -2,46 +2,24 @@
 
 #include <libusb.h>
 
+#include <array>
 #include <cstring>
 #include <format>
 
 namespace tetherkit {
 namespace {
 
-/// 把 RNDIS_STATUS_* 翻译成名字。
+/// 线程安全的 strerror。
 ///
-/// 这里只覆盖 host 侧真正会收到的状态码；未知值回落到十六进制输出。
-/// 数值定义与 include/tetherkit/rndis/protocol.h 保持一致，此处刻意不 include
-/// rndis 头文件 —— tk_common 不允许依赖上层模块。
-std::string_view RndisStatusName(std::uint32_t status) {
-  switch (status) {
-    case 0x00000000U:
-      return "RNDIS_STATUS_SUCCESS";
-    case 0x00000103U:
-      return "RNDIS_STATUS_PENDING";
-    case 0x4001000BU:
-      return "RNDIS_STATUS_MEDIA_CONNECT";
-    case 0x4001000CU:
-      return "RNDIS_STATUS_MEDIA_DISCONNECT";
-    case 0x40010012U:
-      return "RNDIS_STATUS_LINK_SPEED_CHANGE";
-    case 0x80000005U:
-      return "RNDIS_STATUS_BUFFER_TOO_SHORT";
-    case 0xC0000001U:
-      return "RNDIS_STATUS_FAILURE";
-    case 0xC0000010U:
-      return "RNDIS_STATUS_INVALID_LENGTH";
-    case 0xC000000DU:
-      return "RNDIS_STATUS_INVALID_DATA";
-    case 0xC00000BBU:
-      return "RNDIS_STATUS_NOT_SUPPORTED";
-    case 0xC000009AU:
-      return "RNDIS_STATUS_RESOURCES";
-    case 0xC0010015U:
-      return "RNDIS_STATUS_INVALID_OID";
-    default:
-      return {};
+/// 不能用 std::strerror：它返回指向静态缓冲的指针，多线程同时调用会互相覆盖
+/// （clang-tidy 的 concurrency-mt-unsafe 就在提示这点）。
+std::string SafeStrerror(int err) {
+  std::array<char, 128> buffer{};
+  // Darwin 提供 XSI 版 strerror_r，返回 int：0 成功，ERANGE 表示缓冲太小。
+  if (::strerror_r(err, buffer.data(), buffer.size()) != 0) {
+    return std::format("errno {}", err);
   }
+  return buffer.data();
 }
 
 }  // namespace
@@ -53,7 +31,7 @@ std::string Error::ToString() const {
 
     case ErrorDomain::kErrno: {
       const int err = static_cast<int>(code_);
-      return std::format("{} [errno: {}({})]", context_, std::strerror(err), err);
+      return std::format("{} [errno: {}({})]", context_, SafeStrerror(err), err);
     }
 
     case ErrorDomain::kLibUsb: {
@@ -62,12 +40,11 @@ std::string Error::ToString() const {
     }
 
     case ErrorDomain::kRndis: {
-      const auto status = static_cast<std::uint32_t>(code_);
-      const std::string_view name = RndisStatusName(status);
-      if (name.empty()) {
-        return std::format("{} [RNDIS_STATUS: {:#010x}]", context_, status);
-      }
-      return std::format("{} [RNDIS_STATUS: {}({:#010x})]", context_, name, status);
+      // RNDIS_STATUS_* 到名字的映射只存在于 tk_rndis（rndis/protocol.cc），
+      // tk_common 不允许依赖上层模块，因此这里只输出原始数值 ——
+      // 状态码的符号名由 rndis 层在构造 Error 时拼进 context 串。
+      return std::format("{} [RNDIS_STATUS: {:#010x}]", context_,
+                         static_cast<std::uint32_t>(code_));
     }
   }
   return context_;
