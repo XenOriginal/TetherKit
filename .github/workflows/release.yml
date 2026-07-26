@@ -1,0 +1,139 @@
+# Release —— 推 v* tag 即自动发版
+#
+#   git tag -a v0.2.0 -m "TetherKit 0.2.0" && git push origin v0.2.0
+#
+# 本工作流自带构建与测试，不依赖 CI 工作流的结果：发版这条路径必须自足，
+# 否则「CI 绿了但发版时代码已经变了」这种偏差无法察觉。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# 创建 Release、上传附件需要写权限。
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布 ${{ github.ref_name }}
+    runs-on: macos-26
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # tag 与 CMakeLists 的 VERSION 必须一致，否则 `tetherkit --version`
+      # 会和 Release / Homebrew 上的版本号对不上。发版前就拦住。
+      - name: 校验 tag 与 CMakeLists 版本号一致
+        run: |
+          tag_ver="${GITHUB_REF_NAME#v}"
+          cmake_ver=$(grep -E '^[[:space:]]+VERSION[[:space:]]+[0-9]' CMakeLists.txt \
+                      | head -1 | awk '{print $2}')
+          echo "tag=${tag_ver}  CMakeLists.txt=${cmake_ver}"
+          if [ "$tag_ver" != "$cmake_ver" ]; then
+            echo "::error::tag (${tag_ver}) 与 CMakeLists.txt 的 VERSION (${cmake_ver}) 不一致"
+            exit 1
+          fi
+
+      - name: 安装 libusb
+        run: brew install libusb
+
+      - name: 构建并测试
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTETHERKIT_WARNINGS_AS_ERRORS=ON
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+          ctest --test-dir build --output-on-failure
+
+      - name: 打包二进制
+        id: pkg
+        run: |
+          name="tetherkit-${GITHUB_REF_NAME}-macos-arm64.tar.gz"
+          tar -C build/bin -czf "$name" tetherkit
+          {
+            echo "name=${name}"
+            echo "sha256=$(shasum -a 256 "$name" | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+
+      # 这个 sha256 就是 Homebrew formula 里要填的那个，直接写进 Release 说明，
+      # 更新 tap 时复制粘贴即可，不用本地再算一遍。
+      - name: 计算源码 tarball 的 sha256
+        id: src
+        run: |
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          # tag 刚推上来，GitHub 生成归档可能有几秒延迟，重试几次。
+          for i in 1 2 3 4 5; do
+            if curl -fsSL "$url" -o src.tar.gz; then break; fi
+            echo "第 ${i} 次未取到源码归档，5 秒后重试…"
+            sleep 5
+          done
+          test -s src.tar.gz || { echo "::error::拿不到源码归档 ${url}"; exit 1; }
+          echo "sha256=$(shasum -a 256 src.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      # 用引号 heredoc 防止 shell 展开；${{ }} 是 Actions 在 shell 之前就替换掉的，
+      # 因此依然能取到上面几步的输出。
+      - name: 组装 Release 说明
+        run: |
+          cat > notes.md <<'EOF'
+          ## 安装
+
+          推荐走 Homebrew（源码构建，无 Gatekeeper 问题）：
+
+          ```bash
+          brew install XiaoMiku01/tap/tetherkit
+          ```
+
+          ## 运行
+
+          ```bash
+          tetherkit --list          # 列出设备，不需要 root
+          sudo tetherkit            # 启动驱动，需要 root
+          ```
+
+          ## 环境要求
+
+          - macOS 13.3+（Apple Silicon 与 Intel 均可，附件二进制仅 arm64）
+          - 运行期依赖 libusb：`brew install libusb`
+
+          ## 附件说明
+
+          附带的 `tetherkit-*-macos-arm64.tar.gz` 是**未签名**二进制，从浏览器下载后
+          会被 Gatekeeper 隔离，需要手动解除：
+
+          ```bash
+          xattr -d com.apple.quarantine tetherkit
+          ```
+
+          介意的话请用上面的 Homebrew 方式，或自行从源码构建。
+
+          ## 校验和
+
+          | 文件 | SHA-256 |
+          |---|---|
+          | 源码 tarball（Homebrew formula 用） | `${{ steps.src.outputs.sha256 }}` |
+          | `${{ steps.pkg.outputs.name }}` | `${{ steps.pkg.outputs.sha256 }}` |
+          EOF
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "TetherKit ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --generate-notes \
+            --verify-tag \
+            "${{ steps.pkg.outputs.name }}"
+
+      - name: 输出 Homebrew formula 需要的字段
+        run: |
+          {
+            echo "### 更新 Homebrew formula"
+            echo ''
+            echo '```ruby'
+            echo "url \"https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz\""
+            echo "sha256 \"${{ steps.src.outputs.sha256 }}\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

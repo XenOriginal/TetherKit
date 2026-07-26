@@ -118,5 +118,19 @@ jobs:
 
       - name: 以 root 跑 feth/BPF 用例
         run: |
+          # 用 -V 而不是 --output-on-failure：这是个取证 job，通过时的输出才是证据。
           sudo env TETHERKIT_ROOT_TESTS=1 \
-            ctest --test-dir build --output-on-failure -R 'net\.'
+            ctest --test-dir build -V -R 'net\.' 2>&1 | tee abi.log
+
+          # ⚠️ 关键：root 用例在条件不满足时是「跳过而非失败」，跳过了 ctest 照样绿。
+          # 不加这道检查，这个 job 可能长期什么都没验证却一直显示通过。
+          if grep -q "需要 root 且需设置" abi.log; then
+            echo "::error::feth 用例被跳过了，本次 ABI 检查没有真正执行"
+            exit 1
+          fi
+          # 正面确认：真的建出了 feth 对。
+          if ! grep -q "创建了 feth" abi.log; then
+            echo "::error::日志里没有 feth 创建记录，无法确认私有 ABI 仍然可用"
+            exit 1
+          fi
+          echo "✓ 已确认真实创建 feth：$(grep -m1 '创建了 feth' abi.log)"
