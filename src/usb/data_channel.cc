@@ -317,7 +317,7 @@ Result<std::uint32_t> UsbDataChannel::SendFrames(std::span<const FrameView> fram
     while (total_sent + appended < frames.size()) {
       const FrameView& frame = frames[total_sent + appended];
       if (frame.length < kMinEthernetFrameBytes) [[unlikely]] {
-        tx_counters_.AddDroppedMalformed();
+        // 非法短帧：跳过。计数由桥接层负责（它才是 TX 计数器的唯一写者）。
         ++appended;
         continue;
       }
@@ -329,9 +329,8 @@ Result<std::uint32_t> UsbDataChannel::SendFrames(std::span<const FrameView> fram
 
     if (writer.Empty()) {
       // 一帧都没装进去。可能是单帧超过了设备的 MaxTransferSize —— 丢弃它并前进，
-      // 否则会死循环。
+      // 否则会死循环。（丢弃的计数由桥接层从「返回值 < 请求数」推出。）
       if (total_sent < frames.size()) {
-        tx_counters_.AddDroppedOversize();
         ++total_sent;
       }
       if (!tx_free_slots_->TryPush(slot_index)) {
@@ -358,11 +357,14 @@ Result<std::uint32_t> UsbDataChannel::SendFrames(std::span<const FrameView> fram
       if (!tx_free_slots_->TryPush(slot_index)) {
         TETHERKIT_ERROR("归还 TX 槽位 {} 失败（这不应该发生）", slot_index);
       }
-      tx_counters_.AddIoError();
+      async_send_errors_.fetch_add(1, std::memory_order_relaxed);
       return std::unexpected(Error::FromLibUsb(rc, "提交 bulk OUT 传输失败"));
     }
 
-    tx_counters_.AddBatch(message_count, payload_bytes);
+    // 帧数与字节数由**桥接层**统计（它是 TX 计数器的唯一写者）。这里只记
+    // 供诊断用的聚合效果。
+    TETHERKIT_TRACE("bulk OUT 提交 {} 帧 / {} 字节净荷 / {} 字节传输", message_count,
+                    payload_bytes, transfer_bytes);
     total_sent += appended;
   }
 
@@ -381,7 +383,7 @@ void UsbDataChannel::OnSendComplete(Slot& slot) noexcept {
       break;
 
     case LIBUSB_TRANSFER_STALL:
-      tx_counters_.AddIoError();
+      async_send_errors_.fetch_add(1, std::memory_order_relaxed);
       TETHERKIT_WARN("bulk OUT 端点 STALL，尝试清除 halt");
       if (const auto status = device_->ClearHalt(device_->BulkOutEndpoint()); !status) {
         TETHERKIT_ERROR("清除 bulk OUT 的 halt 失败：{}", status.error().ToString());
@@ -393,7 +395,7 @@ void UsbDataChannel::OnSendComplete(Slot& slot) noexcept {
       break;
 
     default:
-      tx_counters_.AddIoError();
+      async_send_errors_.fetch_add(1, std::memory_order_relaxed);
       TETHERKIT_WARN("bulk OUT 传输失败：status={}", static_cast<int>(slot.transfer->status));
       break;
   }

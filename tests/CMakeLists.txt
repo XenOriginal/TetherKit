@@ -17,11 +17,13 @@ add_executable(
   test_rndis_messages.cc
   test_rndis_packet_codec.cc
   test_rndis_state_machine.cc
-  test_net_link.cc)
+  test_net_link.cc
+  test_core_bridge.cc)
 
 # tk_rndis / tk_net 都 PUBLIC 链接了 tk_common，无需重复列出（否则链接器报
 # "ignoring duplicate libraries"）。
-target_link_libraries(tetherkit_tests PRIVATE tetherkit_base doctest tk_version tk_rndis tk_net)
+# tk_core PUBLIC 链接了 tk_common/tk_rndis/tk_net/tk_usb，列它一个就够。
+target_link_libraries(tetherkit_tests PRIVATE tetherkit_base doctest tk_version tk_core)
 target_include_directories(tetherkit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ------------------------------------------------------------------------------
@@ -59,7 +61,8 @@ set(TETHERKIT_TEST_SUITES
     rndis.state_machine
     net.abi
     net.loopback
-    net.feth)
+    net.feth
+    core.bridge)
 
 foreach(_suite IN LISTS TETHERKIT_TEST_SUITES)
   # 注意：--test-suite= 后面**不要**加引号，见上方说明。

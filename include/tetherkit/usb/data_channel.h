@@ -131,6 +131,16 @@ class DataChannel {
 
   /// 单次传输能容纳的最大字节数（TX 方向）。
   [[nodiscard]] virtual std::uint32_t MaxTransferBytes() const noexcept = 0;
+
+  /// 异步发送完成回调里累计的 I/O 错误数（STALL、传输失败等）。
+  ///
+  /// 为什么要单独开这个接口，而不是让数据通道直接写桥接层的 TX 计数器：
+  /// DirectionCounters 的契约是「**只允许一个线程**调用 Add*」（它用 relaxed
+  /// load+store 而非 fetch_add，正是靠单写者才安全）。而 TX 方向有两个写者 ——
+  /// 提交侧在 TX 抽取线程、错误侧在 libusb 事件线程。硬塞进同一个计数器就破坏了
+  /// 这个不变式（TSan 也会报）。
+  /// 因此拆成两份各自单写的计数，由 Bridge::Snapshot() 在**读取时**合并。
+  [[nodiscard]] virtual std::uint64_t AsyncSendErrors() const noexcept = 0;
 };
 
 /// 基于 libusb 异步 API 的数据通道实现。
@@ -161,8 +171,9 @@ class UsbDataChannel final : public DataChannel {
     return tx_transfer_bytes_;
   }
 
-  /// TX 方向的统计计数器，由桥接层读取。
-  [[nodiscard]] DirectionCounters& TxCounters() noexcept { return tx_counters_; }
+  [[nodiscard]] std::uint64_t AsyncSendErrors() const noexcept override {
+    return async_send_errors_.load(std::memory_order_relaxed);
+  }
 
   /// 累计因 RNDIS 消息畸形而丢弃的传输数，用于诊断设备 bug。
   [[nodiscard]] std::uint64_t MalformedTransfers() const noexcept {
@@ -217,7 +228,10 @@ class UsbDataChannel final : public DataChannel {
   /// 接收目标。StartReceiving 之后非空。
   FrameRing* rx_ring_ = nullptr;
   DirectionCounters* rx_counters_ = nullptr;
-  DirectionCounters tx_counters_;
+
+  /// 异步发送完成回调里累计的 I/O 错误。**只由 libusb 事件线程递增**，
+  /// 与桥接层的 TX 计数器分开，见 AsyncSendErrors() 的说明。
+  std::atomic<std::uint64_t> async_send_errors_{0};
 
   /// 在飞传输计数。回调递减，Shutdown 等它归零。
   std::atomic<std::uint32_t> outstanding_{0};
