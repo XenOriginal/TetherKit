@@ -28,6 +28,7 @@ set(TETHERKIT_TEST_SUITES
     common.byte_order
     common.error
     common.frame_ring
+    common.frame_ring_batch
     common.spsc_ring
     common.stats
     rndis.messages

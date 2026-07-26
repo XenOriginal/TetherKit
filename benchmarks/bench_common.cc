@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <format>
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -156,8 +157,13 @@ std::uint64_t BenchFrameRingRoundTrip(std::uint64_t iterations, std::uint32_t fr
 }
 
 /// 跨线程帧搬运：RX 路径（libusb 回调线程 → BPF 写线程）的真实模型。
-std::uint64_t BenchFrameRingCrossThread(std::uint64_t iterations, std::uint32_t frame_bytes) {
-  FrameRing ring(2048, kMaxEthernetFrameBytes);
+///
+/// `batch_size` = 1 时等价于逐帧发布（每帧一次 release store，写位置所在缓存行
+/// 每帧跨核弹一次）；> 1 时用 BatchWrite / BatchRead 把发布摊薄。
+/// 这一组对比是整个数据路径设计里收益最高的单点优化的直接证据。
+std::uint64_t BenchFrameRingCrossThread(std::uint64_t iterations, std::uint32_t frame_bytes,
+                                       std::uint32_t batch_size) {
+  FrameRing ring(4096, kMaxEthernetFrameBytes);
   std::atomic<bool> start{false};
 
   std::thread producer([&] {
@@ -167,27 +173,34 @@ std::uint64_t BenchFrameRingCrossThread(std::uint64_t iterations, std::uint32_t 
     }
     std::uint64_t sent = 0;
     while (sent < iterations) {
-      const std::span<std::byte> dst = ring.BeginWrite();
-      if (dst.empty()) {
-        continue;
+      auto batch = ring.BeginBatchWrite();
+      for (std::uint32_t i = 0; i < batch_size && sent < iterations; ++i) {
+        const std::span<std::byte> dst = batch.Begin();
+        if (dst.empty()) {
+          break;
+        }
+        std::memcpy(dst.data(), source.data(), frame_bytes);
+        batch.Commit(frame_bytes);
+        ++sent;
       }
-      std::memcpy(dst.data(), source.data(), frame_bytes);
-      ring.CommitWrite(frame_bytes);
-      ++sent;
+      // batch 析构 → 一次 PublishWrite(n)
     }
   });
 
   start.store(true, std::memory_order_release);
   std::uint64_t received = 0;
   while (received < iterations) {
-    const FrameView view = ring.BeginRead();
-    if (view.Empty()) {
-      continue;
+    auto batch = ring.BeginBatchRead();
+    for (std::uint32_t i = 0; i < batch_size && received < iterations; ++i) {
+      const FrameView view = batch.Next();
+      if (view.Empty()) {
+        break;
+      }
+      // 模拟消费者会真的读到帧内容（BPF write 会读整帧）。
+      DoNotOptimize(view.data[0]);
+      ++received;
     }
-    // 模拟消费者会真的读到帧内容（BPF write 会读整帧）。
-    DoNotOptimize(view.data[0]);
-    ring.CommitRead();
-    ++received;
+    // batch 析构 → 一次 PublishRead(n)
   }
   producer.join();
   return iterations;
@@ -253,14 +266,23 @@ void RegisterCommonBenchmarks(Runner& runner) {
   runner.Add("FrameRing", "单线程往返（64 字节）",
              Config{.ops_per_round = kFrameOps, .bytes_per_op = kSmallFrameBytes},
              [](std::uint64_t n) { return BenchFrameRingRoundTrip(n, kSmallFrameBytes); });
+  // 批量发布的效果对比。这是整个数据路径最重要的一组数字：同一条队列、
+  // 同样的搬运量，只改「每次 release store 发布多少帧」。
+  for (const std::uint32_t batch : {1U, 4U, 8U, 32U, 64U}) {
+    runner.Add(
+        "FrameRing 批量发布",
+        std::format("跨线程 1514 字节 × batch={}", batch),
+        Config{.measure_rounds = 5, .ops_per_round = kFrameOps, .bytes_per_op = kFullFrameBytes},
+        [batch](std::uint64_t n) { return BenchFrameRingCrossThread(n, kFullFrameBytes, batch); });
+  }
   runner.Add(
-      "FrameRing", "跨线程搬运（1514 字节）",
-      Config{.measure_rounds = 5, .ops_per_round = kFrameOps, .bytes_per_op = kFullFrameBytes},
-      [](std::uint64_t n) { return BenchFrameRingCrossThread(n, kFullFrameBytes); });
-  runner.Add(
-      "FrameRing", "跨线程搬运（64 字节）",
+      "FrameRing 批量发布", "跨线程 64 字节 × batch=1",
       Config{.measure_rounds = 5, .ops_per_round = kFrameOps, .bytes_per_op = kSmallFrameBytes},
-      [](std::uint64_t n) { return BenchFrameRingCrossThread(n, kSmallFrameBytes); });
+      [](std::uint64_t n) { return BenchFrameRingCrossThread(n, kSmallFrameBytes, 1); });
+  runner.Add(
+      "FrameRing 批量发布", "跨线程 64 字节 × batch=32",
+      Config{.measure_rounds = 5, .ops_per_round = kFrameOps, .bytes_per_op = kSmallFrameBytes},
+      [](std::uint64_t n) { return BenchFrameRingCrossThread(n, kSmallFrameBytes, 32); });
 
   runner.Add("统计计数器", "relaxed load+store（本项目做法）", Config{.ops_per_round = kMicroOps},
              [](std::uint64_t n) { return BenchCounterUpdate(n); });
