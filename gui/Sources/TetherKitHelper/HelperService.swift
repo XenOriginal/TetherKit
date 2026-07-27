@@ -27,7 +27,8 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     // MARK: - 不需要授权的探测接口
 
     func helperVersion(reply: @escaping (String) -> Void) {
-        reply(TetherKitLibrary.versionInfo.version)
+        // 带上 XPC 接口修订号，让 App 能发现「helper 是升级前的旧版本」。
+        reply(HelperConstants.encodeVersion(TetherKitLibrary.versionInfo.version))
     }
 
     func environment(reply: @escaping (Data?, String?) -> Void) {
@@ -74,7 +75,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     // MARK: - 需要授权的特权接口
 
     func startSession(authorization: Data, configuration: Data,
-                      reply: @escaping (String?) -> Void) {
+                      reply: @escaping (String?, Bool) -> Void) {
         guard let configuration = decode(SessionConfiguration.self, from: configuration, reply: reply),
               authorize(authorization, reply: reply) else {
             return
@@ -83,21 +84,21 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         lifecycleQueue.async { [weak self] in
             guard let self else { return }
             if self.withState({ $0 != nil }) {
-                reply("会话已经在运行了")
+                reply("会话已经在运行了", false)
                 return
             }
             do {
                 let session = try TetherKitSession(configuration: configuration)
                 try session.start()
                 self.stateLock.withLock { self.session = session }
-                reply(nil)
+                reply(nil, false)
             } catch {
-                reply(error.localizedDescription)
+                reply(error.localizedDescription, false)
             }
         }
     }
 
-    func stopSession(authorization: Data, reply: @escaping (String?) -> Void) {
+    func stopSession(authorization: Data, reply: @escaping (String?, Bool) -> Void) {
         guard authorize(authorization, reply: reply) else { return }
 
         lifecycleQueue.async { [weak self] in
@@ -110,12 +111,12 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
             }
             session?.stop()
             self.appendNotices(["会话已停止"])
-            reply(nil)
+            reply(nil, false)
         }
     }
 
     func applyNetwork(authorization: Data, interface: String, configuration: Data,
-                      reply: @escaping (String?) -> Void) {
+                      reply: @escaping (String?, Bool) -> Void) {
         guard let configuration = decode(NetworkConfiguration.self, from: configuration, reply: reply),
               authorize(authorization, reply: reply) else {
             return
@@ -123,7 +124,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         // 界面已经校验过一遍，但 XPC 是任何本机进程都能连的，helper 必须自己再挡
         // 一道 —— 而且用的是同一份规则，不会出现两边判断不一致。
         if let message = NetworkValidator.validationMessage(for: configuration) {
-            reply(message)
+            reply(message, false)
             return
         }
 
@@ -132,9 +133,9 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
             do {
                 try NetworkConfigurator.apply(configuration, to: interface)
                 self?.appendNotices(["已应用网络配置：\(configuration.mode.displayName)"])
-                reply(nil)
+                reply(nil, false)
             } catch {
-                reply(error.localizedDescription)
+                reply(error.localizedDescription, false)
             }
         }
     }
@@ -156,23 +157,24 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
     // MARK: - 内部工具
 
-    /// 复核授权；不通过时直接回复错误并返回 false。
-    private func authorize(_ data: Data, reply: @escaping (String?) -> Void) -> Bool {
+    /// 复核授权；不通过时回复错误并把第二个参数置为 true，告诉 App
+    /// 「这是授权问题，重新弹框再来一次也许就成了」。
+    private func authorize(_ data: Data, reply: @escaping (String?, Bool) -> Void) -> Bool {
         do {
             try AuthorizationVerifier.verify(externalForm: data)
             return true
         } catch {
-            reply(error.localizedDescription)
+            reply(error.localizedDescription, true)
             return false
         }
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data,
-                                      reply: @escaping (String?) -> Void) -> T? {
+                                      reply: @escaping (String?, Bool) -> Void) -> T? {
         do {
             return try JSONDecoder().decode(type, from: data)
         } catch {
-            reply("请求参数无法解析：\(error.localizedDescription)")
+            reply("请求参数无法解析：\(error.localizedDescription)", false)
             return nil
         }
     }

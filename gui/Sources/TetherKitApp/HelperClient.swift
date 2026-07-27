@@ -13,6 +13,8 @@ final class HelperClient {
         case unreachable(String)
         /// helper 明确返回了错误。
         case helper(String)
+        /// helper 复核授权没通过 —— 多半是凭据过期了，重新弹框再来一次就行。
+        case authorizationRejected(String)
         /// 应答解不出来（两端版本不一致）。
         case malformedResponse
 
@@ -20,7 +22,7 @@ final class HelperClient {
             switch self {
             case .unreachable(let detail):
                 return "无法连接到特权组件：\(detail)"
-            case .helper(let message):
+            case .helper(let message), .authorizationRejected(let message):
                 return message
             case .malformedResponse:
                 return "特权组件的应答无法解析，可能是版本不一致"
@@ -29,6 +31,12 @@ final class HelperClient {
 
         var isUnreachable: Bool {
             if case .unreachable = self { return true }
+            return false
+        }
+
+        /// 是否值得「重新取一次授权再试」。
+        var isAuthorizationProblem: Bool {
+            if case .authorizationRejected = self { return true }
             return false
         }
     }
@@ -181,16 +189,17 @@ final class HelperClient {
     func startSession(authorization: Data, configuration: SessionConfiguration) async throws {
         let payload = try JSONEncoder().encode(configuration)
         try await invokeVoid { proxy, guarded in
-            proxy.startSession(authorization: authorization, configuration: payload) { message in
-                Self.finish(message, guarded)
+            proxy.startSession(authorization: authorization,
+                               configuration: payload) { message, authorizationFailed in
+                Self.finish(message, authorizationFailed, guarded)
             }
         }
     }
 
     func stopSession(authorization: Data) async throws {
         try await invokeVoid { proxy, guarded in
-            proxy.stopSession(authorization: authorization) { message in
-                Self.finish(message, guarded)
+            proxy.stopSession(authorization: authorization) { message, authorizationFailed in
+                Self.finish(message, authorizationFailed, guarded)
             }
         }
     }
@@ -200,8 +209,8 @@ final class HelperClient {
         let payload = try JSONEncoder().encode(configuration)
         try await invokeVoid { proxy, guarded in
             proxy.applyNetwork(authorization: authorization, interface: interface,
-                               configuration: payload) { message in
-                Self.finish(message, guarded)
+                               configuration: payload) { message, authorizationFailed in
+                Self.finish(message, authorizationFailed, guarded)
             }
         }
     }
@@ -212,11 +221,14 @@ final class HelperClient {
         _ = try await invoke(body)
     }
 
-    private static func finish(_ message: String?, _ guarded: ContinuationGuard<Void>) {
-        if let message {
-            guarded.resume(throwing: Failure.helper(message))
-        } else {
+    private static func finish(_ message: String?, _ authorizationFailed: Bool,
+                               _ guarded: ContinuationGuard<Void>) {
+        guard let message else {
             guarded.resume(returning: ())
+            return
         }
+        guarded.resume(throwing: authorizationFailed
+            ? Failure.authorizationRejected(message)
+            : Failure.helper(message))
     }
 }

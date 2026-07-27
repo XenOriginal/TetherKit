@@ -23,6 +23,11 @@ enum HelperAvailability: Equatable {
     case unknown
     case available(version: String)
     case missing(reason: String)
+    /// 装着的 helper 比当前 App 旧（或新），XPC 接口对不上。
+    ///
+    /// 单独一个状态而不是并进 missing：这两种情况的解决办法不一样，
+    /// 一个是「去装」，一个是「去重装」，提示文案必须能区分。
+    case outdated(installed: Int, expected: Int)
 }
 
 /// 界面的全部状态与动作。
@@ -71,6 +76,18 @@ final class AppModel {
     /// 上次枚举设备的时刻。用单调时钟，避免系统时间被调整时算出负的间隔。
     private var lastDeviceRefresh: ContinuousClock.Instant?
 
+    /// 缓存的授权令牌。为 nil 表示下次特权操作需要弹框。
+    ///
+    /// 不自己记过期时间：系统的 timeout 由授权数据库控制（可能被管理员改），
+    /// 我们自己算一份只会和系统不一致。以 helper 的复核结果为准更可靠。
+    private var cachedAuthorization: AuthorizationToken?
+
+    /// 系统授权框里显示的说明。
+    ///
+    /// 不写这一句的话框里只有「TetherKit 想要进行更改」，用户无从判断该不该批准。
+    private static let authorizationPrompt =
+        "TetherKit 需要管理员权限来创建虚拟网卡、打开数据链路并配置 IP 地址。"
+
     /// 轮询周期。
     ///
     /// 500 ms 是「看起来实时」与「别把 XPC 往返变成负担」的平衡点：更快对人眼
@@ -112,7 +129,13 @@ final class AppModel {
 
     private func refresh() async {
         do {
-            let version = try await client.helperVersion()
+            let (revision, version) = HelperConstants.decodeVersion(try await client.helperVersion())
+            guard revision == HelperConstants.protocolRevision else {
+                helperAvailability = .outdated(installed: revision,
+                                               expected: HelperConstants.protocolRevision)
+                // 接口对不上就别继续发请求了 —— 参数与应答的形状都可能不一致。
+                return
+            }
             helperAvailability = .available(version: version)
         } catch {
             helperAvailability = .missing(reason: error.localizedDescription)
@@ -327,22 +350,54 @@ final class AppModel {
         droppedLogCount = 0
     }
 
-    /// 弹系统授权框，然后带着凭据执行一次特权操作。
+    /// 带着授权凭据执行一次特权操作，必要时才弹系统授权框。
     ///
-    /// ★ 为什么一定要走这个包装，不能自己接住凭据再用 ★
+    /// ★ 为什么缓存令牌 ★
+    ///   `system.privilege.admin` 的实测参数是 `shared = false`、`timeout = 300`。
+    ///   `shared = false` 意味着凭据**不跨 AuthorizationRef 共享** —— 每次操作
+    ///   新建一个 ref，就必然要用户重新认证一次，于是「连接、配网络、断开」
+    ///   会连弹三次框。而 `timeout = 300` 意味着同一个 ref 上的凭据 5 分钟内
+    ///   一直有效。
+    ///
+    ///   所以缓存令牌复用：第一次操作弹一次框，之后 5 分钟内都不用再弹。
+    ///   过期后 helper 的复核会失败并明确告知「这是授权问题」，我们据此丢弃
+    ///   缓存、重新弹一次框、把这次操作重试一遍 —— 用户看到的仍然是「操作前
+    ///   弹了一次框」，而不是一个莫名其妙的失败。
+    ///
+    /// ★ 为什么不能自己接住凭据再用 ★
     ///   外部形式只是指向 securityd 里那份授权的一把钥匙，不是凭据本身。
-    ///   App 这边一旦把 AuthorizationRef 释放掉，helper 还原时就会失败
-    ///   （errAuthorizationDenied，-60005）。withAuthorization 用
-    ///   withExtendedLifetime 保证令牌活到 XPC 往返结束之后。
-    ///
-    /// 每次特权操作都单独取一次凭据。不缓存是刻意的：缓存等于在 App 进程里留
-    /// 一张长期有效的通行证，而重新弹框的代价只是一次 Touch ID。
+    ///   AuthorizationRef 一释放，helper 还原时就会报 -60005。所以令牌由
+    ///   `cachedAuthorization` 持有，并用 `withExtendedLifetime` 保证它活到
+    ///   XPC 往返结束之后。
     ///
     /// 用户取消时**不**弹错误提示 —— 取消是正常操作，再弹一个「已取消」的框
     /// 只会烦人。
     private func authorized(_ body: @escaping (Data) async throws -> Void) async {
+        // 第一趟：有缓存就直接用，不打扰用户。
+        if let cached = cachedAuthorization {
+            // withExtendedLifetime 不能接 async 闭包，所以用 defer 把令牌钉到
+            // 作用域结束 —— 光靠局部 let 不够，ARC 可以在最后一次读
+            // externalForm 之后就释放它，而那时 XPC 往返还没回来。
+            defer { withExtendedLifetime(cached) {} }
+            do {
+                try await body(cached.externalForm)
+                return
+            } catch let failure as HelperClient.Failure where failure.isAuthorizationProblem {
+                // 凭据过期了。丢掉缓存，往下走「重新授权 + 重试」。
+                cachedAuthorization = nil
+            } catch {
+                alertMessage = error.localizedDescription
+                return
+            }
+        }
+
+        // 第二趟：弹框取新凭据，然后执行（或重试）。
         do {
-            try await AuthorizationBroker.withAuthorization(body)
+            let token = try AuthorizationBroker.requestAuthorization(
+                prompt: Self.authorizationPrompt)
+            defer { withExtendedLifetime(token) {} }
+            cachedAuthorization = token
+            try await body(token.externalForm)
         } catch AuthorizationBroker.Failure.userCancelled {
             return
         } catch {

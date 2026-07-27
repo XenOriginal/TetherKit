@@ -36,8 +36,8 @@ DR 必然对不上。凭据复核对开源工具是更合适的模型：谁编�
 
 > **一句必须记住的话：授权 ≠ root。**
 > `AuthorizationCopyRights` 成功不改变进程的任何东西，uid / euid 一个都没动。
-> 它只产出一张「用户在某时刻确认过」的凭据。顺序不能反：不是「先弹指纹拿到
-> root」，而是「先有常驻的 root helper，每次操作弹指纹拿凭据交给它复核」。
+> 它只产出一张「用户在某时刻确认过」的凭据。顺序不能反：不是「先弹框拿到
+> root」，而是「先有常驻的 root helper，弹框拿到凭据后交给它复核」。
 
 ---
 
@@ -158,7 +158,57 @@ gui/
    `gui/Tests/TetherKitIPCTests/AuthorizationTests.swift` 把这个行为钉住了，
    两条用例都不弹授权框，可以进 CI。
 
-### 4.5 Swift 侧
+**令牌必须缓存复用，否则每个操作都要用户重新认证一次。**
+`system.privilege.admin` 的实测参数（`security authorizationdb read`）：
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| `shared` | `false` | 凭据**不跨 AuthorizationRef 共享**。每次 `AuthorizationCreate` 建新 ref 就必然重新认证 |
+| `timeout` | `300` | 但同一个 ref 上的凭据 5 分钟内有效 |
+
+所以 App 缓存 `AuthorizationToken` 复用：第一次操作弹一次框，之后 5 分钟内
+「配网络」「断开」都不再打扰用户。过期后 helper 的复核会失败并把应答的第二个
+参数置为 `true`，App 据此丢弃缓存、重新弹一次框、把这次操作重试一遍。
+
+### 4.5 关于 Touch ID：这条路走不通（已验证）
+
+**结论：`AuthorizationCopyRights` 弹出的系统授权框不支持指纹，只能输密码。**
+这是 API 层面的限制，不是实现问题。别再花时间试了。
+
+验证过程（本机 Touch ID 硬件存在、`bioutil -r` 显示已录入并启用）：
+
+1. 写了个最小的探针 App 请求 `system.privilege.admin`，读取 SecurityAgent
+   窗口的文本，得到的是 **「输入密码允许此操作。」** —— 界面上没有任何生物识别
+   入口。
+2. 对比系统自己的 `system.preferences` 规则，`class` / `group` /
+   `authenticate-user` 完全相同，只有 `shared` 与 `timeout` 不同 ——
+   而那两个字段只影响凭据缓存，不影响认证方式。所以换个权利名没有用。
+3. 在 SDK 里找 LocalAuthentication 与 Authorization Services 之间的桥：
+   `AuthorizationTags.h` 的环境项只有 username / password / shared / prompt /
+   icon，**没有 LAContext**。唯一出现 `GetLAContext` 的地方是
+   `AuthorizationPlugin.h` —— 那是给**编写 SecurityAgent 插件**用的回调，
+   而且注释写明它返回的是智能卡 PIN（`LACredentialCTKPIN`），不是 Touch ID。
+
+`LAContext.evaluatePolicy` 确实能弹指纹，但它产出的结果**无法转换成 helper
+可以复核的凭据** —— 换成它就等于放弃了整个信任模型。真要做，只剩「自己写一个
+SecurityAgent 插件装进 /Library/Security/SecurityAgentPlugins」这条路，
+代价与风险都和这个项目完全不成比例。
+
+可行的替代是**减少弹框频率**，也就是上面的令牌缓存。若还嫌频繁，可以在
+`install-helper.sh` 里用 `security authorizationdb write` 装一条自己的权利，
+把 `timeout` 调长、`shared` 设为 true —— 但那仍然是密码框，只是问得更少。
+
+### 4.6 XPC 接口修订号
+
+`HelperConstants.protocolRevision` 每次改动 `TetherKitHelperProtocol` 都要加一。
+helper 把它编进 `helperVersion` 的应答，App 一连上就比对。
+
+**为什么不新增一个专门的方法来报版本**：新增方法本身就是一次协议变更，旧
+helper 根本没有它 —— 那就又回到了「对不上还查不出来」。只有复用旧 helper 也
+一定会应答的方法，才能可靠识别出旧 helper。旧 helper 返回的串里没有分隔符，
+解析出的修订号是 0，界面据此显示「特权组件需要更新」。
+
+### 4.7 Swift 侧
 
 - **XPC 的错误块与 reply 块可能都被调用**（请求已发出后连接才断），而
   `CheckedContinuation` 兑现两次是直接崩溃。`HelperClient` 里每次调用都用
@@ -176,7 +226,7 @@ gui/
 - **非负值的 C 枚举被导入成 `UInt32`**，而结构体字段是 `int32_t`，比较前必须
   显式转换。
 
-### 4.6 打包
+### 4.8 打包
 
 - **拷 dylib 必须用 `cp -a`，不能用 `install`。** `libtetherkit.dylib` 与
   `libtetherkit.0.dylib` 是软链，`install` 会各拷一份独立的真实文件，之后
@@ -216,7 +266,8 @@ gui/
 |---|---|
 | **静态 IP 的 DNS 未经真机验证** | IPConfiguration 只在 DHCP 模式发布 DNS。静态模式我们往它建立的服务上补一个 DNS 键，能否被 IPMonitor 采纳未经验证。因此 `tk_net_query` 一律**回读**真实生效的解析器，界面显示回读结果 —— 赌错了也只是 DNS 不生效，不会有破坏 |
 | **端到端未在真实设备上跑过** | GUI 各屏已逐屏核对渲染，但「插上手机 → 连接 → 上网」的完整链路尚未验证 |
-| **热插拔** | `Context::SupportsHotplug()` 存在但未接入；目前靠界面每 500 ms 重新枚举 |
+| **授权只能输密码，没有指纹** | 系统 API 的限制，不是缺陷。已验证并记录在第 4.5 节。缓解手段是令牌缓存：5 分钟内只问一次 |
+| **热插拔** | `Context::SupportsHotplug()` 存在但未接入；目前靠界面每 2 秒重新枚举 |
 | **IPv6** | 网卡配置只覆盖 IPv4 |
 | **多会话** | helper 同一时刻只允许一个会话 |
 | **App 图标** | 尚无 `.icns`，用系统默认图标 |
@@ -263,3 +314,5 @@ sudo ./gui/Scripts/uninstall-helper.sh
 | 连接失败 | 界面里的「运行日志」面板（可一键复制） |
 | 装完还是依赖 Homebrew | `otool -L dist/TetherKit.app/Contents/Frameworks/libtetherkit.0.*.dylib` |
 | 点「连接」报「无法还原授权凭据（-60005）」 | App 侧提前释放了 AuthorizationRef，见第 4.4 节第 4 条 |
+| 界面显示「特权组件需要更新」 | 改过 XPC 协议但没重装 helper，跑 `sudo ./gui/Scripts/install-helper.sh` |
+| 授权框只有密码、没有指纹 | 这是系统 API 的限制，不是缺陷，见第 4.5 节 |

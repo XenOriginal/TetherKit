@@ -65,16 +65,32 @@ public enum AuthorizationBroker {
         }
     }
 
-    /// 弹出系统授权框（密码 / Touch ID），成功后返回持有这次授权的令牌。
+    /// 弹出系统授权框，成功后返回持有这次授权的令牌。
     ///
-    /// ⚠️ **调用方必须让返回的令牌活到 XPC 往返结束之后。** 令牌一释放，
-    /// securityd 里的授权就没了，helper 还原外部形式时会报
-    /// `errAuthorizationDenied (-60005)`。用 `withAuthorization` 那类包装函数
-    /// 而不是裸接住返回值，能让 ARC 替你保证这件事。
+    /// ★ 令牌应当被**缓存复用**，而不是每次操作重新取一次 ★
+    ///
+    ///   `system.privilege.admin` 这条规则的实测参数是 `shared = false`、
+    ///   `timeout = 300`：
+    ///     * `shared = false` —— 凭据**不跨 AuthorizationRef 共享**。每次
+    ///       `AuthorizationCreate` 建一个新 ref，就必然要用户重新认证一次。
+    ///     * `timeout = 300` —— 但在**同一个 ref** 上，凭据 5 分钟内有效。
+    ///
+    ///   所以「连接、配网络、断开」各弹一次框，纯粹是因为我们每次都新建 ref。
+    ///   复用同一个令牌，5 分钟内只需要认证一次。这也是 Apple 自己在
+    ///   EvenBetterAuthorizationSample 里的做法。
+    ///
+    ///   过期之后 helper 侧的复核会失败，调用方据此丢弃缓存、重新取一次即可。
+    ///
+    /// ⚠️ **调用方必须让令牌活到 XPC 往返结束之后。** 令牌一释放，securityd 里的
+    /// 授权就没了，helper 还原外部形式时会报 `errAuthorizationDenied (-60005)`。
+    ///
+    /// - Parameter prompt: 显示在系统授权框里的一句说明，告诉用户这次授权是干
+    ///   什么用的。不传的话框里只有干巴巴的「想要进行更改」。
     ///
     /// 必须在主线程调用 —— 它会呈现 UI。
     public static func requestAuthorization(
-        right: String = HelperConstants.privilegedRightName
+        right: String = HelperConstants.privilegedRightName,
+        prompt: String? = nil
     ) throws -> AuthorizationToken {
         var authorization: AuthorizationRef?
         let createStatus = AuthorizationCreate(nil, nil, [], &authorization)
@@ -89,18 +105,7 @@ public enum AuthorizationBroker {
             }
         }
 
-        var name = Array(right.utf8CString)
-        let copyStatus: OSStatus = name.withUnsafeMutableBufferPointer { buffer in
-            var item = AuthorizationItem(name: buffer.baseAddress!, valueLength: 0,
-                                         value: nil, flags: 0)
-            return withUnsafeMutablePointer(to: &item) { itemPointer in
-                var rights = AuthorizationRights(count: 1, items: itemPointer)
-                // App 侧**要**带 .interactionAllowed —— 弹框正是我们要的。
-                return AuthorizationCopyRights(authorization, &rights, nil,
-                                               [.extendRights, .interactionAllowed, .preAuthorize],
-                                               nil)
-            }
-        }
+        let copyStatus = copyRights(authorization, right: right, prompt: prompt)
         guard copyStatus == errAuthorizationSuccess else {
             throw copyStatus == errAuthorizationCanceled
                 ? Failure.userCancelled
@@ -118,18 +123,49 @@ public enum AuthorizationBroker {
                                   externalForm: withUnsafeBytes(of: &external) { Data($0) })
     }
 
-    /// 取一次授权，在 `body` 里用它，并保证令牌活到 `body` 结束之后。
+    /// 请求权利，必要时弹框。
     ///
-    /// 这是**推荐的用法** —— 裸接住 `requestAuthorization()` 的返回值时，ARC
-    /// 完全可以在最后一次使用 `externalForm` 之后就把令牌释放掉，而那时 XPC
-    /// 往返还没结束。`withExtendedLifetime` 把这个窗口堵死。
-    public static func withAuthorization<T>(
-        right: String = HelperConstants.privilegedRightName,
-        _ body: (Data) async throws -> T
-    ) async throws -> T {
-        let token = try requestAuthorization(right: right)
-        defer { withExtendedLifetime(token) {} }
-        return try await body(token.externalForm)
+    /// 单独抽出来是因为环境项的构造要嵌好几层 `withUnsafe*` —— 那些缓冲必须活
+    /// 到 `AuthorizationCopyRights` 返回之后，写在主流程里很容易被后来的人
+    /// 「顺手整理」成悬垂指针。
+    private static func copyRights(_ authorization: AuthorizationRef,
+                                   right: String,
+                                   prompt: String?) -> OSStatus {
+        var name = Array(right.utf8CString)
+        var promptKey = Array(kAuthorizationEnvironmentPrompt.utf8CString)
+        var promptValue = Array(prompt?.utf8 ?? "".utf8)
+
+        return name.withUnsafeMutableBufferPointer { nameBuffer in
+            var rightItem = AuthorizationItem(name: nameBuffer.baseAddress!, valueLength: 0,
+                                              value: nil, flags: 0)
+            return withUnsafeMutablePointer(to: &rightItem) { rightPointer in
+                var rights = AuthorizationRights(count: 1, items: rightPointer)
+
+                // App 侧**要**带 .interactionAllowed —— 弹框正是我们要的。
+                // .preAuthorize 让权利当场就被授予，而不是等到真正使用时，
+                // 这样凭据才会进入这个 ref 的缓存、供后续操作复用。
+                let flags: AuthorizationFlags = [.extendRights, .interactionAllowed, .preAuthorize]
+
+                guard prompt != nil else {
+                    return AuthorizationCopyRights(authorization, &rights, nil, flags, nil)
+                }
+                return promptKey.withUnsafeMutableBufferPointer { keyBuffer in
+                    promptValue.withUnsafeMutableBufferPointer { valueBuffer in
+                        var promptItem = AuthorizationItem(
+                            name: keyBuffer.baseAddress!,
+                            valueLength: valueBuffer.count,
+                            value: valueBuffer.baseAddress,
+                            flags: 0)
+                        return withUnsafeMutablePointer(to: &promptItem) { promptPointer in
+                            var environment = AuthorizationEnvironment(count: 1,
+                                                                       items: promptPointer)
+                            return AuthorizationCopyRights(authorization, &rights, &environment,
+                                                           flags, nil)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

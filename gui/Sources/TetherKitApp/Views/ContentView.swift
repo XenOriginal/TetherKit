@@ -19,6 +19,8 @@ struct ContentView: View {
                     ProbingCard()
                 case .missing(let reason):
                     HelperMissingCard(reason: reason)
+                case .outdated(let installed, let expected):
+                    HelperOutdatedCard(installed: installed, expected: expected)
                 case .available:
                     mainSections
                 }
@@ -117,6 +119,36 @@ private struct HelperMissingCard: View {
                         .padding(.top, Design.Spacing.tight)
                 }
                 .font(.caption)
+            }
+        }
+    }
+}
+
+/// 装着的 helper 与当前 App 的 XPC 接口对不上。
+///
+/// 单独一屏而不是复用「没安装」：这两种情况下用户要做的事不一样，而且如果不
+/// 明说，症状会表现成调用卡住或直接崩溃 —— 那是最难自查的一类问题。
+private struct HelperOutdatedCard: View {
+    let installed: Int
+    let expected: Int
+
+    var body: some View {
+        Card(title: "特权组件需要更新", systemImage: "arrow.triangle.2.circlepath") {
+            VStack(alignment: .leading, spacing: Design.Spacing.medium) {
+                Text("已安装的特权组件是升级前的版本，与当前 App 的通信接口对不上"
+                     + "（组件 v\(installed)，App 需要 v\(expected)）。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: Design.Spacing.tight) {
+                    Text("重新运行安装脚本即可覆盖更新：")
+                        .font(.callout)
+                    CopyableCommand(command: "sudo ./gui/Scripts/install-helper.sh")
+                    Text("脚本会先注销旧版本再装新的。更新后本页会自动恢复。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

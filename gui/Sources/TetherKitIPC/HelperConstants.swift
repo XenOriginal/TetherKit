@@ -27,6 +27,35 @@ public enum HelperConstants {
     ///   密码 / Touch ID 框，语义也贴切：「这是一次需要管理员身份的操作」。
     public static let privilegedRightName = "system.privilege.admin"
 
+    /// XPC 接口的修订号。**每次改动 TetherKitHelperProtocol 都要加一。**
+    ///
+    /// 为什么需要它：helper 是装在系统目录里的，升级 App 时如果忘了重装 helper，
+    /// 两端的方法签名就对不上 —— 表现是调用卡住或者直接崩，完全看不出是版本问题。
+    /// 有了这个号，App 一连上就能发现不匹配并明确告诉用户「请重新安装特权组件」。
+    ///
+    /// 修订历史：
+    ///   1 —— 初版
+    ///   2 —— 特权方法的应答从 (String?) 改成 (String?, Bool)，区分授权失败
+    public static let protocolRevision = 2
+
+    /// 把修订号编进版本串。
+    ///
+    /// 刻意复用现成的 `helperVersion` 方法而不是新增一个 —— 新增方法本身就是
+    /// 一次协议变更，旧 helper 根本没有它，那就又回到了「对不上还查不出来」。
+    /// 用旧 helper 也一定会应答的这个方法，才能可靠地识别出旧 helper。
+    public static func encodeVersion(_ version: String) -> String {
+        "\(protocolRevision)|\(version)"
+    }
+
+    /// 解析版本串。旧 helper 返回的串里没有分隔符，此时修订号记作 0。
+    public static func decodeVersion(_ encoded: String) -> (revision: Int, version: String) {
+        guard let separator = encoded.firstIndex(of: "|"),
+              let revision = Int(encoded[encoded.startIndex..<separator]) else {
+            return (0, encoded)
+        }
+        return (revision, String(encoded[encoded.index(after: separator)...]))
+    }
+
     /// XPC 调用的超时（秒）。
     ///
     /// 取 30 秒是因为最慢的一次调用是 DHCP 配置：库内部最多等 10 秒租约，

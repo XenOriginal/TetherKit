@@ -12,6 +12,11 @@ import Foundation
 ///   「helper 没装」和「授权没过」这两种完全不同的失败了。这些方法只读，
 ///   泄漏的信息也仅限于本机网络状态。
 ///
+/// ★ 特权方法的应答为什么是 (String?, Bool) 两个值 ★
+///   第二个值表示「这次失败是授权问题」。App 需要区分这两种情况：授权过期了
+///   该重新弹框重试，而操作本身失败（比如没插设备）重试多少次都一样。
+///   混在一条错误消息里，App 只能去匹配字符串 —— 那是最脆的一种耦合。
+///
 /// ★ 为什么错误用 String? 而不是 NSError ★
 ///   跨 XPC 传 NSError 要求两端都能反序列化它的 userInfo，一旦里面混进不可
 ///   编码的对象就是运行时异常。而我们需要传给用户看的本来就只是一句中文，
@@ -32,10 +37,10 @@ import Foundation
 
     /// 启动 RNDIS 会话。**需要授权。**
     func startSession(authorization: Data, configuration: Data,
-                      reply: @escaping (String?) -> Void)
+                      reply: @escaping (String?, Bool) -> Void)
 
     /// 停止会话并销毁虚拟网卡。**需要授权。**
-    func stopSession(authorization: Data, reply: @escaping (String?) -> Void)
+    func stopSession(authorization: Data, reply: @escaping (String?, Bool) -> Void)
 
     /// 取会话状态快照。
     func sessionStatus(reply: @escaping (Data?, String?) -> Void)
@@ -45,7 +50,7 @@ import Foundation
     /// DHCP 模式下这一调用会阻塞到拿到租约或超时（库内部上限 10 秒），
     /// 因此 helper 侧不能把它排在会串行阻塞其它请求的队列上。
     func applyNetwork(authorization: Data, interface: String, configuration: Data,
-                      reply: @escaping (String?) -> Void)
+                      reply: @escaping (String?, Bool) -> Void)
 
     /// 回读网卡真实生效的 IP 状态。
     func queryNetwork(interface: String, reply: @escaping (Data?, String?) -> Void)
