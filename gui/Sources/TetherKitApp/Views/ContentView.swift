@@ -80,14 +80,19 @@ struct ContentView: View {
             EnvironmentWarningCard(environment: model.environment)
 
             HStack(alignment: .top, spacing: Design.Spacing.gutter) {
-                VStack(spacing: Design.Spacing.gutter) {
-                    DeviceCard(model: model)
-                    NetworkCard(model: model)
-                    // Spacer 把管理行压到左栏底部的既有空隙里。放在外层 VStack
-                    // 末尾会新增一行整页高度 —— 「一屏放完」的布局刚好被它
-                    // 顶破，footer 落到折叠线以下（实测踩过）。
+                // 管理行放在卡片组之外、间距归零：它跟着 gutter 排的话要
+                // 白付两个 12pt 的间距 —— 整页的高度预算是「最小窗口
+                // （内容高 700）也放得下」，为一行 caption 花 41pt 曾把
+                // 预算顶破 14pt，主页面因此能滚一点（实测踩过）。
+                // Spacer 把它压到左栏底部的既有空隙里，不新增整页高度。
+                VStack(spacing: 0) {
+                    VStack(spacing: Design.Spacing.gutter) {
+                        DeviceCard(model: model)
+                        NetworkCard(model: model)
+                    }
                     Spacer(minLength: 0)
                     helperManagementFooter
+                        .padding(.top, Design.Spacing.tight)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 

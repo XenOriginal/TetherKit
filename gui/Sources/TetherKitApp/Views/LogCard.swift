@@ -77,11 +77,13 @@ struct LogCard: View {
             }
             // 高度弹性：吃掉右栏剩余空间。最小值保证极端情况下（窗口压到最小、
             // 上面的卡都在最高状态）仍能看到几行，而不是被挤成一条缝。
+            // 90 ≈ 四行 —— 整页的预算是「最小窗口（内容高 700）也放得下」，
+            // 左栏加了特权组件管理行之后，这里是唯一合理的伸缩吸收层。
             //
             // idealHeight 必须钉死：整页外面有一层兜底 ScrollView，它测量内容
             // 用的是理想尺寸，而内嵌 ScrollView 的理想高度 = 全部日志展开的高度
             // —— 不钉住的话日志一多整页就被撑开，滚动又回来了。
-            .frame(minHeight: 110, idealHeight: 110, maxHeight: .infinity)
+            .frame(minHeight: 90, idealHeight: 90, maxHeight: .infinity)
             .background(.quaternary.opacity(0.35),
                         in: RoundedRectangle(cornerRadius: Design.Radius.control))
             .onChange(of: model.filteredLogs.last?.id) { _, newValue in
