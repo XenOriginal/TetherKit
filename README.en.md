@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/icon.png" width="128" alt="TetherKit icon">
+</p>
+
 # TetherKit
 
 **English** | [简体中文](README.md)
@@ -78,25 +82,44 @@ both the USB host and the network driver, entirely in user space**.
 ## Installation
 
 ```bash
+# The GUI, TetherKit.app (macOS 14+)
 brew install XiaoMiku01/tap/tetherkit
+
+# The command-line tool, tetherkit-cli (macOS 13.3+)
+brew install XiaoMiku01/tap/tetherkit-cli
 ```
 
-It builds from source — a dozen seconds or so — and pulls in `libusb` automatically. The tap
+Both formulae build from source and pull in `libusb` automatically. The tap
 lives at [XiaoMiku01/homebrew-tap](https://github.com/XiaoMiku01/homebrew-tap).
+
+Launch the GUI like this (installation automatically drops a Finder alias into
+/Applications, so Spotlight can find and launch TetherKit afterwards):
+
+```bash
+open "$(brew --prefix)/opt/tetherkit/TetherKit.app"
+```
+
+On first run the app walks you through installing the privileged helper —
+one click, one admin password prompt.
 
 To upgrade:
 
 ```bash
-brew upgrade tetherkit
+brew upgrade tetherkit tetherkit-cli
 ```
 
-You can also grab a prebuilt binary straight from
-[Releases](https://github.com/XiaoMiku01/TetherKit/releases) (arm64 only). It is **unsigned**,
-so a browser download gets quarantined by Gatekeeper and you have to clear the attribute
-yourself:
+> **Note for existing users**: as of v0.1.2 the formula name `tetherkit` belongs
+> to the GUI; the CLI was renamed `tetherkit-cli` (binary included). If you had
+> the CLI installed, run `brew uninstall tetherkit && brew install tetherkit-cli`.
+
+You can also grab prebuilt artifacts straight from
+[Releases](https://github.com/XiaoMiku01/TetherKit/releases) (arm64 only). They are
+**unsigned**, so a browser download gets quarantined by Gatekeeper and you have to
+clear the attribute yourself:
 
 ```bash
-xattr -d com.apple.quarantine tetherkit
+xattr -d com.apple.quarantine tetherkit-cli     # CLI
+xattr -dr com.apple.quarantine TetherKit.app    # GUI (recursive)
 ```
 
 If that bothers you, use Homebrew above, or build it yourself as described in the next
@@ -118,7 +141,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
 ```
 
-Output: `build/bin/tetherkit`.
+Output: `build/bin/tetherkit-cli`.
 
 ### Build options
 
@@ -168,10 +191,10 @@ Aggregated results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ```bash
 # First check whether the device is recognized (**no root needed**)
-tetherkit --list
+tetherkit-cli --list
 
 # Start the driver
-sudo tetherkit
+sudo tetherkit-cli
 
 # In another terminal, configure the new interface (RNDIS devices usually run a DHCP server)
 sudo ipconfig set feth0 DHCP
@@ -179,7 +202,7 @@ ipconfig getifaddr feth0
 ```
 
 > The commands above assume an installed `tetherkit` (on your `PATH`). If you built from
-> source, substitute `./build/bin/tetherkit`.
+> source, substitute `./build/bin/tetherkit-cli`.
 
 On a successful start the program prints the interface it created along with the follow-up
 commands. `Ctrl-C` shuts down gracefully (the device is taken out of RNDIS first, then the
@@ -228,6 +251,11 @@ In other words, root is a requirement of the interface side, not the USB side �
 Besides the CLI there is a SwiftUI app that reduces the whole flow to three
 clicks — pick a device, connect, configure IP — and shows live throughput and
 logs.
+
+![TetherKit main window](docs/assets/screenshot-main.jpg)
+
+Install it with `brew install XiaoMiku01/tap/tetherkit` (see Installation above),
+or build from source as shown below.
 
 It comes in two pieces: `TetherKit.app` runs as a **normal user**, and anything
 that needs root is handed to `tetherkit-helper`, a privileged component launched

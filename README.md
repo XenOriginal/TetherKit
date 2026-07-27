@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/icon.png" width="128" alt="TetherKit 图标">
+</p>
+
 # TetherKit
 
 [English](README.en.md) | **简体中文**
@@ -72,23 +76,41 @@ macOS 内核**没有** RNDIS 驱动。插上开了 USB 网络共享的 Android �
 ## 安装
 
 ```bash
+# 图形界面 TetherKit.app（macOS 14+）
 brew install XiaoMiku01/tap/tetherkit
+
+# 命令行工具 tetherkit-cli（macOS 13.3+）
+brew install XiaoMiku01/tap/tetherkit-cli
 ```
 
-从源码构建，十几秒装完，`libusb` 会被自动带上。tap 仓库在
+两个 formula 都从源码构建，`libusb` 会被自动带上。tap 仓库在
 [XiaoMiku01/homebrew-tap](https://github.com/XiaoMiku01/homebrew-tap)。
+
+图形界面装完这样启动（安装时会自动在「应用程序」里建立 Finder 别名，
+之后在聚焦里搜 TetherKit 即可直接启动）：
+
+```bash
+open "$(brew --prefix)/opt/tetherkit/TetherKit.app"
+```
+
+首次运行界面会引导安装特权组件：点「安装特权组件」、输一次管理员密码即可。
 
 升级：
 
 ```bash
-brew upgrade tetherkit
+brew upgrade tetherkit tetherkit-cli
 ```
 
-也可以从 [Releases](https://github.com/XiaoMiku01/TetherKit/releases) 直接下预编译二进制
-（仅 arm64）。但它**没有签名**，浏览器下载后会被 Gatekeeper 隔离，得手动解除：
+> **旧版用户注意**：自 v0.1.2 起 `tetherkit` 这个 formula 名归图形界面，
+> 命令行改名 `tetherkit-cli`（二进制同名）。之前装过命令行的请
+> `brew uninstall tetherkit && brew install tetherkit-cli`。
+
+也可以从 [Releases](https://github.com/XiaoMiku01/TetherKit/releases) 直接下预编译产物
+（仅 arm64）。但它们**没有签名**，浏览器下载后会被 Gatekeeper 隔离，得手动解除：
 
 ```bash
-xattr -d com.apple.quarantine tetherkit
+xattr -d com.apple.quarantine tetherkit-cli     # 命令行
+xattr -dr com.apple.quarantine TetherKit.app    # 图形界面（递归）
 ```
 
 介意这一步的话就走上面的 Homebrew，或者按下一节自己构建 —— 本地构建的产物不带隔离属性。
@@ -108,7 +130,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
 ```
 
-产物：`build/bin/tetherkit`。
+产物：`build/bin/tetherkit-cli`。
 
 ### 构建选项
 
@@ -157,10 +179,10 @@ cmake --build build-rel -j
 
 ```bash
 # 先看看设备有没有被识别（**不需要 root**）
-tetherkit --list
+tetherkit-cli --list
 
 # 启动驱动
-sudo tetherkit
+sudo tetherkit-cli
 
 # 另开一个终端，给新出现的网卡配 IP（RNDIS 设备通常自带 DHCP 服务器）
 sudo ipconfig set feth0 DHCP
@@ -168,7 +190,7 @@ ipconfig getifaddr feth0
 ```
 
 > 下面的命令都按已安装（`tetherkit` 在 PATH 里）来写。从源码构建的话把
-> `tetherkit` 换成 `./build/bin/tetherkit` 即可。
+> `tetherkit` 换成 `./build/bin/tetherkit-cli` 即可。
 
 启动成功后程序会打印它创建的网卡名与后续命令。按 `Ctrl-C` 优雅退出
 （会先让设备退出 RNDIS，再销毁网卡）。
@@ -215,9 +237,14 @@ ipconfig getifaddr feth0
 命令行之外还有一个 SwiftUI 图形界面，把「选设备 → 连接 → 配 IP」做成了三步点击，
 并实时显示吞吐与日志。
 
+![TetherKit 主界面](docs/assets/screenshot-main.jpg)
+
 它由两部分组成：`TetherKit.app` 以**普通用户身份**运行，需要 root 的操作交给一个
 由 launchd 按需拉起的特权组件 `tetherkit-helper`，每次调用都附带一份用户刚确认过
 的授权凭据。App 本身不需要任何 entitlement。
+
+安装直接 `brew install XiaoMiku01/tap/tetherkit`（见上文「安装」）；
+从源码构建的话：
 
 ```bash
 # 1. 先构建 C++ 部分（产出 libtetherkit.dylib）

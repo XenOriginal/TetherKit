@@ -320,6 +320,7 @@ helper 缺失或版本不匹配时，界面给一个「安装 / 更新特权组�
 | 特权 helper + 凭据复核 | `gui/Sources/TetherKitHelper` |
 | App 内一键安装 / 更新 / 卸载特权组件 | `gui/Sources/TetherKitApp/HelperInstaller.swift` |
 | 检查更新（只查不换，每日自动 + 手动菜单） | `gui/Sources/TetherKitApp/UpdateChecker.swift` |
+| Finder 别名自动维护（聚焦可搜可启动；`--install-finder-alias` 供 formula post_install） | `gui/Sources/TetherKitApp/FinderAlias.swift` |
 | SwiftUI 界面（状态、设备、网络、吞吐、日志） | `gui/Sources/TetherKitApp` |
 | 菜单栏实时速率 + 后台运行（仅菜单栏模式） | `gui/Sources/TetherKitApp/Views/MenuBarPanel.swift` |
 
