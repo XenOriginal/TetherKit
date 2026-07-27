@@ -42,6 +42,7 @@ struct ContentView: View {
         StatusHeroCard(model: model)
         EnvironmentWarningCard(environment: model.environment)
         DeviceCard(model: model)
+        NetworkCard(model: model)
         ThroughputCard(model: model)
         LogCard(model: model)
     }

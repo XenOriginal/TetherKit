@@ -281,6 +281,28 @@ final class AppModel {
         }
     }
 
+    /// 撤销网卡上的 IP 配置。
+    ///
+    /// 单独一个动作而不是「上网方式选『不配置』再点应用」：撤销是一次性操作，
+    /// 混进模式选择器里会让人以为选中它就已经生效了。
+    func clearNetworkConfiguration() async {
+        guard !isBusy else { return }
+        let interface = status.systemInterface
+        guard !interface.isEmpty else { return }
+
+        isBusy = true
+        defer { isBusy = false }
+
+        guard let authorization = await requestAuthorization() else { return }
+        do {
+            try await client.applyNetwork(authorization: authorization, interface: interface,
+                                          configuration: NetworkConfiguration(mode: .none))
+            networkState = (try? await client.queryNetwork(interface: interface)) ?? .empty
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
     /// 手动刷新设备列表。
     func refreshDevices() async {
         devices = (try? await client.listDevices()) ?? []
