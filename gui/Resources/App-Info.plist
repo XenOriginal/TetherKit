@@ -22,6 +22,9 @@
     <string>TetherKit</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Dock / 访达用的图标。Resources/AppIcon.icns 由 build-gui.sh 拷入。 -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>__TETHERKIT_VERSION__</string>
     <key>CFBundleVersion</key>

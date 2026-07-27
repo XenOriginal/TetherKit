@@ -85,6 +85,7 @@ mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Frameworks" \
 cp "${SWIFT_BIN_DIR}/TetherKitApp" "${APP_DIR}/Contents/MacOS/TetherKit"
 sed "s/__TETHERKIT_VERSION__/${VERSION}/g" \
   "${GUI_DIR}/Resources/App-Info.plist" > "${APP_DIR}/Contents/Info.plist"
+cp "${GUI_DIR}/Resources/AppIcon.icns" "${APP_DIR}/Contents/Resources/"
 
 # ★ 必须用 cp -a，不能用 install ★
 #   libtetherkit.dylib 与 libtetherkit.0.dylib 都是指向 .0.1.1.dylib 的软链。

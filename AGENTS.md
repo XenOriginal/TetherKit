@@ -200,6 +200,7 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 | 21 | `build(gui): 打包与安装脚本、GUI 架构文档` | ✅ | |
 | 22 | `feat(gui): 菜单栏实时速率与后台运行模式` | ✅ | MenuBarExtra + 仅菜单栏模式 + 自适应轮询；顺带修 helper 不清理失败态旧会话的缺陷 |
 | 23 | `feat(gui): App 内一键安装与卸载特权组件` | ✅ | AEWP + helper 二进制 setuid(0)；载荷内嵌 .app，dist/helper 废除；「bash 对 euid≠ruid 掉权」的坑记入 SPIKE |
+| 24 | `feat(gui): 应用图标` | ✅ | 外围白底按边缘连通泛洪抠透明（内部白色元素保留）；icns 全尺寸；Dock 实测核对 |
 
 ### 当前状态
 
