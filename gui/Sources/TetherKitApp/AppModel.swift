@@ -76,6 +76,13 @@ final class AppModel {
     /// 上次枚举设备的时刻。用单调时钟，避免系统时间被调整时算出负的间隔。
     private var lastDeviceRefresh: ContinuousClock.Instant?
 
+    /// 主窗口当前是否可见。只影响轮询节奏；程序坞图标策略在视图层处理。
+    private var isWindowVisible = true
+
+    /// 最近一次「明确要求显示主窗口」的时刻。初始值 = 现在，因为 App 启动本身
+    /// 就是一次合法的窗口展示。
+    private var windowPresentationRequestedAt = ContinuousClock.now
+
     /// 缓存的授权令牌。为 nil 表示下次特权操作需要弹框。
     ///
     /// 不自己记过期时间：系统的 timeout 由授权数据库控制（可能被管理员改），
@@ -93,6 +100,9 @@ final class AppModel {
     /// 500 ms 是「看起来实时」与「别把 XPC 往返变成负担」的平衡点：更快对人眼
     /// 已无区别，更慢会让速率曲线看起来一顿一顿的。
     private static let pollInterval: Duration = .milliseconds(500)
+
+    /// 纯后台待机（窗口关着、会话没跑）时的轮询间隔。
+    private static let backgroundPollInterval: Duration = .seconds(2)
 
     /// 设备枚举的最小间隔。
     ///
@@ -114,8 +124,10 @@ final class AppModel {
         guard pollingTask == nil else { return }
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.refresh()
-                try? await Task.sleep(for: Self.pollInterval)
+                guard let self else { return }
+                await self.refresh()
+                // 间隔是动态的：会话在跑或窗口开着就保持流畅，纯后台待机时放慢。
+                try? await Task.sleep(for: self.pollDelay)
             }
         }
     }
@@ -123,6 +135,47 @@ final class AppModel {
     func stopPolling() {
         pollingTask?.cancel()
         pollingTask = nil
+    }
+
+    /// 主窗口出现（含从菜单栏重新打开）。
+    ///
+    /// 立刻刷一次而不是等下一个周期：后台轮询可能正睡在 2 秒的长间隔里，
+    /// 用户打开窗口的第一眼不该看到陈旧数据。
+    func windowDidAppear() {
+        isWindowVisible = true
+        Task { await refresh() }
+    }
+
+    /// 主窗口关闭。App 转入后台模式，轮询继续（菜单栏靠它喂数据）但会放慢。
+    func windowDidDisappear() {
+        isWindowVisible = false
+    }
+
+    /// 登记「接下来这次主窗口展示是我们主动要求的」。
+    ///
+    /// App 启动时（初始化默认值）与「打开主窗口」按钮各登记一次。
+    func expectWindowPresentation() {
+        windowPresentationRequestedAt = ContinuousClock.now
+    }
+
+    /// 这次窗口出现是不是我们自己要求的。
+    ///
+    /// SwiftUI 会在「无窗口的 App 被激活」时（点菜单栏图标就会触发）擅自重建
+    /// Window 场景，那种复活必须当场关掉。用时间窗而不是一次性标志来判定：
+    /// 「3 秒内登记过」就算数 —— 一次性标志在「窗口已开着时再点打开」这类
+    /// 路径上会残留，时间窗天然自愈。
+    func isWindowPresentationExpected() -> Bool {
+        ContinuousClock.now - windowPresentationRequestedAt < .seconds(3)
+    }
+
+    /// 当前该用的轮询间隔。
+    ///
+    /// 三种情况用快节奏：会话在跑（菜单栏要显示实时速率）、正在启动/停止
+    /// （用户在等结果）、窗口开着（用户在看）。只有「纯后台待机」才放慢 ——
+    /// 那时轮询唯一的产出是 helper 探活与设备扫描，没人需要它们每半秒一次。
+    private var pollDelay: Duration {
+        let sessionActive = status.runState == .running || status.runState.isTransitional
+        return sessionActive || isWindowVisible ? Self.pollInterval : Self.backgroundPollInterval
     }
 
     // MARK: - 轮询

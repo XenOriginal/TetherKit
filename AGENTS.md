@@ -197,7 +197,8 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 | 18 | `feat(gui): 特权 helper 与授权凭据复核` | ✅ | LaunchDaemon + AuthorizationRef |
 | 19 | `feat(gui): SwiftUI 设计系统与主界面` | ✅ | 状态卡/设备/吞吐/日志 |
 | 20 | `feat(gui): 上网方式配置界面` | ✅ | DHCP / 静态 IP + 生效状态回读 |
-| 21 | `build(gui): 打包与安装脚本、GUI 架构文档` | ✅ | 本次 |
+| 21 | `build(gui): 打包与安装脚本、GUI 架构文档` | ✅ | |
+| 22 | `feat(gui): 菜单栏实时速率与后台运行模式` | ✅ | MenuBarExtra + 仅菜单栏模式 + 自适应轮询；顺带修 helper 不清理失败态旧会话的缺陷 |
 
 ### 当前状态
 

@@ -233,6 +233,18 @@ enum Format {
         return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
+    /// 菜单栏用的紧凑速率（如 "12.3M"、"999K"）。
+    ///
+    /// 菜单栏寸土寸金：单位压成单字母，1 Kbps 以下一律显示 "0K" ——
+    /// 那点流量在「瞟一眼菜单栏」的语境里就等于没有。
+    static func compactBitrate(_ bitsPerSecond: Double) -> String {
+        let value = max(0, bitsPerSecond)
+        if value >= 1_000_000_000 { return String(format: "%.1fG", value / 1_000_000_000) }
+        if value >= 1_000_000 { return String(format: "%.1fM", value / 1_000_000) }
+        if value >= 1_000 { return String(format: "%.0fK", value / 1_000) }
+        return "0K"
+    }
+
     static func packetsPerSecond(_ value: Double) -> String {
         value >= 10_000
             ? String(format: "%.1f k", value / 1000)

@@ -225,6 +225,13 @@ helper 根本没有它 —— 那就又回到了「对不上还查不出来」�
   在缓冲被写满、没有 NUL 时会越界读。
 - **非负值的 C 枚举被导入成 `UInt32`**，而结构体字段是 `int32_t`，比较前必须
   显式转换。
+- **MenuBarExtra 与 Window 同存时，点菜单栏图标会让 SwiftUI 擅自重建主窗口。**
+  实测确认，且不走 `applicationShouldHandleReopen`（插桩证明该委托从未被调用，
+  SwiftUI 生命周期不转发它），没有干净的委托口子可堵。对策在结果端：窗口每次
+  出现时问 AppModel「这次展示登记过吗」（App 启动与「打开主窗口」按钮是仅有的
+  两个登记点，3 秒时间窗），没登记过的当场 dismiss。见 `MainWindowRoot`。
+- **轮询是自适应的**：会话在跑 / 正在启停 / 窗口开着 → 500 ms；纯后台待机 →
+  2 秒。窗口重新打开时立刻补一次刷新，避免第一眼看到陈旧数据。
 
 ### 4.8 打包
 
@@ -259,6 +266,7 @@ helper 根本没有它 —— 那就又回到了「对不上还查不出来」�
 | 孤儿 feth 清理 | `tk_cleanup_orphan_interfaces` |
 | 特权 helper + 凭据复核 | `gui/Sources/TetherKitHelper` |
 | SwiftUI 界面（状态、设备、网络、吞吐、日志） | `gui/Sources/TetherKitApp` |
+| 菜单栏实时速率 + 后台运行（仅菜单栏模式） | `gui/Sources/TetherKitApp/Views/MenuBarPanel.swift` |
 
 ### 未实现 / 已知限制
 
@@ -316,3 +324,5 @@ sudo ./gui/Scripts/uninstall-helper.sh
 | 点「连接」报「无法还原授权凭据（-60005）」 | App 侧提前释放了 AuthorizationRef，见第 4.4 节第 4 条 |
 | 界面显示「特权组件需要更新」 | 改过 XPC 协议但没重装 helper，跑 `sudo ./gui/Scripts/install-helper.sh` |
 | 授权框只有密码、没有指纹 | 这是系统 API 的限制，不是缺陷，见第 4.5 节 |
+| 设备拔掉重插后点「连接」报「会话已经在运行了」 | helper 是旧版（失败态旧会话未被清理），重装 helper |
+| 仅菜单栏模式下双击访达图标没反应 | 已知权衡（见 MainWindowRoot 的说明），从菜单栏面板打开即可 |

@@ -83,10 +83,23 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
         lifecycleQueue.async { [weak self] in
             guard let self else { return }
-            if self.withState({ $0 != nil }) {
-                reply("会话已经在运行了", false)
-                return
+
+            // 已经彻底死掉（失败 / 已停）的旧会话不能挡住新的连接。
+            //
+            // 典型场景：设备被拔掉 → 保活连续失败 → 会话进入 failed。C++ 侧
+            // 此时已经把 USB、网卡全部拆干净了，Swift 这层只剩一个壳 —— 但它
+            // 非 nil。若只按「session != nil 就拒绝」，用户重插设备后永远
+            // 连不上，只能重装 helper。这个坑真实踩过。
+            if let existing = self.withState({ $0 }) {
+                let state = existing.status().runState
+                guard state == .failed || state == .stopped else {
+                    reply("会话已经在运行了", false)
+                    return
+                }
+                existing.stop()  // 幂等，只是保险
+                self.stateLock.withLock { self.session = nil }
             }
+
             do {
                 let session = try TetherKitSession(configuration: configuration)
                 try session.start()

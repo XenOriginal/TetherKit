@@ -263,6 +263,11 @@ only traffic explicitly bound to the interface uses it. You usually do not need
 it — when no other network is available, macOS picks this interface as the
 primary service on its own.
 
+**Background mode**: closing the main window keeps the app in the menu bar
+(the Dock icon is hidden) with live up/down rates on the status item; click it
+for a compact panel with shortcuts back to the main window. The connection
+itself lives in the privileged helper, so quitting the UI never drops it.
+
 **Requires** macOS 14+ (the CLI still supports 13.3+). Design notes and
 trade-offs are in [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md).
 
