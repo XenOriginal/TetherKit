@@ -1,0 +1,55 @@
+import Foundation
+
+/// App 调用 helper 的 XPC 接口。
+///
+/// ★ 哪些方法需要授权，哪些不需要 ★
+///
+///   带 `authorization` 参数的都要 —— 它是 App 通过 AuthorizationCopyRights
+///   拿到的凭据的外部形式（32 字节），helper 会**复核**它确实包含所需权利。
+///
+///   探测类方法（helperVersion / status / queryNetwork / drainFeed）刻意**不**
+///   要求授权。理由是：如果连「helper 装没装」都要先弹一次指纹，用户就分不清
+///   「helper 没装」和「授权没过」这两种完全不同的失败了。这些方法只读，
+///   泄漏的信息也仅限于本机网络状态。
+///
+/// ★ 为什么错误用 String? 而不是 NSError ★
+///   跨 XPC 传 NSError 要求两端都能反序列化它的 userInfo，一旦里面混进不可
+///   编码的对象就是运行时异常。而我们需要传给用户看的本来就只是一句中文，
+///   直接传字符串既简单又不会失败。nil 表示成功。
+@objc public protocol TetherKitHelperProtocol {
+    /// 连通性探测。**不要求授权** —— 否则「没装」和「没授权」两种失败会混在一起。
+    func helperVersion(reply: @escaping (String) -> Void)
+
+    /// 运行环境预检（root 状态、feth 的创建期 sysctl、MTU 上限）。
+    func environment(reply: @escaping (Data?, String?) -> Void)
+
+    /// 枚举 RNDIS 设备。
+    ///
+    /// 由 helper 而不是 App 来枚举：App 侧也能枚举（不需要 root），但会话跑起来
+    /// 之后设备已被 helper 独占，App 再去读字符串描述符只会失败。统一走 helper
+    /// 就没有这个不一致。
+    func listDevices(reply: @escaping (Data?, String?) -> Void)
+
+    /// 启动 RNDIS 会话。**需要授权。**
+    func startSession(authorization: Data, configuration: Data,
+                      reply: @escaping (String?) -> Void)
+
+    /// 停止会话并销毁虚拟网卡。**需要授权。**
+    func stopSession(authorization: Data, reply: @escaping (String?) -> Void)
+
+    /// 取会话状态快照。
+    func sessionStatus(reply: @escaping (Data?, String?) -> Void)
+
+    /// 给网卡下发上网方式（DHCP / 静态 IP / 撤销）。**需要授权。**
+    ///
+    /// DHCP 模式下这一调用会阻塞到拿到租约或超时（库内部上限 10 秒），
+    /// 因此 helper 侧不能把它排在会串行阻塞其它请求的队列上。
+    func applyNetwork(authorization: Data, interface: String, configuration: Data,
+                      reply: @escaping (String?) -> Void)
+
+    /// 回读网卡真实生效的 IP 状态。
+    func queryNetwork(interface: String, reply: @escaping (Data?, String?) -> Void)
+
+    /// 取走 helper 侧积压的日志与提示。
+    func drainFeed(reply: @escaping (Data?) -> Void)
+}
