@@ -8,11 +8,11 @@ import Foundation
 ///   回车即启动目标。用 URL 的 bookmark API（.suitableForBookmarkFile）生成，
 ///   不需要 Finder 帮忙、不触发任何权限弹窗。
 ///
-/// ★ 为什么由 App 自己维护 ★
-///   brew 没有 root、formula 也不该在构建沙箱里往用户目录伸手。App 每次启动
-///   顺手校一遍：别名缺了就补、目标漂移（brew upgrade 换了 Cellar 版本路径）
-///   就重写。formula 的 post_install 另以 `--install-finder-alias` 调一次本
-///   App（建完即退），做到「装完就能搜到」，不用等首次启动。
+/// ★ 为什么在首次启动时建，而不是安装时 ★
+///   实测 brew 连 postinstall 都跑在沙箱里，写 /Applications 会被静默拦下 ——
+///   「装完立刻建」走不通。所以由 App 每次启动顺手校一遍：缺了就补、目标
+///   漂移（brew upgrade 换了 Cellar 版本路径）就重写。`--install-finder-alias`
+///   模式（建完即退）保留给 CI 冒烟与手动补建。
 enum FinderAlias {
     /// 别名文件名。不带 .app —— 它是书签文件，不是 bundle；
     /// 聚焦显示的名字就是它。

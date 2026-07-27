@@ -202,7 +202,7 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 | 23 | `feat(gui): App 内一键安装与卸载特权组件` | ✅ | AEWP + helper 二进制 setuid(0)；载荷内嵌 .app，dist/helper 废除；「bash 对 euid≠ruid 掉权」的坑记入 SPIKE |
 | 24 | `feat(gui): 应用图标` | ✅ | 外围白底按边缘连通泛洪抠透明（内部白色元素保留）；icns 全尺寸；Dock 实测核对 |
 | 25 | `feat(gui): 检查更新（只查不换）` | ✅ | GitHub releases/latest + 语义化比较；每日静默 + 菜单手动；免证书分发下自动替换会被 Gatekeeper 拦死，故只查不换 |
-| 26 | `feat!: 命令行更名 tetherkit-cli；App 自动维护 Finder 别名` | ✅ | OUTPUT_NAME 改产物名（`tetherkit` formula 名让位 GUI）；别名用 bookmark API（软链聚焦不认），`--install-finder-alias` 供 formula post_install；本机聚焦索引损坏（mdutil unknown state），入索效果待索引重建后复核 |
+| 26 | `feat!: 命令行更名 tetherkit-cli；App 自动维护 Finder 别名` | ✅ | OUTPUT_NAME 改产物名（`tetherkit` formula 名让位 GUI）；别名用 bookmark API（软链聚焦不认），首次启动自动建立 —— **brew 连 postinstall 都在沙箱里，写不了 /Applications（实测）**；本机聚焦索引损坏（mdutil unknown state），入索效果待索引重建后复核 |
 | 27 | `build(ci): GUI 构建入 CI；发版附带 .app；tap 同步双 formula` | ✅ | GUI job（macos-14/26）；build-gui.sh 支持 --swift-build-flags=--disable-sandbox（SwiftPM 沙箱嵌不进 brew 沙箱） |
 | 28 | `chore(release): v0.1.2 —— README 图标/截图/双 formula 安装说明` | ✅ | 中英双语；docs/assets |
 

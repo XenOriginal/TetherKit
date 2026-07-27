@@ -20,9 +20,10 @@ struct TetherKitApplication: App {
     @State private var model = AppModel()
 
     init() {
-        // Homebrew formula 的 post_install 用这个模式在**安装时**就把 Finder
-        // 别名建好（建完即退，不进 GUI）。恒 exit 0 —— 别名建不上（受管机器
-        // 之类）不该把一次成功的安装判成失败，结果打给 stdout 由日志兜底。
+        // CI 冒烟与手动补建用的模式：建完 Finder 别名即退，不进 GUI。
+        // 恒 exit 0 —— 别名建不上（受管机器之类）不该把流程判失败，结果打给
+        // stdout。（brew 的 postinstall 也在沙箱里、写不了 /Applications ——
+        // 实测确认 —— 所以正常安装路径靠下面的首次启动自动建立。）
         if CommandLine.arguments.dropFirst().contains("--install-finder-alias") {
             print(FinderAlias.ensure(for: Bundle.main.bundleURL))
             exit(0)

@@ -101,8 +101,8 @@ jobs:
           ```
 
           图形界面装完 `open "$(brew --prefix)/opt/tetherkit/TetherKit.app"`，
-          首次运行点「安装特权组件」、输一次管理员密码即可；聚焦（Spotlight）里
-          搜 TetherKit 也能直接启动（安装时自动建立了 Finder 别名）。
+          首次运行点「安装特权组件」、输一次管理员密码即可；首次启动会自动
+          建立 Finder 别名，之后聚焦（Spotlight）里搜 TetherKit 就能直接启动。
 
           > ⚠️ 旧版用户注意：`tetherkit` 这个 formula 名从本版本起归图形界面，
           > 命令行改名为 `tetherkit-cli`（二进制同名）。原来装过 CLI 的请

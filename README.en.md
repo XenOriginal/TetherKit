@@ -92,8 +92,8 @@ brew install XiaoMiku01/tap/tetherkit-cli
 Both formulae build from source and pull in `libusb` automatically. The tap
 lives at [XiaoMiku01/homebrew-tap](https://github.com/XiaoMiku01/homebrew-tap).
 
-Launch the GUI like this (installation automatically drops a Finder alias into
-/Applications, so Spotlight can find and launch TetherKit afterwards):
+Launch the GUI like this (on first launch the app drops a Finder alias into
+/Applications, so Spotlight can find and launch TetherKit from then on):
 
 ```bash
 open "$(brew --prefix)/opt/tetherkit/TetherKit.app"

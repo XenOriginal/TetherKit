@@ -86,7 +86,7 @@ brew install XiaoMiku01/tap/tetherkit-cli
 两个 formula 都从源码构建，`libusb` 会被自动带上。tap 仓库在
 [XiaoMiku01/homebrew-tap](https://github.com/XiaoMiku01/homebrew-tap)。
 
-图形界面装完这样启动（安装时会自动在「应用程序」里建立 Finder 别名，
+图形界面装完这样启动（首次启动会自动在「应用程序」里建立 Finder 别名，
 之后在聚焦里搜 TetherKit 即可直接启动）：
 
 ```bash
