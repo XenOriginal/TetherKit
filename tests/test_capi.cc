@@ -11,6 +11,7 @@
 #include <doctest.h>
 
 #include "capi_support.h"
+#include "process_runner.h"
 #include "tetherkit/capi/tetherkit_c.h"
 #include "tetherkit/common/logging.h"
 
@@ -269,3 +270,97 @@ TEST_CASE("会话接口对空指针一律安全") {
 }
 
 }  // TEST_SUITE("capi.session")
+
+TEST_SUITE("capi.process") {
+
+TEST_CASE("RunTool 收集子进程输出并带回退出码") {
+  const auto result = tetherkit::capi::RunTool("/bin/echo", {"你好", "世界"});
+  REQUIRE(result.has_value());
+  CHECK(result->exit_code == 0);
+  CHECK(result->Succeeded());
+  CHECK(result->output == "你好 世界\n");
+}
+
+TEST_CASE("RunTool 合并 stderr，且非零退出不算调用失败") {
+  // sh -c 'echo boom >&2; exit 3'：验证 stderr 也被收进来、退出码原样带回。
+  const auto result =
+      tetherkit::capi::RunTool("/bin/sh", {"-c", "echo boom >&2; exit 3"});
+  REQUIRE(result.has_value());
+  CHECK_FALSE(result->Succeeded());
+  CHECK(result->exit_code == 3);
+  CHECK(result->output == "boom\n");
+}
+
+TEST_CASE("RunTool 读得下超过管道缓冲的大输出（不死锁）") {
+  // 管道缓冲是 64 KiB。必须先读空再 waitpid，否则子进程写满就阻塞、
+  // 我们等在 waitpid 上，双方僵住。这条用例就是钉住那个顺序的。
+  const auto result = tetherkit::capi::RunTool(
+      "/bin/sh", {"-c", "for i in $(seq 1 20000); do echo 0123456789; done"});
+  REQUIRE(result.has_value());
+  CHECK(result->exit_code == 0);
+  CHECK(result->output.size() == 20000 * 11);
+}
+
+TEST_CASE("RunTool 对不存在的可执行文件返回错误而非崩溃") {
+  const auto result = tetherkit::capi::RunTool("/nonexistent/tetherkit-test", {});
+  CHECK_FALSE(result.has_value());
+}
+
+}  // TEST_SUITE("capi.process")
+
+TEST_SUITE("capi.net_config") {
+
+TEST_CASE("tk_ip_config_init 默认 DHCP 且不抢全局默认路由") {
+  tk_ip_config_t config{};
+  tk_ip_config_init(&config);
+  CHECK(config.mode == TK_IP_MODE_DHCP);
+  CHECK_FALSE(config.set_default_route);
+  CHECK(config.dns_count == 0);
+  CHECK(std::strlen(config.address) == 0);
+}
+
+TEST_CASE("拒绝对非 feth 网卡下手") {
+  tk_ip_config_t config{};
+  tk_ip_config_init(&config);
+  tk_error_t error{};
+
+  // 这是本模块最重要的一条防线：误传 en0 会把用户的 Wi-Fi 配置冲掉。
+  CHECK(tk_net_apply("en0", &config, &error) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(std::string{error.message}.find("en0") != std::string::npos);
+
+  CHECK(tk_net_clear("en0", &error) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_net_query("en0", nullptr, &error) == TK_ERR_INVALID_ARGUMENT);
+
+  tk_net_state_t state{};
+  CHECK(tk_net_query("bridge0", &state, &error) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_net_apply(nullptr, &config, &error) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_net_apply("feth0", nullptr, &error) == TK_ERR_INVALID_ARGUMENT);
+}
+
+TEST_CASE("非 root 下写操作返回 TK_ERR_PERMISSION") {
+  tk_ip_config_t config{};
+  tk_ip_config_init(&config);
+  tk_error_t error{};
+
+  CHECK(tk_net_apply("feth9", &config, &error) == TK_ERR_PERMISSION);
+  CHECK(std::strlen(error.message) > 0);
+  CHECK(tk_net_clear("feth9", &error) == TK_ERR_PERMISSION);
+
+  std::size_t removed = 1;
+  CHECK(tk_cleanup_orphan_interfaces(&removed, &error) == TK_ERR_PERMISSION);
+  CHECK(removed == 0);
+}
+
+TEST_CASE("查询不存在的 feth 网卡是成功且全空，而不是报错") {
+  // GUI 在会话没起来时也会刷新网络状态，那时网卡还不存在 —— 这种情况必须是
+  // 「没有地址」而不是「查询失败」，否则界面上会一直挂着一个假的错误。
+  tk_net_state_t state{};
+  tk_error_t error{};
+  CHECK(tk_net_query("feth99", &state, &error) == TK_OK);
+  CHECK_FALSE(state.has_address);
+  CHECK(state.dns_count == 0);
+  CHECK_FALSE(state.is_primary_default_route);
+  CHECK(std::strlen(error.message) == 0);
+}
+
+}  // TEST_SUITE("capi.net_config")

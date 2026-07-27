@@ -71,7 +71,9 @@ set(TETHERKIT_TEST_SUITES
     capi.support
     capi.basics
     capi.log_ring
-    capi.session)
+    capi.session
+    capi.process
+    capi.net_config)
 
 foreach(_suite IN LISTS TETHERKIT_TEST_SUITES)
   # 注意：--test-suite= 后面**不要**加引号，见上方说明。

@@ -89,4 +89,10 @@ inline void ClearError(tk_error_t* out_error) noexcept {
 /// 冲掉」这类更现实的事故。
 [[nodiscard]] bool IsValidFethName(std::string_view name) noexcept;
 
+/// 安装 feth 接口的落盘登记（见 orphan_cleanup.cc）。幂等。
+///
+/// 由 tk_session_create 调用 —— 只有真的要创建网卡时才需要登记，让免 root 的
+/// 那组接口（版本、枚举、预检）保持零副作用。
+void InstallInterfaceRegistry();
+
 }  // namespace tetherkit::capi

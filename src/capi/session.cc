@@ -175,6 +175,10 @@ tk_session_t* tk_session_create(const tk_session_config_t* config, tk_error_t* o
     return nullptr;
   }
 
+  // 会话是唯一会创建 feth 的入口，登记回调在这里装上就够 —— 免 root 的那组
+  // 接口（版本、枚举、预检）因此保持零副作用，不会去碰 /var/run。
+  tetherkit::capi::InstallInterfaceRegistry();
+
   auto session = std::unique_ptr<tk_session>(new (std::nothrow) tk_session());
   if (session == nullptr) {
     tetherkit::capi::FillGenericError(out_error, "内存不足，无法创建会话");

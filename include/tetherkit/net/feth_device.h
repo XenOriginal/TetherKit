@@ -48,6 +48,29 @@ inline constexpr std::size_t kInterfaceNameCapacity = 16;
 /// BPF 读到的就不是干净的以太帧，而创建后再改 sysctl 已经来不及了。
 [[nodiscard]] Status VerifyFethSysctls();
 
+/// 接口创建 / 销毁的登记回调。
+///
+/// ★ 为什么需要它 ★
+///   进程被 SIGKILL 时 C++ 的析构不会跑，feth 会留在内核里；而 SIGKILL 是任何
+///   信号处理器都拦不住的。唯一可靠的兜底是**把创建过的接口名落盘，下次启动时
+///   清理**。RAII 管不了被强杀的进程，这个钩子就是为此存在的。
+///
+/// 约束：会在创建 / 销毁的同一线程上同步调用，实现里只该做「往文件里加一行 /
+/// 删一行」这种短操作，不要打日志（销毁路径可能在析构里，noexcept）。
+///
+/// @param name    接口名。
+/// @param created true = 刚创建，false = 刚销毁。
+using InterfaceRegistry = void (*)(std::string_view name, bool created) noexcept;
+
+/// 安装 / 卸载登记回调。传 nullptr 卸载。进程级，线程安全。
+void SetInterfaceRegistry(InterfaceRegistry registry) noexcept;
+
+/// 销毁一张按名字指定的 feth 接口。用于清理进程被强杀后残留的孤儿。
+///
+/// 与 FethInterface 的析构不同，这里不需要先持有对象 —— 孤儿正是「没有对象在
+/// 管」的那些。名字必须形如 `feth<数字>`，调用方负责校验。
+[[nodiscard]] Status DestroyInterfaceByName(std::string_view name);
+
 /// 一张 feth 接口。RAII：析构时销毁内核里的接口。
 class FethInterface {
  public:

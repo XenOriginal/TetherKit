@@ -9,11 +9,20 @@
 add_library(
   tk_capi STATIC
   capi_support.cc
+  core_foundation_support.cc
   environment.cc
   log_ring.cc
+  net_config.cc
+  orphan_cleanup.cc
+  process_runner.cc
   session.cc)
 
 target_link_libraries(tk_capi PUBLIC tetherkit_base tk_version tk_core)
+
+# 网卡 IP 配置要回读 configd 的动态存储（真实生效的网关与 DNS），只能走
+# SystemConfiguration。这是 tk_capi 独有的依赖 —— 下层模块一概不碰 configd。
+target_link_libraries(tk_capi PUBLIC "-framework CoreFoundation"
+                                     "-framework SystemConfiguration")
 
 # 共享库的组成部分必须是位置无关代码。静态模块那边由顶层统一开启 PIC，
 # 这里只需保证自己也开着。

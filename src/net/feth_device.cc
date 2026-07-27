@@ -7,6 +7,7 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -19,6 +20,19 @@
 
 namespace tetherkit::net {
 namespace {
+
+/// 宿主安装的接口登记回调。用原子而非互斥锁：读发生在每次创建/销毁，
+/// 而销毁路径在析构里、必须 noexcept，加锁会引入抛异常的可能。
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<InterfaceRegistry> g_interface_registry{nullptr};
+
+/// 通知登记回调。回调未安装时是空操作。
+void NotifyRegistry(std::string_view name, bool created) noexcept {
+  if (const InterfaceRegistry registry = g_interface_registry.load(std::memory_order_acquire);
+      registry != nullptr) {
+    registry(name, created);
+  }
+}
 
 /// 一个只用来发 ioctl 的临时套接字。
 ///
@@ -153,6 +167,24 @@ Status VerifyFethSysctls() {
   return Ok();
 }
 
+void SetInterfaceRegistry(InterfaceRegistry registry) noexcept {
+  g_interface_registry.store(registry, std::memory_order_release);
+}
+
+Status DestroyInterfaceByName(std::string_view name) {
+  TETHERKIT_ASSIGN_OR_RETURN(const auto socket, IoctlSocket::Open());
+  TETHERKIT_ASSIGN_OR_RETURN(::ifreq request, MakeIfreq(name));
+
+  if (const auto status = socket.Call(SIOCIFDESTROY, &request, "ioctl(SIOCIFDESTROY)"); !status) {
+    Error error = status.error();
+    return std::unexpected(
+        std::move(error).WithContext(std::format("销毁残留的虚拟网卡 {} 失败", name)));
+  }
+  NotifyRegistry(name, false);
+  TETHERKIT_INFO("已销毁残留的虚拟网卡 {}", name);
+  return Ok();
+}
+
 // =============================================================================
 // FethInterface
 // =============================================================================
@@ -193,6 +225,7 @@ void FethInterface::Destroy() noexcept {
     TETHERKIT_ERROR("销毁 {} 失败：{}", name, status.error().ToString());
     return;
   }
+  NotifyRegistry(name, false);
   TETHERKIT_INFO("已销毁虚拟网卡 {}", name);
 }
 
@@ -223,6 +256,9 @@ Result<FethInterface> FethInterface::Create(std::string_view requested_name) {
   // 通配创建时内核把完整名字（含编号）写回 ifr_name。
   std::string created_name(request.ifr_name,
                            ::strnlen(request.ifr_name, kInterfaceNameCapacity));
+  // 先登记再返回：登记的意义就是「万一从这一刻起进程被强杀，下次也能清掉它」，
+  // 所以中间不能留任何窗口。
+  NotifyRegistry(created_name, true);
   TETHERKIT_INFO("已创建虚拟网卡 {}", created_name);
   return FethInterface{std::move(created_name)};
 }
