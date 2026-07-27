@@ -214,7 +214,10 @@ Result<std::vector<DeviceCandidate>> FindRndisDevices(const Context& context,
             continue;
           }
 
-          TETHERKIT_INFO(
+          // DEBUG 而不是 INFO：枚举是被周期性调用的（GUI 每 2 秒扫一次），
+          // 这句话在 INFO 级别会把日志刷成一整列重复。「发现了什么」由调用方
+          // 决定怎么呈现 —— CLI 自己打印列表，GUI 显示在设备卡里。
+          TETHERKIT_DEBUG(
               "发现 RNDIS 设备 {}：通信接口 {}、数据接口 {}，签名 {:02x}/{:02x}/{:02x}{}",
               candidate.Describe(), candidate.control_interface, candidate.data_interface,
               signature.interface_class, signature.interface_subclass,
