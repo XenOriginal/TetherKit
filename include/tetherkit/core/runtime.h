@@ -26,9 +26,12 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "tetherkit/common/error.h"
@@ -41,6 +44,85 @@
 #include "tetherkit/usb/device.h"
 
 namespace tetherkit::core {
+
+/// 运行时的生命周期状态。这是宿主（命令行 / GUI）唯一需要关心的状态维度。
+enum class RunState : std::uint8_t {
+  kIdle,      ///< 已创建，尚未 Start()。
+  kStarting,  ///< 控制线程正在走启动序列（枚举 → 握手 → 建网卡 → 开桥接）。
+  kRunning,   ///< 数据路径已跑起来。
+  kStopping,  ///< 正在按逆序拆除。
+  kStopped,   ///< 已正常停机。
+  kFailed,    ///< 启动失败或运行中遇到不可恢复错误，原因见 RuntimeSnapshot::fatal_message。
+};
+
+[[nodiscard]] std::string_view RunStateName(RunState state) noexcept;
+
+/// 运行时对外通报的一条事件。
+///
+/// 用「事件 + 宿主自己排队」而不是让宿主直接实现 StateMachineObserver：
+/// 后者的五个回调语义各异、参数是 C++ 引用，跨语言宿主没法用；而且宿主在回调里
+/// 很容易不小心调回运行时（比如「收到致命错误就停机」），那是自等死锁。
+struct RuntimeEvent {
+  enum class Kind : std::uint8_t {
+    kRndisState,   ///< a = 迁移前 rndis::State，b = 迁移后。
+    kNegotiated,   ///< a = 最终 MTU，b = 链路速率（Mbps）。
+    kLink,         ///< a = 1 表示链路已连接。
+    kDeviceReset,  ///< a = 1 表示寻址信息丢失、已重放。
+    kFatal,        ///< text = 不可恢复错误的原因。
+    kRunState,     ///< a = 迁移前 RunState，b = 迁移后。
+  };
+
+  Kind kind = Kind::kRunState;
+  std::int64_t a = 0;
+  std::int64_t b = 0;
+  std::string text;
+};
+
+/// 事件汇：宿主实现它来接收运行时事件。
+///
+/// ★ 两条硬约束 ★
+///   1. 回调**永远在控制线程上**发生（所有事件源都在那条线程），但宿主自己的
+///      线程可能同时在调 Snapshot() —— 实现里该加的锁一个都不能省。
+///   2. **实现里绝不能调用 Runtime 的任何方法。** Stop() 要 join 控制线程，
+///      从事件里调它就是自等死锁。正确做法是把事件排进队列，由宿主线程处理。
+class RuntimeEventSink {
+ public:
+  RuntimeEventSink() = default;
+  RuntimeEventSink(const RuntimeEventSink&) = delete;
+  RuntimeEventSink& operator=(const RuntimeEventSink&) = delete;
+  RuntimeEventSink(RuntimeEventSink&&) = delete;
+  RuntimeEventSink& operator=(RuntimeEventSink&&) = delete;
+  virtual ~RuntimeEventSink() = default;
+
+  virtual void OnRuntimeEvent(const RuntimeEvent& event) = 0;
+};
+
+/// 运行时的完整可观测快照。
+///
+/// 为什么整块拷贝而不是提供一堆逐项访问器：宿主需要的是**一致的**一组数值
+/// （状态与网卡名不匹配的界面很难看懂），逐项读会读到撕裂的组合。一次拷贝
+/// 几百字节，对 2 Hz 的刷新频率完全不是问题。
+struct RuntimeSnapshot {
+  RunState run_state = RunState::kIdle;
+  rndis::State rndis_state = rndis::State::kUninitialized;
+  bool link_up = false;
+  /// 数据搬运是否处于暂停（链路 down 或设备软复位期间）。
+  bool paused = false;
+
+  /// 系统侧网卡名（主机在这张上配 IP）。未创建时为空。
+  std::string system_interface;
+  /// 驱动侧网卡名（BPF 挂在这张上）。仅用于排障展示。
+  std::string driver_interface;
+  /// 形如 "Bus 020 Device 003: 18d1:4ee4"。未打开设备时为空。
+  std::string device_description;
+
+  rndis::DeviceInfo device_info;
+  rndis::NegotiatedParameters parameters;
+  BridgeStats bridge;
+
+  /// run_state == kFailed 时的原因；否则为空。
+  std::string fatal_message;
+};
 
 /// 运行时配置。默认值都在各自字段的注释里说明了推导依据。
 struct RuntimeConfig {
@@ -69,16 +151,36 @@ struct RuntimeConfig {
 
   /// 统计报告周期（毫秒）；0 表示不报告。
   std::uint32_t stats_interval_millis = 5'000;
+
+  /// 事件汇。为 nullptr 表示不需要事件通报（命令行就不需要，它看日志）。
+  ///
+  /// 生命周期由调用方负责，必须活得比 Runtime 久。
+  RuntimeEventSink* event_sink = nullptr;
 };
 
 /// 组装并运行整个驱动。
 ///
+/// ★ 线程模型：Start() 是**非阻塞**的 ★
+///
+///   Runtime 自己拥有一条控制线程，启动序列、保活循环、停机拆除**全部**在它
+///   上面跑。宿主线程只负责发号施令与读快照。
+///
+///   为什么必须这样：
+///     * 启动序列包含 USB 握手，慢设备上要几百毫秒到数秒，阻塞 GUI 主线程不行；
+///     * 控制通道用 libusb 的同步 API，而同步 API 在 libusb 事件线程上会返回
+///       LIBUSB_ERROR_BUSY —— 由 Runtime 自己建线程，就不用再要求宿主「必须
+///       从某个特定线程调用」这种极易违反的约定；
+///     * 拆除顺序里夹着 RNDIS 的优雅停机（要发控制消息），把它也放在同一条
+///       线程上，`StateMachine` 的「所有方法同线程调用」约束就自然满足了。
+///
 /// 用法：
 /// ```
 /// TETHERKIT_ASSIGN_OR_RETURN(auto runtime, Runtime::Create(config));
-/// TETHERKIT_RETURN_IF_ERROR(runtime->Start());
-/// runtime->RunUntilStopped();   // 阻塞，直到 RequestStop()
+/// TETHERKIT_RETURN_IF_ERROR(runtime->Start());   // 立刻返回
+/// runtime->WaitUntilStopped();                   // 命令行：把主线程挂起
+/// runtime->Stop();                               // 幂等
 /// ```
+/// GUI 则不调 WaitUntilStopped，而是定时 Snapshot() 刷界面。
 class Runtime final : public rndis::StateMachineObserver {
  public:
   [[nodiscard]] static Result<std::unique_ptr<Runtime>> Create(const RuntimeConfig& config);
@@ -90,30 +192,34 @@ class Runtime final : public rndis::StateMachineObserver {
 
   ~Runtime() override;
 
-  /// 走完完整的启动序列。
+  /// 起控制线程并立刻返回。
+  ///
+  /// 返回成功只表示「启动请求已受理」，真正的成败要看 Snapshot().run_state。
+  /// 唯一会**同步**返回失败的是 root 检查 —— 它不需要 I/O，且提前报出来能让
+  /// 命令行给出即时的人话提示。
   [[nodiscard]] Status Start();
 
-  /// 阻塞运行控制循环，直到 RequestStop() 被调用或链路不可恢复。
-  ///
-  /// 控制循环做三件事：定期 Poll() 状态机（保活 + 排空设备推送）、
-  /// 定期打印统计、检查停机请求。
-  ///
-  /// **控制通道必须跑在这个线程上** —— libusb 的同步 API 在事件线程上会返回
-  /// LIBUSB_ERROR_BUSY，所以状态机不能放到事件线程里。
-  void RunUntilStopped();
+  /// 阻塞直到运行时停止（正常停机或致命错误）。命令行用它把主线程挂起。
+  void WaitUntilStopped();
 
   /// 请求停机。可从信号处理器或任意线程调用，异步信号安全（只写一个原子）。
+  ///
+  /// 代价是控制线程最多要过一个循环周期（≤250 ms）才看得到。要立刻停就用
+  /// Stop()，它会额外唤醒控制线程 —— 但 Stop() 会加锁，**不是**异步信号安全的。
   void RequestStop() noexcept { stop_requested_.store(true, std::memory_order_release); }
 
-  /// 按启动顺序的严格逆序拆除。幂等。
+  /// 请求停机并等控制线程完成全部拆除。幂等。
+  ///
+  /// ⚠️ 不可从事件汇（RuntimeEventSink）里调用 —— 那是控制线程自己，会自等死锁。
   void Stop();
 
+  /// 取一份一致的状态快照。**任意线程可调**。
+  [[nodiscard]] RuntimeSnapshot Snapshot() const;
+
   /// 系统侧网卡名，用于给用户打印「接下来该做什么」。
-  [[nodiscard]] std::string_view SystemInterfaceName() const noexcept;
+  [[nodiscard]] std::string SystemInterfaceName() const;
 
-  [[nodiscard]] const rndis::DeviceInfo& DeviceInfo() const noexcept;
-
-  // ---- StateMachineObserver ----
+  // ---- StateMachineObserver（均在控制线程上被调用）----
   void OnStateChanged(rndis::State from, rndis::State to) override;
   void OnNegotiated(const rndis::NegotiatedParameters& parameters,
                     const rndis::DeviceInfo& info) override;
@@ -124,11 +230,39 @@ class Runtime final : public rndis::StateMachineObserver {
  private:
   Runtime() = default;
 
+  /// 控制线程主体：启动序列 → 控制循环 → 拆除。
+  void RunControlThread() noexcept;
+
+  /// 完整的启动序列（原 Start() 的主体）。只在控制线程上跑。
+  [[nodiscard]] Status RunStartSequence();
+
+  /// 保活 + 统计 + 停机检查的循环。只在控制线程上跑。
+  void RunControlLoop();
+
+  /// 按启动顺序的严格逆序拆除。只在控制线程上跑。
+  void Teardown();
+
+  /// 迁移生命周期状态并通报事件。
+  void SetRunState(RunState next);
+
+  /// 记录致命错误：写进快照、置 kFailed 标志、通报事件。
+  void RecordFatal(const Error& error);
+
+  /// 把各组件的当前状况刷进快照。只在控制线程上调用。
+  void RefreshSnapshot();
+
+  /// 把一条事件交给宿主。sink 为空时是空操作。
+  void Emit(const RuntimeEvent& event) const;
+
   /// 打印「网卡已就绪，接下来该怎么配 IP」的提示。
   void PrintNextSteps() const;
 
   RuntimeConfig config_;
 
+  // ---- 以下组件全部**只由控制线程**创建、访问与销毁 ----
+  //
+  // 宿主线程一律通过 snapshot_ 读状态，绝不碰这些指针 —— 否则 Stop() 里的
+  // reset() 与宿主的读会构成数据竞争，而那种竞争在真机上表现为随机崩溃。
   std::unique_ptr<usb::Context> usb_context_;
   std::unique_ptr<usb::Device> device_;
   std::unique_ptr<usb::UsbControlChannel> control_channel_;
@@ -138,8 +272,21 @@ class Runtime final : public rndis::StateMachineObserver {
   std::unique_ptr<usb::UsbDataChannel> data_channel_;
   std::unique_ptr<Bridge> bridge_;
 
+  std::thread control_thread_;
+
+  /// 保护 snapshot_。读侧是宿主线程（GUI 每 500 ms 一次），写侧是控制线程，
+  /// 竞争极轻，普通互斥锁足够。
+  mutable std::mutex snapshot_mutex_;
+  RuntimeSnapshot snapshot_;
+
+  /// 让 Stop() 能立刻唤醒正在睡的控制线程，而不用等满一个循环周期。
+  std::mutex stop_mutex_;
+  std::condition_variable stop_condition_;
+
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> fatal_error_{false};
+
+  /// 只在宿主线程上读写（Start / Stop / 析构），不需要同步。
   bool started_ = false;
   bool stopped_ = false;
 };

@@ -343,9 +343,9 @@ int main(int argc, char** argv) {
     (*runtime)->RequestStop();
   });
 
-  // 主线程跑控制循环 —— **必须是这个线程**：RNDIS 控制通道用 libusb 的同步 API，
-  // 而同步 API 从 libusb 事件线程调用会返回 LIBUSB_ERROR_BUSY。
-  (*runtime)->RunUntilStopped();
+  // 控制循环跑在 Runtime 自己的线程上（见 core/runtime.h 的线程模型说明），
+  // 主线程只需要在这里挂起等它结束。
+  (*runtime)->WaitUntilStopped();
 
   // 控制循环可能是因为内部致命错误退出的（而不是收到信号），
   // 这时也要让守望线程结束。
@@ -353,5 +353,9 @@ int main(int argc, char** argv) {
   signal_watcher.join();
 
   (*runtime)->Stop();
-  return 0;
+
+  // 启动序列是异步跑的，失败不会体现在 Start() 的返回值里 —— 从快照里取。
+  // 错误内容运行时已经打过日志，这里只负责把退出码带出去，好让脚本能判断。
+  const auto snapshot = (*runtime)->Snapshot();
+  return snapshot.fatal_message.empty() ? 0 : 1;
 }

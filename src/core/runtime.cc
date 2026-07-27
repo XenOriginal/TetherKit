@@ -2,15 +2,33 @@
 
 #include <algorithm>
 #include <chrono>
-#include <ranges>
 #include <format>
-#include <thread>
+#include <string>
+#include <utility>
 
 #include "tetherkit/common/logging.h"
 #include "tetherkit/common/scheduling.h"
 #include "tetherkit/common/time.h"
 
 namespace tetherkit::core {
+
+std::string_view RunStateName(RunState state) noexcept {
+  switch (state) {
+    case RunState::kIdle:
+      return "空闲";
+    case RunState::kStarting:
+      return "启动中";
+    case RunState::kRunning:
+      return "运行中";
+    case RunState::kStopping:
+      return "停机中";
+    case RunState::kStopped:
+      return "已停机";
+    case RunState::kFailed:
+      return "已失败";
+  }
+  return "未知";
+}
 
 Result<std::unique_ptr<Runtime>> Runtime::Create(const RuntimeConfig& config) {
   auto runtime = std::unique_ptr<Runtime>(new Runtime());
@@ -22,29 +40,20 @@ Runtime::~Runtime() {
   Stop();
 }
 
-std::string_view Runtime::SystemInterfaceName() const noexcept {
-  return feth_pair_ == nullptr ? std::string_view{} : feth_pair_->SystemSide().Name();
-}
-
-const rndis::DeviceInfo& Runtime::DeviceInfo() const noexcept {
-  static const rndis::DeviceInfo empty_info;
-  return state_machine_ == nullptr ? empty_info : state_machine_->Info();
-}
-
 // =============================================================================
-// 启动
+// 宿主线程接口
 // =============================================================================
 
 Status Runtime::Start() {
   if (started_) {
     return std::unexpected(Error::Generic("运行时已启动"));
   }
-  started_ = true;
 
-  // ---- 第 1 步：权限检查 ----
+  // root 检查刻意留在**同步**路径上。
   //
-  // 提前检查并给出人话，而不是让后面一连串 EPERM 冒出来让用户自己猜。
-  // 注意：libusb 声明 RNDIS 接口**不需要** root（macOS 没有 RNDIS 内核驱动），
+  // 它不需要任何 I/O，而「忘了 sudo」是最常见的失败，提前同步报出来，命令行
+  // 才能在返回码里体现，也不用让用户盯着一个转圈的界面等异步事件。
+  // 注意 libusb 声明 RNDIS 接口**不需要** root（macOS 没有 RNDIS 内核驱动），
   // 需要 root 的是 feth 创建与 /dev/bpf* 打开。
   if (!net::IsRunningAsRoot()) {
     return std::unexpected(Error::Generic(
@@ -54,10 +63,85 @@ Status Runtime::Start() {
         "所以 libusb 能直接声明接口。）"));
   }
 
-  // ---- 第 2 步：libusb 上下文与事件线程 ----
+  started_ = true;
+  SetRunState(RunState::kStarting);
+  control_thread_ = std::thread([this] { RunControlThread(); });
+  return Ok();
+}
+
+void Runtime::WaitUntilStopped() {
+  if (control_thread_.joinable()) {
+    control_thread_.join();
+  }
+}
+
+void Runtime::Stop() {
+  if (stopped_) {
+    return;
+  }
+  stopped_ = true;
+  if (!started_) {
+    return;
+  }
+
+  // 置停机标志并唤醒可能正在睡的控制线程。
+  //
+  // 标志必须在持锁时写：控制线程的 wait_for 用它当谓词，不持锁写会有
+  // 「检查完谓词、还没睡下」的丢失唤醒窗口。RequestStop() 不持锁是刻意的
+  // 取舍（它要保持异步信号安全），代价是最多晚一个循环周期被看到。
+  {
+    const std::lock_guard<std::mutex> guard(stop_mutex_);
+    stop_requested_.store(true, std::memory_order_release);
+  }
+  stop_condition_.notify_all();
+
+  if (control_thread_.joinable()) {
+    control_thread_.join();
+  }
+}
+
+RuntimeSnapshot Runtime::Snapshot() const {
+  const std::lock_guard<std::mutex> guard(snapshot_mutex_);
+  return snapshot_;
+}
+
+std::string Runtime::SystemInterfaceName() const {
+  const std::lock_guard<std::mutex> guard(snapshot_mutex_);
+  return snapshot_.system_interface;
+}
+
+// =============================================================================
+// 控制线程
+// =============================================================================
+
+void Runtime::RunControlThread() noexcept {
+  // 控制线程用 kControl 而非 kDataPath 的 QoS：它每几秒才干一点活，
+  // 抢性能核对它没意义，反而可能挤占三个真正的数据路径线程。
+  ConfigureCurrentThread("rndis-ctl", ThreadRole::kControl);
+
+  if (const auto status = RunStartSequence(); !status) {
+    RecordFatal(status.error());
+  } else {
+    SetRunState(RunState::kRunning);
+    RunControlLoop();
+    SetRunState(RunState::kStopping);
+  }
+
+  // 无论启动成功与否都要拆除：启动序列可能已经建了半套东西（比如 feth 建好了
+  // 但 BPF 打不开），漏掉就会把网卡留在内核里。
+  Teardown();
+
+  SetRunState(fatal_error_.load(std::memory_order_acquire) ? RunState::kFailed
+                                                           : RunState::kStopped);
+}
+
+Status Runtime::RunStartSequence() {
+  // ---- 第 1 步：libusb 上下文与事件线程 ----
+  //
+  // （root 检查已在 Start() 里同步做过。）
   TETHERKIT_ASSIGN_OR_RETURN(usb_context_, usb::Context::Create());
 
-  // ---- 第 3 步：发现并打开设备 ----
+  // ---- 第 2 步：发现并打开设备 ----
   TETHERKIT_ASSIGN_OR_RETURN(const auto candidates,
                              usb::FindRndisDevices(*usb_context_, config_.device_filter));
   if (candidates.empty()) {
@@ -69,17 +153,17 @@ Status Runtime::Start() {
         "  可用 `system_profiler SPUSBDataType` 确认设备是否被系统识别。"));
   }
   if (candidates.size() > 1) {
-    TETHERKIT_INFO("找到 {} 个 RNDIS 设备，使用第一个（可用 --vid/--pid 指定）",
-                   candidates.size());
+    TETHERKIT_INFO("找到 {} 个 RNDIS 设备，使用第一个（可按 VID/PID 指定）", candidates.size());
   }
   TETHERKIT_ASSIGN_OR_RETURN(device_, usb::Device::Open(*usb_context_, candidates.front()));
+  RefreshSnapshot();
 
-  // ---- 第 4 步：RNDIS 控制通道与状态机 ----
+  // ---- 第 3 步：RNDIS 控制通道与状态机 ----
   //
-  // 控制通道用同步 libusb API，因此必须跑在**非事件线程**上 —— 这里以及后面的
-  // RunUntilStopped 都在调用方线程（主线程）上，满足要求。
-  control_channel_ = std::make_unique<usb::UsbControlChannel>(
-      *device_, config_.rndis.control_timeout_millis);
+  // 控制通道用同步 libusb API，因此必须跑在**非事件线程**上 —— 本函数就在
+  // Runtime 自己的控制线程上，满足要求。
+  control_channel_ =
+      std::make_unique<usb::UsbControlChannel>(*device_, config_.rndis.control_timeout_millis);
 
   // 中断通知必须走异步传输，否则控制线程会永久卡死 —— 详见
   // include/tetherkit/usb/device.h 里 UsbControlChannel 的说明。
@@ -89,8 +173,7 @@ Status Runtime::Start() {
   // 让 RNDIS 协商用上真实的端点最大包长（影响 MaxTransferSize 的推导）。
   rndis::StateMachineConfig rndis_config = config_.rndis;
   rndis_config.requested_mtu = config_.mtu;
-  state_machine_ =
-      std::make_unique<rndis::StateMachine>(*control_channel_, *this, rndis_config);
+  state_machine_ = std::make_unique<rndis::StateMachine>(*control_channel_, *this, rndis_config);
 
   TETHERKIT_RETURN_IF_ERROR(state_machine_->Start());
 
@@ -98,7 +181,7 @@ Status Runtime::Start() {
   const rndis::NegotiatedParameters& parameters = state_machine_->Parameters();
   const rndis::DeviceInfo& info = state_machine_->Info();
 
-  // ---- 第 5 步：创建 feth 网卡对 ----
+  // ---- 第 4 步：创建 feth 网卡对 ----
   //
   // 必须在协商之后：系统侧 MAC 要设成设备汇报的地址，MTU 要用协商结果，
   // 而 MAC 又必须在接口 IFF_UP 之前设好。
@@ -112,8 +195,11 @@ Status Runtime::Start() {
     TETHERKIT_ASSIGN_OR_RETURN(auto pair, net::FethPair::Create(parameters.mtu, system_mac));
     feth_pair_ = std::make_unique<net::FethPair>(std::move(pair));
   }
+  // 网卡一建好就刷进快照：后面任何一步失败时，GUI 也该能看到网卡名，
+  // 否则用户连「刚才建了哪张卡」都不知道。
+  RefreshSnapshot();
 
-  // ---- 第 6 步：在**驱动侧**接口上打开 BPF ----
+  // ---- 第 5 步：在**驱动侧**接口上打开 BPF ----
   //
   // 挂驱动侧而不是系统侧，是因为主机从系统侧发出的帧在驱动侧表现为 input 方向，
   // 而我们 write 进驱动侧的帧会进入系统侧的 input —— 一个描述符同时完成收发。
@@ -126,18 +212,18 @@ Status Runtime::Start() {
                                net::BpfLink::Open(feth_pair_->DriverSide().Name(), bpf_config));
   }
 
-  // ---- 第 7 步：创建 USB 数据通道 ----
+  // ---- 第 6 步：创建 USB 数据通道 ----
   {
     usb::DataChannelConfig data_config = config_.data_channel;
     // bulk IN 缓冲必须 >= 我们在 INITIALIZE_MSG 里宣称的 MaxTransferSize，
     // 否则设备聚合出来的大传输会溢出/被截断。
     data_config.rx_transfer_bytes =
         std::max(data_config.rx_transfer_bytes, config_.rndis.host_max_transfer_size);
-    TETHERKIT_ASSIGN_OR_RETURN(
-        data_channel_, usb::UsbDataChannel::Create(*device_, parameters, data_config));
+    TETHERKIT_ASSIGN_OR_RETURN(data_channel_,
+                               usb::UsbDataChannel::Create(*device_, parameters, data_config));
   }
 
-  // ---- 第 8 步：启动桥接层 ----
+  // ---- 第 7 步：启动桥接层 ----
   {
     BridgeConfig bridge_config = config_.bridge;
     bridge_config.max_frame_bytes = parameters.mtu + rndis::kEthernetHeaderBytes;
@@ -145,36 +231,12 @@ Status Runtime::Start() {
     TETHERKIT_RETURN_IF_ERROR(bridge_->Start());
   }
 
+  RefreshSnapshot();
   PrintNextSteps();
   return Ok();
 }
 
-void Runtime::PrintNextSteps() const {
-  const std::string_view name = SystemInterfaceName();
-  TETHERKIT_INFO("");
-  TETHERKIT_INFO("==== 网卡已就绪：{} ====", name);
-  TETHERKIT_INFO("接下来给它配一个 IP（RNDIS 设备通常自带 DHCP 服务器）：");
-  TETHERKIT_INFO("    sudo ipconfig set {} DHCP", name);
-  TETHERKIT_INFO("验证：");
-  TETHERKIT_INFO("    ipconfig getifaddr {}", name);
-  TETHERKIT_INFO("    ipconfig getsummary {}", name);
-  TETHERKIT_INFO("若要让流量默认走它（会顶掉现有默认路由，请谨慎）：");
-  TETHERKIT_INFO("    sudo route -n change default $(ipconfig getoption {} router)", name);
-  TETHERKIT_INFO("注意：ipconfig set 建立的是**临时**服务，只存活到下一次网络");
-  TETHERKIT_INFO("      配置变更，且不会出现在「系统设置 → 网络」里。");
-  TETHERKIT_INFO("");
-}
-
-// =============================================================================
-// 控制循环
-// =============================================================================
-
-void Runtime::RunUntilStopped() {
-  // 控制线程用 kControl 而非 kDataPath 的 QoS：它每几秒才干一点活，
-  // 抢性能核对它没意义，反而可能挤占三个真正的数据路径线程。
-  ConfigureCurrentThread("rndis-ctl", ThreadRole::kControl);
-
-  RateSampler sampler;
+void Runtime::RunControlLoop() {
   BridgeStats previous = bridge_->Snapshot();
   Nanos last_stats_nanos = MonotonicNanos();
 
@@ -185,9 +247,15 @@ void Runtime::RunUntilStopped() {
          !fatal_error_.load(std::memory_order_acquire)) {
     // ---- 状态机的周期性工作：保活 + 排空设备推送的消息 ----
     if (const auto status = state_machine_->Poll(); !status) {
-      TETHERKIT_ERROR("RNDIS 控制通道故障：{}", status.error().ToString());
+      RecordFatal(std::move(status).error());
       break;
     }
+
+    // ---- 刷新快照 ----
+    //
+    // 放在每一轮循环里而不是只在事件发生时刷：统计计数器是持续变化的，
+    // GUI 要靠两次快照做差算速率。循环周期上限 250 ms，足够 2 Hz 的界面刷新。
+    RefreshSnapshot();
 
     // ---- 周期性统计 ----
     const Nanos now = MonotonicNanos();
@@ -203,17 +271,23 @@ void Runtime::RunUntilStopped() {
     // ---- 睡到下一个该醒的时刻 ----
     //
     // 取「下次保活」与「下次统计」两个期限里更近的那个，避免无谓的唤醒。
-    // 上限 250 ms 是为了让 RequestStop() 能被及时看到。
-    std::uint32_t sleep_millis = std::min<std::uint32_t>(state_machine_->MillisUntilNextPoll(), 250);
+    // 上限 250 ms 是为了让只写原子的 RequestStop() 也能被及时看到。
+    std::uint32_t sleep_millis =
+        std::min<std::uint32_t>(state_machine_->MillisUntilNextPoll(), 250);
     if (stats_interval_nanos != 0) {
       const Nanos elapsed = now - last_stats_nanos;
-      const Nanos remaining =
-          elapsed >= stats_interval_nanos ? 0 : stats_interval_nanos - elapsed;
-      sleep_millis =
-          std::min<std::uint32_t>(sleep_millis, static_cast<std::uint32_t>(remaining / kNanosPerMilli));
+      const Nanos remaining = elapsed >= stats_interval_nanos ? 0 : stats_interval_nanos - elapsed;
+      sleep_millis = std::min<std::uint32_t>(sleep_millis,
+                                             static_cast<std::uint32_t>(remaining / kNanosPerMilli));
     }
     // 至少睡 10 ms：避免在保活刚好到期的边界上忙转。
-    std::this_thread::sleep_for(std::chrono::milliseconds(std::max<std::uint32_t>(sleep_millis, 10)));
+    sleep_millis = std::max<std::uint32_t>(sleep_millis, 10);
+
+    // 用条件变量而不是 sleep_for：Stop() 能立刻把我们叫醒，用户按下「停止」
+    // 不用等最多 250 ms 才有反应。
+    std::unique_lock<std::mutex> lock(stop_mutex_);
+    stop_condition_.wait_for(lock, std::chrono::milliseconds(sleep_millis),
+                             [this] { return stop_requested_.load(std::memory_order_acquire); });
   }
 
   if (fatal_error_.load(std::memory_order_acquire)) {
@@ -221,16 +295,27 @@ void Runtime::RunUntilStopped() {
   }
 }
 
+void Runtime::PrintNextSteps() const {
+  const std::string_view name = feth_pair_->SystemSide().Name();
+  TETHERKIT_INFO("");
+  TETHERKIT_INFO("==== 网卡已就绪：{} ====", name);
+  TETHERKIT_INFO("接下来给它配一个 IP（RNDIS 设备通常自带 DHCP 服务器）：");
+  TETHERKIT_INFO("    sudo ipconfig set {} DHCP", name);
+  TETHERKIT_INFO("验证：");
+  TETHERKIT_INFO("    ipconfig getifaddr {}", name);
+  TETHERKIT_INFO("    ipconfig getsummary {}", name);
+  TETHERKIT_INFO("若要让流量默认走它（会顶掉现有默认路由，请谨慎）：");
+  TETHERKIT_INFO("    sudo route -n change default $(ipconfig getoption {} router)", name);
+  TETHERKIT_INFO("注意：ipconfig set 建立的是**临时**服务，只存活到下一次网络");
+  TETHERKIT_INFO("      配置变更，且不会出现在「系统设置 → 网络」里。");
+  TETHERKIT_INFO("");
+}
+
 // =============================================================================
 // 停机
 // =============================================================================
 
-void Runtime::Stop() {
-  if (stopped_ || !started_) {
-    stopped_ = true;
-    return;
-  }
-  stopped_ = true;
+void Runtime::Teardown() {
   TETHERKIT_INFO("正在停机……");
 
   // 严格按启动顺序的**逆序**拆除。
@@ -254,6 +339,8 @@ void Runtime::Stop() {
   // 4. 让设备退出 RNDIS：先 SET filter = 0 让它停止发数据，再发 HALT。
   //    必须在关闭 USB 句柄之前做 —— 否则设备会一直以为主机还在，
   //    下次插上时状态不干净。
+  //
+  //    这一步会发同步控制消息，因此必须在控制线程上 —— 本函数正是。
   if (state_machine_ != nullptr) {
     state_machine_->Stop();
     state_machine_.reset();
@@ -270,15 +357,97 @@ void Runtime::Stop() {
   // 6. 最后停 libusb 事件线程并释放上下文。
   usb_context_.reset();
 
+  // 拆完再刷一次：网卡名、统计都该归零，GUI 不该继续显示已经不存在的网卡。
+  // link_up 由事件维护、RefreshSnapshot 不会动它，所以在这里显式清掉 ——
+  // 停机后界面上还亮着「链路已连接」会误导人。
+  {
+    const std::lock_guard<std::mutex> guard(snapshot_mutex_);
+    snapshot_.link_up = false;
+  }
+  RefreshSnapshot();
   TETHERKIT_INFO("已停机");
 }
 
 // =============================================================================
-// StateMachineObserver
+// 快照与事件
 // =============================================================================
 
-void Runtime::OnStateChanged(rndis::State /*from*/, rndis::State /*to*/) {
-  // 状态机自己已经打了日志，这里不重复。保留这个钩子是为了将来接入指标上报。
+void Runtime::RefreshSnapshot() {
+  // 先在锁外把各组件的状况读出来 —— 这些读取会走 ioctl / 原子加载，
+  // 不该占着 snapshot_mutex_。
+  RuntimeSnapshot fresh;
+  if (device_ != nullptr) {
+    fresh.device_description = std::string{device_->Describe()};
+  }
+  if (state_machine_ != nullptr) {
+    fresh.rndis_state = state_machine_->CurrentState();
+    fresh.device_info = state_machine_->Info();
+    fresh.parameters = state_machine_->Parameters();
+  }
+  if (feth_pair_ != nullptr) {
+    fresh.system_interface = std::string{feth_pair_->SystemSide().Name()};
+    fresh.driver_interface = std::string{feth_pair_->DriverSide().Name()};
+  }
+  if (bridge_ != nullptr) {
+    fresh.bridge = bridge_->Snapshot();
+    fresh.paused = bridge_->Paused();
+  }
+
+  const std::lock_guard<std::mutex> guard(snapshot_mutex_);
+  // run_state、link_up 与 fatal_message 由各自的迁移点维护，这里不能覆盖。
+  fresh.run_state = snapshot_.run_state;
+  fresh.link_up = snapshot_.link_up;
+  fresh.fatal_message = snapshot_.fatal_message;
+  snapshot_ = std::move(fresh);
+}
+
+void Runtime::SetRunState(RunState next) {
+  RunState previous = RunState::kIdle;
+  {
+    const std::lock_guard<std::mutex> guard(snapshot_mutex_);
+    previous = snapshot_.run_state;
+    if (previous == next) {
+      return;
+    }
+    snapshot_.run_state = next;
+  }
+  Emit(RuntimeEvent{.kind = RuntimeEvent::Kind::kRunState,
+                    .a = static_cast<std::int64_t>(previous),
+                    .b = static_cast<std::int64_t>(next),
+                    .text = std::string{RunStateName(next)}});
+}
+
+void Runtime::RecordFatal(const Error& error) {
+  const std::string message = error.ToString();
+  TETHERKIT_ERROR("{}", message);
+
+  {
+    const std::lock_guard<std::mutex> guard(snapshot_mutex_);
+    // 只记**第一个**致命错误：后续的多半是它引发的连锁反应，覆盖掉反而丢了根因。
+    if (snapshot_.fatal_message.empty()) {
+      snapshot_.fatal_message = message;
+    }
+  }
+  fatal_error_.store(true, std::memory_order_release);
+  Emit(RuntimeEvent{.kind = RuntimeEvent::Kind::kFatal, .text = message});
+}
+
+void Runtime::Emit(const RuntimeEvent& event) const {
+  if (config_.event_sink != nullptr) {
+    config_.event_sink->OnRuntimeEvent(event);
+  }
+}
+
+// =============================================================================
+// StateMachineObserver（均在控制线程上被调用）
+// =============================================================================
+
+void Runtime::OnStateChanged(rndis::State from, rndis::State to) {
+  // 状态机自己已经打了日志，这里不重复，只把迁移转发给宿主。
+  Emit(RuntimeEvent{.kind = RuntimeEvent::Kind::kRndisState,
+                    .a = static_cast<std::int64_t>(from),
+                    .b = static_cast<std::int64_t>(to),
+                    .text = std::string{rndis::StateName(to)}});
 }
 
 void Runtime::OnNegotiated(const rndis::NegotiatedParameters& parameters,
@@ -286,16 +455,28 @@ void Runtime::OnNegotiated(const rndis::NegotiatedParameters& parameters,
   TETHERKIT_INFO("RNDIS 就绪：设备 MAC {}，MTU {}，链路 {:.0f} Mbps",
                  rndis::FormatMac(info.permanent_address).data(), parameters.mtu,
                  info.LinkSpeedMbps());
+
+  Emit(RuntimeEvent{.kind = RuntimeEvent::Kind::kNegotiated,
+                    .a = static_cast<std::int64_t>(parameters.mtu),
+                    .b = static_cast<std::int64_t>(info.LinkSpeedMbps()),
+                    .text = info.vendor_description});
 }
 
 void Runtime::OnLinkStateChanged(bool connected) {
   TETHERKIT_INFO("链路状态：{}", connected ? "已连接" : "已断开");
+
+  {
+    const std::lock_guard<std::mutex> guard(snapshot_mutex_);
+    snapshot_.link_up = connected;
+  }
 
   // 链路 down 时暂停数据搬运。继续往断开的链路发帧只是浪费，而且会把队列填满
   // 导致真正恢复时先送出一堆过期的帧。
   if (bridge_ != nullptr) {
     bridge_->SetPaused(!connected);
   }
+
+  Emit(RuntimeEvent{.kind = RuntimeEvent::Kind::kLink, .a = connected ? 1 : 0});
 }
 
 void Runtime::OnDeviceReset(bool addressing_lost) {
@@ -307,11 +488,14 @@ void Runtime::OnDeviceReset(bool addressing_lost) {
     bridge_->SetPaused(true);
     bridge_->SetPaused(false);
   }
+
+  Emit(RuntimeEvent{.kind = RuntimeEvent::Kind::kDeviceReset, .a = addressing_lost ? 1 : 0});
 }
 
 void Runtime::OnFatalError(const Error& error) {
-  TETHERKIT_ERROR("链路不可恢复：{}", error.ToString());
-  fatal_error_.store(true, std::memory_order_release);
+  // WithContext 是 &&-限定的，而这里拿到的是 const 引用，必须先拷一份。
+  Error annotated = error;
+  RecordFatal(std::move(annotated).WithContext("链路不可恢复"));
 }
 
 }  // namespace tetherkit::core
