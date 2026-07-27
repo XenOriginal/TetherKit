@@ -218,6 +218,9 @@ enum Format {
 
     /// 累计字节数。
     static func bytes(_ value: UInt64) -> String {
+        // ByteCountFormatter 把 0 渲染成 "Zero KB"（它的本地化行为），
+        // 在一排数字里显得格外突兀，单独处理掉。
+        guard value > 0 else { return "0 B" }
         let formatter = ByteCountFormatter()
         formatter.countStyle = .binary
         return formatter.string(fromByteCount: Int64(clamping: value))
