@@ -8,7 +8,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, swift-app]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -60,8 +60,8 @@ jobs:
 
       - name: 冒烟测试（--list 不需要 root）
         run: |
-          ./build/bin/tetherkit --version
-          ./build/bin/tetherkit --list
+          ./build/bin/tetherkit-cli --version
+          ./build/bin/tetherkit-cli --list
 
   # ----------------------------------------------------------------------------
   # 验证 README 声称的 macOS 13.3 下限。
@@ -95,6 +95,50 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build-min --output-on-failure
+
+  # ----------------------------------------------------------------------------
+  # 图形界面：SwiftPM 构建 + IPC 单元测试 + 组装 .app + 签名自检。
+  #
+  # macos-14 与 macos-26 各跑一遍：前者证明 GUI 声称的 macOS 14 下限在
+  # 最老的可用工具链上仍然成立，后者盯最新系统的回归。
+  # ----------------------------------------------------------------------------
+  gui:
+    name: GUI · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-26]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 libusb
+        run: brew install libusb
+
+      - name: 构建 C++（GUI 链接 libtetherkit）
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTETHERKIT_BUILD_TESTS=OFF -DTETHERKIT_BUILD_BENCHMARKS=OFF
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Swift 单元测试
+        run: TETHERKIT_LIB_DIR="$PWD/build/lib" swift test --package-path gui
+
+      - name: 组装 TetherKit.app
+        run: cmake --build build --target gui
+
+      - name: 自检
+        run: |
+          codesign --verify --deep --strict dist/TetherKit.app
+          # 安装模式的非 root 路径必须明确报错退出（而不是装出半套东西）。
+          payload="dist/TetherKit.app/Contents/Library/HelperTools"
+          if "${payload}/com.tetherkit.helper" --install; then
+            echo "::error::helper --install 在非 root 下竟然成功了"
+            exit 1
+          fi
+          # Finder 别名安装模式恒成功退出（结果打给 stdout）。
+          ./dist/TetherKit.app/Contents/MacOS/TetherKit --install-finder-alias
 
   # ----------------------------------------------------------------------------
   # ThreadSanitizer —— 无锁队列与多线程数据路径的正确性靠它兜底。

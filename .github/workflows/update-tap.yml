@@ -59,33 +59,46 @@ jobs:
       - name: 检出 tap
         run: git clone git@github.com:XiaoMiku01/homebrew-tap.git tap
 
-      - name: 改写 formula
+      - name: 改写 formula（tetherkit 与 tetherkit-cli）
         working-directory: tap
         run: |
+          # 两个 formula 共用同一份源码 tarball，url/sha256 一起改。
           # 用 perl 而不是 sed -i：BSD/GNU 的 -i 语义不一致，perl 两边都一样。
-          perl -pi -e 's|^  url ".*"|  url "${{ steps.src.outputs.url }}"|' Formula/tetherkit.rb
-          perl -pi -e 's|^  sha256 ".*"|  sha256 "${{ steps.src.outputs.sha256 }}"|' Formula/tetherkit.rb
+          for f in Formula/tetherkit.rb Formula/tetherkit-cli.rb; do
+            perl -pi -e 's|^  url ".*"|  url "${{ steps.src.outputs.url }}"|' "$f"
+            perl -pi -e 's|^  sha256 ".*"|  sha256 "${{ steps.src.outputs.sha256 }}"|' "$f"
 
-          # 确认真的改成了预期的值 —— 正则没匹配上时 perl 是静默不动的，
-          # 不显式核对的话会推上去一个纹丝未动的 formula 还以为成功了。
-          grep -q 'url "${{ steps.src.outputs.url }}"' Formula/tetherkit.rb \
-            || { echo "::error::url 没改成功"; exit 1; }
-          grep -q 'sha256 "${{ steps.src.outputs.sha256 }}"' Formula/tetherkit.rb \
-            || { echo "::error::sha256 没改成功"; exit 1; }
-          ruby -c Formula/tetherkit.rb
+            # 确认真的改成了预期的值 —— 正则没匹配上时 perl 是静默不动的，
+            # 不显式核对的话会推上去一个纹丝未动的 formula 还以为成功了。
+            grep -q 'url "${{ steps.src.outputs.url }}"' "$f" \
+              || { echo "::error::${f} 的 url 没改成功"; exit 1; }
+            grep -q 'sha256 "${{ steps.src.outputs.sha256 }}"' "$f" \
+              || { echo "::error::${f} 的 sha256 没改成功"; exit 1; }
+            ruby -c "$f"
+          done
 
       # 推之前先证明改出来的 formula 真的能用。brew install 会校验 sha256
       # 是否与 tarball 相符，等于把「校验和写错」这一类错误彻底挡在推送之前。
-      - name: 验证 formula 可安装
+      - name: 验证两个 formula 可安装
         run: |
           tap_dir="$(brew --repository)/Library/Taps/xiaomiku01/homebrew-tap"
           mkdir -p "$(dirname "$tap_dir")"
           ln -s "${GITHUB_WORKSPACE}/tap" "$tap_dir"
+
+          brew audit --strict --online xiaomiku01/tap/tetherkit-cli
           brew audit --strict --online xiaomiku01/tap/tetherkit
-          brew install --build-from-source xiaomiku01/tap/tetherkit
-          test "$(tetherkit --version | head -1)" \
+
+          brew install --build-from-source xiaomiku01/tap/tetherkit-cli
+          test "$(tetherkit-cli --version | head -1)" \
             = "TetherKit ${{ steps.src.outputs.version }} (C++23, macOS 13.3+)"
-          brew uninstall tetherkit
+
+          brew install --build-from-source xiaomiku01/tap/tetherkit
+          app="$(brew --prefix)/opt/tetherkit/TetherKit.app"
+          test -d "$app"
+          codesign --verify --deep --strict "$app"
+          "$app/Contents/MacOS/TetherKit" --install-finder-alias
+
+          brew uninstall tetherkit tetherkit-cli
 
       - name: 提交并推送
         working-directory: tap
@@ -96,6 +109,6 @@ jobs:
             echo "formula 已经是 ${{ inputs.tag }}，无需改动。"
             exit 0
           fi
-          git commit -am "tetherkit ${{ steps.src.outputs.version }}"
+          git commit -am "tetherkit + tetherkit-cli ${{ steps.src.outputs.version }}"
           git push
           echo "已把 tap 同步到 ${{ inputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
