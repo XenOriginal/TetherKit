@@ -18,6 +18,35 @@ struct ThroughputSample: Identifiable {
                                        transmitPacketsPerSecond: 0)
 }
 
+/// 连续重复的日志折叠成一条。
+///
+/// 周期性路径（比如每 2 秒一次的设备枚举）会把同一句话刷成一整列，淹没真正
+/// 有信息量的行；折叠成「一行 ×N」承载同样的信息。id 取首条的 —— 重复只更新
+/// 计数与时间戳，行的身份不变，列表不用整行重建。
+struct CollapsedLogEntry: Identifiable {
+    let first: LogEntry
+    private(set) var latest: LogEntry
+    private(set) var count: Int = 1
+
+    init(_ entry: LogEntry) {
+        first = entry
+        latest = entry
+    }
+
+    var id: UUID { first.id }
+
+    /// 时间戳以外完全相同才算重复 —— 消息里带着变化的值（地址、计数）就该分行。
+    func matches(_ entry: LogEntry) -> Bool {
+        entry.level == first.level && entry.thread == first.thread
+            && entry.message == first.message
+    }
+
+    mutating func absorb(_ entry: LogEntry) {
+        latest = entry
+        count += 1
+    }
+}
+
 /// helper 的可达性。界面靠它决定是「显示安装引导」还是「正常工作」。
 enum HelperAvailability: Equatable {
     case unknown
@@ -300,8 +329,21 @@ final class AppModel {
         return devices.first
     }
 
-    var filteredLogs: [LogEntry] {
-        logs.filter { $0.level >= logLevelFilter }
+    /// 过滤 + 连续去重后的日志。
+    ///
+    /// 折叠放在过滤**之后**：原始流里两条相同的 INFO 之间可能夹着 trace，
+    /// 按原始顺序折叠会失效，而用户在某个级别下看到的相邻重复才是该合并的。
+    /// O(n) 重算，n ≤ 2000，对 500 ms 的刷新节奏无感。
+    var filteredLogs: [CollapsedLogEntry] {
+        var collapsed: [CollapsedLogEntry] = []
+        for entry in logs where entry.level >= logLevelFilter {
+            if let last = collapsed.last, last.matches(entry) {
+                collapsed[collapsed.count - 1].absorb(entry)
+            } else {
+                collapsed.append(CollapsedLogEntry(entry))
+            }
+        }
+        return collapsed
     }
 
     /// 启动会话。会弹一次系统授权框。

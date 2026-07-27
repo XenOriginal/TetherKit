@@ -77,7 +77,11 @@ struct LogCard: View {
             }
             // 高度弹性：吃掉右栏剩余空间。最小值保证极端情况下（窗口压到最小、
             // 上面的卡都在最高状态）仍能看到几行，而不是被挤成一条缝。
-            .frame(minHeight: 110, maxHeight: .infinity)
+            //
+            // idealHeight 必须钉死：整页外面有一层兜底 ScrollView，它测量内容
+            // 用的是理想尺寸，而内嵌 ScrollView 的理想高度 = 全部日志展开的高度
+            // —— 不钉住的话日志一多整页就被撑开，滚动又回来了。
+            .frame(minHeight: 110, idealHeight: 110, maxHeight: .infinity)
             .background(.quaternary.opacity(0.35),
                         in: RoundedRectangle(cornerRadius: Design.Radius.control))
             .onChange(of: model.filteredLogs.last?.id) { _, newValue in
@@ -91,27 +95,43 @@ struct LogCard: View {
 
     private var plainText: String {
         model.filteredLogs
-            .map { "\(Format.time($0.timestamp)) [\($0.level.label)] [\($0.thread)] \($0.message)" }
+            .map { item in
+                var line = "\(Format.time(item.latest.timestamp)) [\(item.latest.level.label)] "
+                    + "[\(item.latest.thread)] \(item.latest.message)"
+                if item.count > 1 {
+                    line += "（×\(item.count)，自 \(Format.time(item.first.timestamp)) 起）"
+                }
+                return line
+            }
             .joined(separator: "\n")
     }
 }
 
 private struct LogRow: View {
-    let entry: LogEntry
+    let entry: CollapsedLogEntry
 
     var body: some View {
         HStack(alignment: .top, spacing: Design.Spacing.small) {
-            Text(Format.time(entry.timestamp))
+            Text(Format.time(entry.latest.timestamp))
                 .foregroundStyle(.tertiary)
-            Text(entry.level.label)
-                .foregroundStyle(Design.logColor(for: entry.level))
+            Text(entry.latest.level.label)
+                .foregroundStyle(Design.logColor(for: entry.latest.level))
                 // 固定宽度让级别列对齐，扫读时眼睛不用横向找。
                 .frame(width: 46, alignment: .leading)
-            Text(entry.message)
-                .foregroundStyle(Design.logColor(for: entry.level))
+            Text(entry.latest.message)
+                .foregroundStyle(Design.logColor(for: entry.latest.level))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            if entry.count > 1 {
+                Text("×\(entry.count)")
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(.quaternary, in: Capsule())
+                    .help("这句话连续出现了 \(entry.count) 次，首次在 \(Format.time(entry.first.timestamp))")
+            }
         }
         .font(.system(size: 11, design: .monospaced))
     }
