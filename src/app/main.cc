@@ -76,7 +76,7 @@ extern "C" void HandleSignal(int /*signal_number*/) {
 
 void PrintUsage() {
   std::fputs(
-      "用法：sudo tetherkit [选项]\n"
+      "用法：sudo tetherkit-cli [选项]\n"
       "\n"
       "  macOS 用户态 RNDIS 驱动：把 RNDIS 设备（Android USB 网络共享等）\n"
       "  变成一张系统可见的网卡。\n"

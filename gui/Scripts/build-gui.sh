@@ -30,9 +30,14 @@ BUILD_DIR="${TETHERKIT_BUILD_DIR:-${REPO_ROOT}/build}"
 DIST_DIR="${REPO_ROOT}/dist"
 
 SWIFT_CONFIGURATION="release"
+# 追加给 swift build 的额外参数。Homebrew formula 需要传 --disable-sandbox：
+# brew 的构建沙箱里嵌套不了 SwiftPM 自己的 sandbox-exec（homebrew-core 里
+# 所有 Swift formula 都这么干）。本地构建不传即可。
+SWIFT_BUILD_FLAGS=()
 for argument in "$@"; do
   case "${argument}" in
     --debug) SWIFT_CONFIGURATION="debug" ;;
+    --swift-build-flags=*) IFS=' ' read -r -a SWIFT_BUILD_FLAGS <<< "${argument#*=}" ;;
     -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "未知参数：${argument}" >&2; exit 2 ;;
   esac
@@ -63,13 +68,17 @@ log "TetherKit ${VERSION}（Swift ${SWIFT_CONFIGURATION} 构建）"
 # 编译 Swift
 # ------------------------------------------------------------------------------
 log "编译 Swift 目标"
+# ⚠️ 空数组在 macOS 自带的 bash 3.2 里与 set -u 相冲（"${arr[@]}" 报
+#    unbound variable），必须用 ${arr[@]+...} 这种守护写法展开。
 TETHERKIT_LIB_DIR="${LIB_DIR}" swift build \
   --package-path "${GUI_DIR}" \
-  --configuration "${SWIFT_CONFIGURATION}"
+  --configuration "${SWIFT_CONFIGURATION}" \
+  ${SWIFT_BUILD_FLAGS[@]+"${SWIFT_BUILD_FLAGS[@]}"}
 
 SWIFT_BIN_DIR="$(TETHERKIT_LIB_DIR="${LIB_DIR}" swift build \
   --package-path "${GUI_DIR}" \
   --configuration "${SWIFT_CONFIGURATION}" \
+  ${SWIFT_BUILD_FLAGS[@]+"${SWIFT_BUILD_FLAGS[@]}"} \
   --show-bin-path)"
 
 # ------------------------------------------------------------------------------
