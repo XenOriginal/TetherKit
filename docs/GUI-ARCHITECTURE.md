@@ -1,0 +1,246 @@
+# GUI 实现备忘
+
+本文记录 TetherKit 图形界面**已经实现了什么、为什么这么实现、哪些地方碰不得**。
+
+配套阅读：[GUI-SPIKE.md](GUI-SPIKE.md) 记录的是动手之前的可行性验证（尤其是被
+排除的三条路线）；本文记录的是落地之后的结构与约束。**改 GUI 相关代码前先读
+这两篇**，能省掉重新踩一遍坑的时间。
+
+---
+
+## 1. 进程与信任模型
+
+```
+┌─────────────────────────────┐         ┌──────────────────────────────┐
+│  TetherKit.app  (uid 501)   │         │  tetherkit-helper  (uid 0)   │
+│                             │   XPC   │                              │
+│  · SwiftUI 界面             │ ──────► │  · 持有 RNDIS 会话           │
+│  · 弹系统授权框取凭据       │         │  · 建/销毁 feth、开 BPF      │
+│  · 定时拉状态刷界面         │ ◄────── │  · 配 IP（ipconfig / route） │
+│  · 不碰 USB、不碰网卡       │         │  · 复核每次调用的凭据        │
+└─────────────────────────────┘         └──────────────────────────────┘
+                                              ▲
+                                              │ 按需拉起（MachServices）
+                                        ┌─────┴──────┐
+                                        │  launchd   │
+                                        └────────────┘
+```
+
+**helper 的 root 来自 launchd，跟用户按没按指纹毫无关系。** 它一启动就是 root，
+任何能连上 Mach 服务的进程都能发请求。所以「谁在调用」必须由 helper 自己回答 ——
+每个特权方法都要求附带一份 App 刚拿到的 `AuthorizationRef` 外部形式，并当场复核。
+
+安全性建立在**凭据复核**而不是**代码签名校验**上。后者（SMJobBless 的做法）依赖
+证书的 designated requirement，而源码分发下每台机器编出的 cdhash 都不同，写死的
+DR 必然对不上。凭据复核对开源工具是更合适的模型：谁编译的都一样安全。
+
+> **一句必须记住的话：授权 ≠ root。**
+> `AuthorizationCopyRights` 成功不改变进程的任何东西，uid / euid 一个都没动。
+> 它只产出一张「用户在某时刻确认过」的凭据。顺序不能反：不是「先弹指纹拿到
+> root」，而是「先有常驻的 root helper，每次操作弹指纹拿凭据交给它复核」。
+
+---
+
+## 2. 目录结构
+
+```
+include/tetherkit/capi/tetherkit_c.h   全项目唯一的 extern "C" 边界
+src/capi/                              C ABI 实现
+├── capi_support.{h,cc}                定长缓冲拷贝、错误翻译、网卡名校验
+├── core_foundation_support.{h,cc}     CF / SCDynamicStore 的最小 RAII 封装
+├── environment.cc                     版本、环境预检、设备枚举（免 root）
+├── log_ring.cc                        日志环形缓冲
+├── net_config.cc                      DHCP / 静态 IP / 状态回读
+├── orphan_cleanup.cc                  feth 落盘登记与孤儿清理
+├── process_runner.{h,cc}              posix_spawn 执行外部工具（不过 shell）
+└── session.cc                         会话生命周期、状态快照、事件轮询
+
+gui/
+├── Package.swift                      SwiftPM 工程
+├── Sources/
+│   ├── CTetherKit/                    C ABI 的模块映射（头是符号链接）
+│   ├── TetherKitIPC/                  App 与 helper 共享：协议、模型、授权
+│   ├── TetherKitCore/                 C ABI 的 Swift 封装
+│   ├── TetherKitHelper/               特权 helper
+│   └── TetherKitApp/                  SwiftUI 界面
+├── Resources/                         Info.plist、LaunchDaemon plist
+└── Scripts/                           构建 / 安装 / 卸载脚本
+```
+
+---
+
+## 3. 数据流
+
+| 方向 | 机制 | 周期 |
+|---|---|---|
+| 库 → helper：状态 | `tk_session_status_get` 拷贝快照 | 按需 |
+| 库 → helper：事件 | `tk_session_poll_events` 取环形队列 | 随状态查询搭车 |
+| 库 → helper：日志 | `tk_drain_logs` 取环形队列 | 每次 `drainFeed` |
+| helper → App | XPC，JSON 编码的 Codable | 500 ms |
+
+**全链路没有一个回调穿过语言边界。** 这是刻意的：底层的回调会从 libusb 事件
+线程与控制线程上来，跨语言要 marshal；更要命的是重入 —— 在回调里调停机会自等
+死锁（`Stop()` 要 join 控制线程）。一律改成「库内排队、宿主轮询」。
+
+---
+
+## 4. 关键实现约束（改代码时别破坏这些）
+
+### 4.1 C ABI
+
+- **不跨边界传所有权。** 输出一律写进调用方提供的定长结构体。唯一例外是
+  `tk_session_t*`，创建 / 销毁配对明确。
+- **定长缓冲的截断必须落在 UTF-8 字符边界上。** 错误消息全是中文，按字节硬切
+  会让 Swift 侧 `String(cString:)` 整串变成替换字符。两个方向都要管：C 侧是
+  `capi_support.h` 的 `CopyText`，Swift 侧是 `CInterop.swift`。
+- **C 枚举与 C++ 枚举靠顺序一致直接强转**，`session.cc` 里有一组
+  `static_assert` 把它焊死。中间插入一个枚举值会静默错位，且毫无报错。
+- **`tk_session` 的成员声明顺序有约束**：`events` 必须在 `runtime` 之前，
+  销毁时 `runtime` 才会先 join 控制线程。反过来就是 use-after-free。
+
+### 4.2 Runtime 线程模型
+
+`Runtime` 自己拥有一条控制线程，**启动序列、保活循环、停机拆除全部在它上面跑**。
+这不只是为了让 `Start()` 非阻塞，更是把 `StateMachine` 的「所有方法同线程调用」
+从口头约定变成结构性保证 —— 优雅停机要发同步控制消息，而 libusb 的同步 API 在
+事件线程上会返回 `LIBUSB_ERROR_BUSY`。
+
+宿主线程**只**通过 `Snapshot()` 读状态，绝不碰那些组件指针 —— 否则 `Stop()` 里的
+`reset()` 与宿主的读会构成数据竞争，表现为随机崩溃。
+
+`RequestStop()` 保持只写一个原子（异步信号安全），代价是最多晚一个循环周期
+（≤250 ms）被看到；`Stop()` 额外用条件变量唤醒控制线程，所以界面上按「断开」
+是立刻响应的。
+
+### 4.3 网卡配置
+
+- **地址一律经 `ipconfig` 下发，不要改回裸 `SIOCAIFADDR`。** 裸 ioctl 配出来的
+  地址内核认、configd 不认 —— 不会有服务、不会有 scoped DNS、不会有默认路由。
+  这一条已在 GUI-SPIKE 第 3.2 / 6.3 节实测确认。
+- **外部工具用 `posix_spawn` 传 argv 数组，不过 shell。** 参数虽然都校验过，
+  但只要经过 `/bin/sh`，防线就依赖「校验有没有漏」这一条。
+- **先读空管道再 `waitpid`。** 反过来是经典的 pipe 死锁：子进程写满 64 KiB
+  缓冲后阻塞在 `write`，我们阻塞在 `waitpid`。`process_runner.cc` 有对应测试。
+- **网卡名只接受 `feth<数字>`。** 这不是洁癖 —— 挡的是「误把 en0 传进来，
+  把用户的 Wi-Fi 配置冲掉」这类事故。
+- **`SCDynamicStore` 句柄必须是进程级长命的。** 动态存储里的值由设置它的会话
+  持有，会话一释放值就没了。用临时 store 会出现「写入返回成功、读回来是空」
+  这种极难查的现象。
+
+### 4.4 授权复核（`TetherKitIPC/Authorization.swift`）
+
+三条一旦写错就是漏洞的细节，都写在那个文件的注释里：
+
+1. helper 侧复核时**绝不能带 `.interactionAllowed`** —— daemon 没有 UI 会话，
+   真让它能弹框，等于任何进程都能随意触发系统授权框骚扰用户。
+2. **`AuthorizationFree` 不能带 `.destroyRights`** —— 凭据归 App 所有，helper
+   只是借来核对，带上会把 App 那边的授权一起作废。
+3. **探测类方法不要求授权** —— 否则「helper 没装」和「授权没过」两种失败会混在
+   一起，没法给用户准确提示。
+
+取凭据（App 侧，**要**带 `.interactionAllowed`）与复核（helper 侧，**不**带）
+刻意写在同一个文件里：它们的差别只有一个标志位，改一边时另一边就在眼前。
+
+### 4.5 Swift 侧
+
+- **XPC 的错误块与 reply 块可能都被调用**（请求已发出后连接才断），而
+  `CheckedContinuation` 兑现两次是直接崩溃。`HelperClient` 里每次调用都用
+  `ContinuationGuard` 包一层。
+- **连接断掉后必须丢弃缓存的 `NSXPCConnection`**，否则后续调用一直打在死连接
+  上，表现为「helper 明明装好了却连不上」。
+- **helper 里凡是可能耗时的操作都异步回复**（启动会话要 USB 握手，DHCP 要等
+  租约最多 10 秒）。在 XPC 队列上阻塞会把同一条连接上后续的状态轮询一起卡住，
+  界面表现成整个卡死。
+- **速率的分母用库那边的单调时钟差**，不是界面定时器周期 —— 两次拉取之间的真实
+  间隔会被调度拉长，用固定周期当分母会把速率算高。
+- **C 的定长 char 数组在 Swift 里是元组**，不能下标也不能直接转 String，统一走
+  `CInterop.swift`。读用「扫到 NUL 或扫到底」，不用 `String(cString:)` —— 后者
+  在缓冲被写满、没有 NUL 时会越界读。
+- **非负值的 C 枚举被导入成 `UInt32`**，而结构体字段是 `int32_t`，比较前必须
+  显式转换。
+
+### 4.6 打包
+
+- **拷 dylib 必须用 `cp -a`，不能用 `install`。** `libtetherkit.dylib` 与
+  `libtetherkit.0.dylib` 是软链，`install` 会各拷一份独立的真实文件，之后
+  `install_name_tool` 只改到其中一份，而按 `@rpath` 加载的恰好是没改到的那份。
+- **`install_name_tool` 改完字节必须重签。** arm64 要求有效签名，改字节会让原
+  签名失效，之后加载被内核直接拒绝（`Killed: 9`），日志里看不出原因。
+- **libusb 是 `libtetherkit.dylib` 的依赖，不是可执行文件的。** 对着可执行文件
+  查 `otool -L` 会得到空结果，整段处理被静默跳过 —— 装完看起来正常，实际仍依赖
+  Homebrew。
+- **发布产物里必须删掉指向构建目录的 rpath。** 它是绝对路径，在开发机上一定
+  存在，dyld 会优先用它，内嵌的副本永远得不到验证 —— 等换台机器才暴露。
+  `build-gui.sh` 会删；`Package.swift` 里也把它排在最后作为第二道保险。
+- **bash 里变量后面紧跟中文标点必须写 `${VAR}`。** UTF-8 locale 下全角标点的
+  首字节（0xEF）会被 `isalnum()` 判为真、吸进变量名。C locale 下不复现。
+
+---
+
+## 5. 已实现 / 未实现
+
+### 已实现
+
+| 能力 | 位置 |
+|---|---|
+| 环境预检（root、feth sysctl、MTU 上限） | `tk_check_environment` |
+| 设备枚举 + 厂商名/产品名/序列号 | `tk_list_devices` |
+| 会话生命周期（非阻塞启动、状态快照、事件） | `tk_session_*` |
+| 日志捕获与轮询 | `tk_drain_logs` |
+| DHCP / 静态 IP / 撤销 | `tk_net_apply`、`tk_net_clear` |
+| 真实生效状态回读（地址、网关、DNS、主默认路由） | `tk_net_query` |
+| 孤儿 feth 清理 | `tk_cleanup_orphan_interfaces` |
+| 特权 helper + 凭据复核 | `gui/Sources/TetherKitHelper` |
+| SwiftUI 界面（状态、设备、网络、吞吐、日志） | `gui/Sources/TetherKitApp` |
+
+### 未实现 / 已知限制
+
+| 项 | 说明 |
+|---|---|
+| **静态 IP 的 DNS 未经真机验证** | IPConfiguration 只在 DHCP 模式发布 DNS。静态模式我们往它建立的服务上补一个 DNS 键，能否被 IPMonitor 采纳未经验证。因此 `tk_net_query` 一律**回读**真实生效的解析器，界面显示回读结果 —— 赌错了也只是 DNS 不生效，不会有破坏 |
+| **端到端未在真实设备上跑过** | GUI 各屏已逐屏核对渲染，但「插上手机 → 连接 → 上网」的完整链路尚未验证 |
+| **热插拔** | `Context::SupportsHotplug()` 存在但未接入；目前靠界面每 500 ms 重新枚举 |
+| **IPv6** | 网卡配置只覆盖 IPv4 |
+| **多会话** | helper 同一时刻只允许一个会话 |
+| **App 图标** | 尚无 `.icns`，用系统默认图标 |
+
+---
+
+## 6. 构建与安装
+
+```bash
+# 1. C++ 部分（产出 libtetherkit.dylib）
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j
+
+# 2. GUI（等价于直接跑 ./gui/Scripts/build-gui.sh）
+cmake --build build --target gui
+
+# 3. 安装特权组件（需要密码）
+sudo ./gui/Scripts/install-helper.sh
+
+# 4. 运行
+open dist/TetherKit.app
+```
+
+开发时也可以直接用 SwiftPM，不经过打包脚本：
+
+```bash
+export TETHERKIT_LIB_DIR="$PWD/build/lib"
+swift build --package-path gui
+```
+
+卸载：
+
+```bash
+sudo ./gui/Scripts/uninstall-helper.sh
+```
+
+排障入口：
+
+| 现象 | 先看哪里 |
+|---|---|
+| 界面一直显示「需要先安装特权组件」 | `launchctl print system/com.tetherkit.helper` |
+| helper 起不来 | `/var/log/tetherkit-helper.log` |
+| 连接失败 | 界面里的「运行日志」面板（可一键复制） |
+| 装完还是依赖 Homebrew | `otool -L dist/TetherKit.app/Contents/Frameworks/libtetherkit.0.*.dylib` |

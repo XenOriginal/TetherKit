@@ -105,6 +105,33 @@ if(TETHERKIT_BUILD_BENCHMARKS)
 endif()
 
 # ------------------------------------------------------------------------------
+# 图形界面
+#
+# Swift 部分由 SwiftPM 构建（见 gui/Package.swift 里为什么不用 CMake 的 Swift
+# 支持），这里只提供一个方便的入口，把「先建 C++ 再建 Swift」串起来：
+#
+#   cmake --build build --target gui
+#
+# 刻意做成**手动触发**的目标（EXCLUDE_FROM_ALL 的效果）：GUI 需要 Xcode 工具链，
+# 而只想要命令行的人不该被迫装它。
+# ------------------------------------------------------------------------------
+if(TETHERKIT_BUILD_SHARED_LIB AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gui/Package.swift")
+  # 显式把当前构建目录传给脚本（它默认找 <repo>/build），这样在
+  # build-rel / build-tsan 之类的非默认目录里也能正确找到 libtetherkit。
+  add_custom_target(
+    gui
+    COMMAND "${CMAKE_COMMAND}" -E env "TETHERKIT_BUILD_DIR=${CMAKE_BINARY_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gui/Scripts/build-gui.sh"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    DEPENDS tetherkit_shared
+    COMMENT "构建 TetherKit.app 与 tetherkit-helper"
+    USES_TERMINAL
+    VERBATIM)
+  set_property(TARGET gui APPEND PROPERTY
+               ADDITIONAL_CLEAN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/dist")
+endif()
+
+# ------------------------------------------------------------------------------
 # 构建配置摘要
 # ------------------------------------------------------------------------------
 message(STATUS "")

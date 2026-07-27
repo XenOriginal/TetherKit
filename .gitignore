@@ -41,6 +41,12 @@ _deps/
 .cache/
 .clangd/
 
+# ---- GUI 打包产物 ----
+#
+# dist/ 由 gui/Scripts/build-gui.sh 生成（TetherKit.app + helper），
+# 是纯派生物，不进版本库。
+dist/
+
 # ---- 运行期产物 ----
 *.log
 *.pcap

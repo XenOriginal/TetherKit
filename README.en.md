@@ -223,6 +223,51 @@ In other words, root is a requirement of the interface side, not the USB side �
 
 ---
 
+## Graphical interface
+
+Besides the CLI there is a SwiftUI app that reduces the whole flow to three
+clicks — pick a device, connect, configure IP — and shows live throughput and
+logs.
+
+It comes in two pieces: `TetherKit.app` runs as a **normal user**, and anything
+that needs root is handed to `tetherkit-helper`, a privileged component launched
+on demand by launchd. Every privileged call carries an authorization credential
+the user has just confirmed. The app itself needs no entitlements.
+
+```bash
+# 1. Build the C++ side first (produces libtetherkit.dylib)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j
+
+# 2. Build the app and the helper (needs the Xcode toolchain)
+cmake --build build --target gui        # same as ./gui/Scripts/build-gui.sh
+
+# 3. Install the privileged component (asks for your password)
+sudo ./gui/Scripts/install-helper.sh
+
+# 4. Run
+open dist/TetherKit.app
+```
+
+Uninstall: `sudo ./gui/Scripts/uninstall-helper.sh`
+
+The app lets you choose how the virtual interface gets its address:
+
+| Mode | Notes |
+|---|---|
+| Automatic (DHCP) | Handled by the system's IPConfiguration — lease, DNS and routes are all set up for you. Most phones ship a DHCP server, so this is the recommended choice |
+| Static IP | Enter address, netmask, gateway and DNS yourself. Validated as you type, including netmask contiguity |
+
+There is also a "route all traffic through this interface" switch. With it off,
+only traffic explicitly bound to the interface uses it. You usually do not need
+it — when no other network is available, macOS picks this interface as the
+primary service on its own.
+
+**Requires** macOS 14+ (the CLI still supports 13.3+). Design notes and
+trade-offs are in [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md).
+
+---
+
 ## Documentation
 
 The documents below are written in Chinese.
@@ -233,6 +278,8 @@ The documents below are written in Chinese.
 | [docs/RNDIS-PROTOCOL.md](docs/RNDIS-PROTOCOL.md) | **Protocol reference**: field offsets, status codes, OIDs, state machine, device quirks. Includes the three rules that are easiest to get wrong |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | **Tuning guide**: the knobs, how to identify the bottleneck, known limits |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | **Benchmark results** (auto-generated) + methodology and known limitations |
+| [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md) | **Graphical interface**: process and trust model, data flow, implementation constraints, what is and is not implemented |
+| [docs/GUI-SPIKE.md](docs/GUI-SPIKE.md) | **Feasibility spike**: why privilege escalation is done this way, and the three routes that were ruled out |
 | [AGENTS.md](AGENTS.md) | Implementation notes: verified facts about the environment, progress, **pitfalls hit along the way**, and the to-be-verified checklist |
 
 ---

@@ -210,6 +210,47 @@ ipconfig getifaddr feth0
 
 ---
 
+## 图形界面
+
+命令行之外还有一个 SwiftUI 图形界面，把「选设备 → 连接 → 配 IP」做成了三步点击，
+并实时显示吞吐与日志。
+
+它由两部分组成：`TetherKit.app` 以**普通用户身份**运行，需要 root 的操作交给一个
+由 launchd 按需拉起的特权组件 `tetherkit-helper`，每次调用都附带一份用户刚确认过
+的授权凭据。App 本身不需要任何 entitlement。
+
+```bash
+# 1. 先构建 C++ 部分（产出 libtetherkit.dylib）
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j
+
+# 2. 构建界面与特权组件（需要 Xcode 工具链）
+cmake --build build --target gui        # 等价于 ./gui/Scripts/build-gui.sh
+
+# 3. 安装特权组件（需要输入密码）
+sudo ./gui/Scripts/install-helper.sh
+
+# 4. 运行
+open dist/TetherKit.app
+```
+
+卸载：`sudo ./gui/Scripts/uninstall-helper.sh`
+
+界面里可以配置**上网方式**：
+
+| 方式 | 说明 |
+|---|---|
+| 自动（DHCP） | 交给系统的 IPConfiguration，租约、DNS、路由全部自动配好。绝大多数手机都自带 DHCP 服务器，推荐 |
+| 静态 IP | 手动指定 IP、子网掩码、网关与 DNS。输入时即时校验（含子网掩码的连续性） |
+
+另有一个「让所有流量默认走这张网卡」开关。不开时只有绑定到本网卡的流量走它；
+本机没有别的可用网络时通常不需要开 —— 系统会自己把它选为主服务。
+
+**要求**：macOS 14+（命令行部分仍支持 13.3+）。实现细节与设计取舍见
+[docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md)。
+
+---
+
 ## 文档
 
 | 文档 | 内容 |
@@ -218,6 +259,8 @@ ipconfig getifaddr feth0
 | [docs/RNDIS-PROTOCOL.md](docs/RNDIS-PROTOCOL.md) | **协议参考**：字段偏移、状态码、OID、状态机、设备 quirk。含三条最容易搞错的规则 |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | **调优指南**：旋钮、怎么判断瓶颈、已知限制 |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | **基准结果**（自动生成）+ 测量方法与已知局限 |
+| [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md) | **图形界面**：进程与信任模型、数据流、实现约束、已实现/未实现清单 |
+| [docs/GUI-SPIKE.md](docs/GUI-SPIKE.md) | **可行性验证**：为什么这么做特权提升，以及被排除的三条路线 |
 | [AGENTS.md](AGENTS.md) | 实现备忘：已实测确认的环境事实、进度、**踩过的坑**、待验证清单 |
 
 ---

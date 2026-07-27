@@ -110,9 +110,19 @@ TetherKit/
 │   ├── Sanitizers.cmake        ASan/UBSan/TSan 开关
 │   └── Optimizations.cmake     数据路径优化选项与取舍说明
 ├── include/tetherkit/     公开头文件（按模块分子目录）
+│   └── capi/                   C ABI —— 全项目唯一的 extern "C" 边界
 ├── src/                   实现
 │   ├── version.cc.in           CMake 注入版本号的模板
+│   ├── capi/                   C ABI 实现（会话、网卡配置、日志、孤儿清理）
 │   └── app/                    命令行入口
+├── gui/                   SwiftUI 图形界面（SwiftPM 工程，见 docs/GUI-ARCHITECTURE.md）
+│   ├── Sources/CTetherKit/     C ABI 的模块映射（头文件是符号链接）
+│   ├── Sources/TetherKitIPC/   App 与 helper 共享：XPC 协议、模型、授权
+│   ├── Sources/TetherKitCore/  C ABI 的 Swift 封装
+│   ├── Sources/TetherKitHelper/  特权 helper（root，由 launchd 拉起）
+│   ├── Sources/TetherKitApp/   SwiftUI 界面
+│   ├── Resources/              Info.plist、LaunchDaemon plist
+│   └── Scripts/                构建 / 安装 / 卸载脚本
 ├── tests/                 doctest 单元测试（单一二进制 + test-suite 过滤）
 ├── benchmarks/            自带轻量 harness 的性能基准
 ├── third_party/doctest/   vendored doctest 2.4.12 单头文件
@@ -129,7 +139,14 @@ tk_rndis / tk_net / tk_usb  ← tk_common
 tk_core    ← common + rndis + net + usb
    ↑
 tetherkit（可执行）← core
+tk_capi（C ABI）  ← core          → 打包成共享库 libtetherkit
+   ↑
+gui/（Swift）     ← libtetherkit
 ```
+
+Swift 侧只能看见 `libtetherkit`，看不见任何 C++ 符号（导出符号白名单卡死在
+`_tk_*`）。C++ 层的接口用了 `std::expected` / `std::span` / 抽象基类，
+Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 
 ---
 
@@ -170,18 +187,37 @@ tetherkit（可执行）← core
 | 8 | `feat(rndis): RNDIS 状态机` + CTest 缺陷修复 | ✅ | **顺带发现测试一直在空跑，见第 7 节第 9 条** |
 | 9 | `feat(core): 数据路径桥接` | ✅ | 三线程模型 + 背压 + 统计；修了 TX 统计恒为 0 的缺陷 |
 | 10 | `feat(app): 运行时编排与命令行` | ✅ | 启动/停机顺序、信号处理、CLI |
-| 11 | `docs: 设计文档、协议参考、性能指南` | ✅ | 本次 |
+| 11 | `docs: 设计文档、协议参考、性能指南` | ✅ | |
+| 12 | `feat(capi): C ABI 边界与免 root 的三项能力` | ✅ | 版本/环境预检/设备枚举；日志改环形缓冲 + 轮询 |
+| 13 | `refactor(core): Runtime 改为自持控制线程` | ✅ | 非阻塞 Start、一致快照、事件汇 |
+| 14 | `feat(capi): 会话生命周期、状态快照与事件轮询` | ✅ | 枚举对齐用 static_assert 焊死 |
+| 15 | `feat(capi): 网卡上网方式配置与孤儿网卡清理` | ✅ | DHCP / 静态 IP；feth 落盘登记 |
+| 16 | `build: 输出共享库 libtetherkit` | ✅ | tk_capi 改 OBJECT 库；导出符号白名单 |
+| 17 | `feat(gui): SwiftPM 工程骨架、C 互操作与 XPC 协议` | ✅ | 头文件走符号链接，永不失同步 |
+| 18 | `feat(gui): 特权 helper 与授权凭据复核` | ✅ | LaunchDaemon + AuthorizationRef |
+| 19 | `feat(gui): SwiftUI 设计系统与主界面` | ✅ | 状态卡/设备/吞吐/日志 |
+| 20 | `feat(gui): 上网方式配置界面` | ✅ | DHCP / 静态 IP + 生效状态回读 |
+| 21 | `build(gui): 打包与安装脚本、GUI 架构文档` | ✅ | 本次 |
 
 ### 当前状态
 
-- **代码量**：库与应用 9378 行、测试 3886 行、基准 852 行、文档 1577 行
-- **测试**：16 个 ctest 用例 / 15 个 doctest test-suite，共 168 个用例、6453 条断言，全部通过
-- **构建**：`-Werror` 零告警；ThreadSanitizer 下全绿
+- **测试**：22 个 ctest 用例全部通过（新增 capi.support / capi.basics /
+  capi.log_ring / capi.session / capi.process / capi.net_config 六个 suite）
+- **构建**：`-Werror` 零告警；命令行、共享库、GUI 三套产物均可构建
 - **可运行**：`--version` / `--help` / `--list` 均正常；非 root 启动给出清晰提示
+  并返回退出码 1；`TetherKit.app` 与 `tetherkit-helper` 打包后均可启动
 - **已验证**：USB 侧在真实 RNDIS 设备上跑通（枚举、声明接口、RNDIS 握手），
   且 USB 这一侧**不需要 root**；feth 私有 ABI、两个私有 BPF ioctl、
   以及「BPF 写入能让对侧 IP 栈收到帧」这个核心前提都已实测确认。详见第 6 节
-- **未验证**：端到端吞吐（至今未做过任何压测）
+- **未验证**：端到端吞吐（至今未做过任何压测）；GUI 与真实设备的完整链路
+  （界面各屏已逐屏核对渲染，但没插着设备跑过「连接 → 配 IP → 上网」）
+
+### GUI 相关
+
+**改 GUI、C ABI 或 Runtime 线程模型之前，先读 `docs/GUI-ARCHITECTURE.md`。**
+那里记着一批「写错了不会当场报错、但会以很难查的方式出问题」的约束：UTF-8
+边界截断、枚举顺序耦合、`cp -a` 与软链、install_name_tool 后必须重签、
+授权复核的三个标志位、pipe 死锁的读写顺序等。
 
 ## 6. 验证清单（需要 root 或真实 RNDIS 设备）
 

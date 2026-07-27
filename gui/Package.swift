@@ -53,13 +53,18 @@ let tetherkitLinkerSettings: [LinkerSetting] = [
         // 写成 gcc 风格的 "-Wl,-rpath,..." 会被 swiftc 当成自己的参数，
         // 报「unknown argument」—— 这不是链接错误，而是驱动层就拒了。
         //
-        // 三条 rpath 各有用途：
-        //   1. 构建产物目录 —— 开发时 `swift run` 直接能跑；
-        //   2. ../Frameworks —— 装进 .app 之后 dylib 在那里；
-        //   3. 可执行文件同级 —— helper 是裸可执行文件，dylib 就在它旁边。
-        "-Xlinker", "-rpath", "-Xlinker", libraryDirectory,
+        // 三条 rpath 各有用途，**顺序有讲究**（dyld 按声明顺序逐条试）：
+        //   1. ../Frameworks —— 装进 .app 之后 dylib 在那里；
+        //   2. 可执行文件同级 —— helper 是裸可执行文件，dylib 就在它旁边；
+        //   3. 构建产物目录 —— 开发时 `swift run` 直接能跑。
+        //
+        // 构建目录必须排在**最后**：它是一个绝对路径，在开发机上一定存在。
+        // 排在前面的话，打好包的 .app 在本机加载的仍是构建目录里的那份，
+        // 内嵌的副本永远得不到验证 —— 等换台机器才暴露，而那时已经晚了。
+        // （Scripts/build-gui.sh 还会把这条 rpath 从发布产物里彻底删掉。）
         "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
         "-Xlinker", "-rpath", "-Xlinker", "@executable_path",
+        "-Xlinker", "-rpath", "-Xlinker", libraryDirectory,
     ]),
     .linkedLibrary("tetherkit"),
 ]

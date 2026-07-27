@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TetherKit.app 的 Info.plist 模板。
+
+  Scripts/build-gui.sh 会把 __TETHERKIT_VERSION__ 替换成真实版本号后拷进
+  TetherKit.app/Contents/。
+
+  App 本身**不需要任何 entitlement**：它以普通用户身份运行，既不碰 USB 也不碰
+  网卡，全部特权操作都通过 XPC 交给 tetherkit-helper。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>TetherKit</string>
+    <key>CFBundleDisplayName</key>
+    <string>TetherKit</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.tetherkit.app</string>
+    <key>CFBundleExecutable</key>
+    <string>TetherKit</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__TETHERKIT_VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__TETHERKIT_VERSION__</string>
+
+    <!-- Swift 的 Observation 与 ContentUnavailableView 需要 macOS 14。
+         命令行部分仍然支持 13.3，两者是各自独立的产物。 -->
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- 这是一个有窗口的普通应用，不是后台代理。 -->
+    <key>LSUIElement</key>
+    <false/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <!-- 会话跑着的时候被系统「自动终止」等于把用户的网络断掉。 -->
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+</dict>
+</plist>
