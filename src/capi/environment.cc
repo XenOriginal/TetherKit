@@ -8,7 +8,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string_view>
+#include <utility>
 
 #include "capi_support.h"
 #include "tetherkit/capi/tetherkit_c.h"
@@ -83,6 +86,37 @@ void TryReadStrings(::libusb_context* context, tk_device_info_t& info) noexcept 
   ::libusb_free_device_list(list, 1);
 }
 
+/// 进程级共享的 libusb 上下文，**仅供枚举使用**。
+///
+/// ★ 为什么必须共享 ★
+///   每次枚举都新建一个上下文，等于每次都走一遍「初始化 libusb → 起事件线程
+///   → 起 IOKit runloop 线程 → 用完全部拆掉」。GUI 每几百毫秒刷新一次设备
+///   列表，这套开销就以同样的频率重复，日志里也会被「libusb 已初始化」刷满。
+///
+///   共享之后整个进程只初始化一次。长命上下文照样能看到新插上的设备 ——
+///   libusb 的 darwin 后端有自己的热插拔线程在维护设备列表，这正是所有
+///   libusb 程序依赖的常规机制。
+///
+/// 会话（core::Runtime）另有自己的上下文，不复用这一个：它的生命周期由会话
+/// 自己管，混进来只会让停机顺序变复杂。libusb 支持同进程多上下文。
+///
+/// 初始化失败时返回 nullptr 并填错误，且**不缓存失败**，下次调用会重试。
+tetherkit::usb::Context* SharedEnumerationContext(tk_error_t* out_error) {
+  static std::mutex mutex;
+  static std::unique_ptr<tetherkit::usb::Context> context;
+
+  const std::lock_guard<std::mutex> guard(mutex);
+  if (context == nullptr) {
+    auto created = tetherkit::usb::Context::Create();
+    if (!created) {
+      FillError(out_error, created.error());
+      return nullptr;
+    }
+    context = std::move(*created);
+  }
+  return context.get();
+}
+
 void FillDeviceInfo(const tetherkit::usb::DeviceCandidate& candidate,
                     tk_device_info_t& info) noexcept {
   info = tk_device_info_t{};
@@ -149,13 +183,12 @@ tk_result_t tk_list_devices(tk_device_info_t* out_devices, size_t capacity, size
   ClearError(out_error);
   *out_count = 0;
 
-  auto context = tetherkit::usb::Context::Create();
-  if (!context) {
-    FillError(out_error, context.error());
+  tetherkit::usb::Context* context = SharedEnumerationContext(out_error);
+  if (context == nullptr) {
     return TK_ERR_FAILED;
   }
 
-  auto candidates = tetherkit::usb::FindRndisDevices(**context, {});
+  auto candidates = tetherkit::usb::FindRndisDevices(*context, {});
   if (!candidates) {
     FillError(out_error, candidates.error());
     return TK_ERR_FAILED;
@@ -170,7 +203,7 @@ tk_result_t tk_list_devices(tk_device_info_t* out_devices, size_t capacity, size
   for (std::size_t i = 0; i < writable; ++i) {
     FillDeviceInfo((*candidates)[i], out_devices[i]);
     if (read_strings) {
-      TryReadStrings((*context)->Raw(), out_devices[i]);
+      TryReadStrings(context->Raw(), out_devices[i]);
     }
   }
   return TK_OK;

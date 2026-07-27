@@ -123,6 +123,43 @@ TEST_CASE("tk_list_devices 允许只统计数量") {
   }
 }
 
+TEST_CASE("重复枚举不会反复初始化 libusb") {
+  // GUI 会周期性刷新设备列表。若每次枚举都新建一个 libusb 上下文，就会每次都
+  // 起停一条事件线程与一条 IOKit runloop 线程，日志里还会被「libusb 已初始化」
+  // 刷满 —— 这个问题真实发生过，这条用例把修复钉住。
+  tk_enable_log_capture(true);
+  const tetherkit::LogLevel saved_level = tetherkit::GetLogLevel();
+  tetherkit::SetLogLevel(tetherkit::LogLevel::kInfo);
+
+  std::size_t count = 0;
+  std::array<tk_log_record_t, 64> records{};
+  std::uint64_t dropped = 0;
+
+  // 先枚举一次并把日志清空，确保共享上下文已经建立（第一次初始化是应该有的）。
+  tk_list_devices(nullptr, 0, &count, false, nullptr);
+  while (tk_drain_logs(records.data(), records.size(), &dropped) > 0) {
+  }
+
+  constexpr int kRepeats = 3;
+  for (int i = 0; i < kRepeats; ++i) {
+    CHECK(tk_list_devices(nullptr, 0, &count, false, nullptr) == TK_OK);
+  }
+
+  std::size_t initialization_lines = 0;
+  std::size_t taken = 0;
+  while ((taken = tk_drain_logs(records.data(), records.size(), &dropped)) > 0) {
+    for (std::size_t i = 0; i < taken; ++i) {
+      if (std::string{records[i].message}.find("libusb 已初始化") != std::string::npos) {
+        ++initialization_lines;
+      }
+    }
+  }
+  CHECK(initialization_lines == 0);
+
+  tetherkit::SetLogLevel(saved_level);
+  tk_enable_log_capture(false);
+}
+
 }  // TEST_SUITE("capi.basics")
 
 TEST_SUITE("capi.log_ring") {

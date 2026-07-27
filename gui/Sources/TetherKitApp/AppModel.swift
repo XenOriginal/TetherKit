@@ -68,12 +68,20 @@ final class AppModel {
     /// 上一次的状态快照，用来做差算速率。
     private var previousStatus: SessionStatus?
     private var sessionStartedAt: Date?
+    /// 上次枚举设备的时刻。用单调时钟，避免系统时间被调整时算出负的间隔。
+    private var lastDeviceRefresh: ContinuousClock.Instant?
 
     /// 轮询周期。
     ///
     /// 500 ms 是「看起来实时」与「别把 XPC 往返变成负担」的平衡点：更快对人眼
     /// 已无区别，更慢会让速率曲线看起来一顿一顿的。
     private static let pollInterval: Duration = .milliseconds(500)
+
+    /// 设备枚举的最小间隔。
+    ///
+    /// 比状态轮询慢得多，因为枚举要 libusb_open 去读字符串描述符。2 秒的插拔
+    /// 响应延迟用户基本感觉不到，而开销降到了原来的四分之一。
+    private static let deviceRefreshInterval: Duration = .seconds(2)
 
     /// 吞吐曲线保留的采样点数。120 点 × 500 ms = 最近 60 秒。
     private static let historyCapacity = 120
@@ -125,12 +133,20 @@ final class AppModel {
         }
 
         // 设备列表只在没跑起来的时候刷：运行中设备已被独占，列表也不该变。
-        if status.runState != .running, let fresh = try? await client.listDevices() {
-            devices = fresh
-            // 用户选中的设备被拔掉后，选择要跟着失效，否则「启动」会按一个
-            // 不存在的总线地址去找设备。
-            if let selected = selectedDeviceID, !devices.contains(where: { $0.id == selected }) {
-                selectedDeviceID = nil
+        //
+        // 而且**刷得比状态慢**。枚举一次要读 USB 字符串描述符，那需要
+        // libusb_open 真的把设备打开一遍 —— 按 500 ms 的状态轮询节奏做这件事，
+        // 等于每秒钟去开关用户的设备两次，既浪费又可能干扰它。插拔响应慢 2 秒
+        // 完全不影响体感。
+        if status.runState != .running, shouldRefreshDevices() {
+            if let fresh = try? await client.listDevices() {
+                devices = fresh
+                // 用户选中的设备被拔掉后，选择要跟着失效，否则「启动」会按一个
+                // 不存在的总线地址去找设备。
+                if let selected = selectedDeviceID,
+                   !devices.contains(where: { $0.id == selected }) {
+                    selectedDeviceID = nil
+                }
             }
         }
 
@@ -288,9 +304,22 @@ final class AppModel {
         }
     }
 
-    /// 手动刷新设备列表。
+    /// 手动刷新设备列表（界面上的刷新按钮）。
+    ///
+    /// 手动触发时不受节流限制 —— 用户点了按钮就是想立刻看到结果。
     func refreshDevices() async {
+        lastDeviceRefresh = .now
         devices = (try? await client.listDevices()) ?? []
+    }
+
+    /// 距上次枚举是否已经够久。顺带记下这一次的时刻。
+    private func shouldRefreshDevices() -> Bool {
+        let now = ContinuousClock.now
+        if let last = lastDeviceRefresh, now - last < Self.deviceRefreshInterval {
+            return false
+        }
+        lastDeviceRefresh = now
+        return true
     }
 
     func clearLogs() {
