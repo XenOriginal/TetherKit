@@ -3,8 +3,19 @@ import TetherKitIPC
 
 /// 主界面。
 ///
-/// 布局是单列滚动，从上到下按「用户关心的顺序」排：
-///   现在什么状态 → 用哪台设备 → 怎么上网 → 跑得怎么样 → 出了什么事
+/// 布局目标是**默认窗口尺寸下一屏放完，不滚动**：常驻仪表盘要靠滚动才能看全，
+/// 等于把「瞟一眼」变成了「翻一遍」。为此分成两栏 ——
+///
+///   顶部横幅：现在什么状态（全宽，唯一的操作重心）
+///   左栏「控制」：用哪台设备 → 怎么上网（连接前用，连上后基本不碰）
+///   右栏「观测」：跑得怎么样 → 出了什么事（连上后 90% 的时间只看这边）
+///
+/// 日志不再折叠：它常驻右栏底部，把剩余高度全部吃掉 —— 窗口越大看到的越多，
+/// 而不是留一片空白还要用户手动展开。
+///
+/// 外层仍留一个 ScrollView 兜底：极端组合（比如把窗口压到最小 + 静态表单 +
+/// 系统参数警告同时出现）超出可视区时宁可滚动也不能截断。`basedOnSize` 保证
+/// 内容放得下时它完全不参与 —— 不出滚动条也不回弹。
 ///
 /// 刻意不用 NavigationSplitView 的侧边栏：这个 App 只有一件事可做，
 /// 侧边栏只会制造一个空荡荡的导航层级。
@@ -12,20 +23,25 @@ struct ContentView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: Design.Spacing.medium) {
-                switch model.helperAvailability {
-                case .unknown:
-                    ProbingCard()
-                case .missing(let reason):
-                    HelperMissingCard(reason: reason)
-                case .outdated(let installed, let expected):
-                    HelperOutdatedCard(installed: installed, expected: expected)
-                case .available:
-                    mainSections
+        GeometryReader { proxy in
+            ScrollView {
+                Group {
+                    switch model.helperAvailability {
+                    case .unknown:
+                        ProbingCard()
+                    case .missing(let reason):
+                        HelperMissingCard(reason: reason)
+                    case .outdated(let installed, let expected):
+                        HelperOutdatedCard(installed: installed, expected: expected)
+                    case .available:
+                        dashboard
+                    }
                 }
+                .padding(Design.Spacing.medium)
+                // 撑满可视区：右栏的日志靠这个「多余高度」长到窗口底部。
+                .frame(minHeight: proxy.size.height, alignment: .top)
             }
-            .padding(Design.Spacing.medium)
+            .scrollBounceBehavior(.basedOnSize)
         }
         .background(backgroundGradient)
         .animation(.smooth(duration: 0.25), value: model.status.runState)
@@ -39,14 +55,25 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
-    private var mainSections: some View {
-        StatusHeroCard(model: model)
-        EnvironmentWarningCard(environment: model.environment)
-        DeviceCard(model: model)
-        NetworkCard(model: model)
-        ThroughputCard(model: model)
-        LogCard(model: model)
+    private var dashboard: some View {
+        VStack(spacing: Design.Spacing.gutter) {
+            StatusHeroCard(model: model)
+            EnvironmentWarningCard(environment: model.environment)
+
+            HStack(alignment: .top, spacing: Design.Spacing.gutter) {
+                VStack(spacing: Design.Spacing.gutter) {
+                    DeviceCard(model: model)
+                    NetworkCard(model: model)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+                VStack(spacing: Design.Spacing.gutter) {
+                    ThroughputCard(model: model)
+                    LogCard(model: model)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+        }
     }
 
     /// 背景用一层随状态变化的极淡渐变。

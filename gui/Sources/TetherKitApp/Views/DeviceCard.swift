@@ -66,6 +66,8 @@ struct DeviceCard: View {
         }
     }
 
+    // 长解释一律放进悬停提示：这两个参数一年也调不了一次，说明文字却天天占着
+    // 屏幕 —— 界面上只留「什么时候需要动它」这一句。
     private var tuningControls: some View {
         VStack(alignment: .leading, spacing: Design.Spacing.small) {
             HStack {
@@ -81,23 +83,23 @@ struct DeviceCard: View {
                 .disabled(isLocked)
                 Spacer()
             }
-            Text("设备装不下时会在协商阶段自动下调。上限受系统的 net.link.fake.max_mtu 约束"
-                 + (model.environment.map { "（本机 \($0.fethMaxMTU)）" } ?? "") + "。")
+            Text("超出设备能力时会在协商阶段自动下调"
+                 + (model.environment.map { "（本机上限 \($0.fethMaxMTU)）" } ?? "") + "。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .help("协商阶段以设备汇报的能力为准，填大了会自动下调。"
+                      + "上限受系统的 net.link.fake.max_mtu 约束。")
 
             Toggle(isOn: $model.adoptDeviceMAC) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("采用设备汇报的 MAC 地址")
-                    Text("RNDIS 语义下设备就是这块网卡，对端的 ARP 表与 DHCP 租约都按它建立。"
-                         + "只有排查 MAC 冲突时才需要关掉。")
+                    Text("只有排查 MAC 冲突时才需要关掉。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .disabled(isLocked)
+            .help("RNDIS 语义下设备就是这块网卡，对端的 ARP 表与 DHCP 租约都按设备的 MAC 建立。")
             .padding(.top, 2)
         }
     }

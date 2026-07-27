@@ -1,47 +1,27 @@
 import SwiftUI
 import TetherKitIPC
 
-/// 日志面板。默认折叠 —— 一切正常时用户不需要看它。
+/// 日志面板。常驻右栏底部，把两栏布局剩下的高度全部吃掉 —— 窗口越大看到的
+/// 越多，而不是折叠起来等用户展开（旧版折叠是单列布局塞不下的妥协）。
 ///
-/// 但出问题时它是唯一有用的东西，所以做了三件事：可按级别过滤、自动滚到底、
+/// 出问题时它是唯一有用的东西，所以做了三件事：可按级别过滤、自动滚到底、
 /// 一键复制全部（用户报 issue 时能直接贴过来）。
 struct LogCard: View {
     @Bindable var model: AppModel
-    @State private var isExpanded = false
     @State private var autoScroll = true
 
     var body: some View {
-        Card(title: "运行日志", systemImage: "text.alignleft", accessory: AnyView(header)) {
-            if isExpanded {
-                VStack(alignment: .leading, spacing: Design.Spacing.small) {
-                    toolbar
-                    logList
-                    if model.droppedLogCount > 0 {
-                        Label("有 \(model.droppedLogCount) 条日志因缓冲写满被丢弃",
-                              systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
+        Card(title: "运行日志", systemImage: "text.alignleft") {
+            VStack(alignment: .leading, spacing: Design.Spacing.small) {
+                toolbar
+                logList
+                if model.droppedLogCount > 0 {
+                    Label("有 \(model.droppedLogCount) 条日志因缓冲写满被丢弃",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
             }
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: Design.Spacing.small) {
-            if !isExpanded, let latest = model.filteredLogs.last {
-                // 折叠时也把最新一条摘要显示出来 —— 用户不用展开就能察觉异常。
-                Text(latest.message)
-                    .font(.caption)
-                    .foregroundStyle(Design.logColor(for: latest.level))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Button(isExpanded ? "收起" : "展开") {
-                withAnimation(.smooth(duration: 0.2)) { isExpanded.toggle() }
-            }
-            .buttonStyle(.borderless)
-            .font(.callout)
         }
     }
 
@@ -56,7 +36,7 @@ struct LogCard: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 320)
+            .frame(maxWidth: 280)
 
             Spacer()
 
@@ -95,7 +75,9 @@ struct LogCard: View {
                 .padding(Design.Spacing.small)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(height: 220)
+            // 高度弹性：吃掉右栏剩余空间。最小值保证极端情况下（窗口压到最小、
+            // 上面的卡都在最高状态）仍能看到几行，而不是被挤成一条缝。
+            .frame(minHeight: 110, maxHeight: .infinity)
             .background(.quaternary.opacity(0.35),
                         in: RoundedRectangle(cornerRadius: Design.Radius.control))
             .onChange(of: model.filteredLogs.last?.id) { _, newValue in

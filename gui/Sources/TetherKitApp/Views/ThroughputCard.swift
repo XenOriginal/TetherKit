@@ -32,22 +32,30 @@ struct ThroughputCard: View {
         }
     }
 
+    // 速率四格排成 2×2 而不是一行：这卡现在住在半栏里，一行四格会把
+    // 「下行（设备 → 本机）」这类说明挤到截断。
     private var rateRow: some View {
-        HStack(spacing: Design.Spacing.medium) {
-            MetricTile(caption: "下行（设备 → 本机）",
-                       value: Format.bitrate(model.throughput.receiveBitsPerSecond),
-                       systemImage: "arrow.down",
-                       tint: .blue)
-            MetricTile(caption: "上行（本机 → 设备）",
-                       value: Format.bitrate(model.throughput.transmitBitsPerSecond),
-                       systemImage: "arrow.up",
-                       tint: .purple)
-            MetricTile(caption: "下行帧率",
-                       value: "\(Format.packetsPerSecond(model.throughput.receivePacketsPerSecond)) pps",
-                       systemImage: "square.stack.3d.up")
-            MetricTile(caption: "上行帧率",
-                       value: "\(Format.packetsPerSecond(model.throughput.transmitPacketsPerSecond)) pps",
-                       systemImage: "square.stack.3d.up")
+        Grid(alignment: .leading,
+             horizontalSpacing: Design.Spacing.medium,
+             verticalSpacing: Design.Spacing.small) {
+            GridRow {
+                MetricTile(caption: "下行（设备 → 本机）",
+                           value: Format.bitrate(model.throughput.receiveBitsPerSecond),
+                           systemImage: "arrow.down",
+                           tint: .blue)
+                MetricTile(caption: "上行（本机 → 设备）",
+                           value: Format.bitrate(model.throughput.transmitBitsPerSecond),
+                           systemImage: "arrow.up",
+                           tint: .purple)
+            }
+            GridRow {
+                MetricTile(caption: "下行帧率",
+                           value: "\(Format.packetsPerSecond(model.throughput.receivePacketsPerSecond)) pps",
+                           systemImage: "square.stack.3d.up")
+                MetricTile(caption: "上行帧率",
+                           value: "\(Format.packetsPerSecond(model.throughput.transmitPacketsPerSecond)) pps",
+                           systemImage: "square.stack.3d.up")
+            }
         }
     }
 

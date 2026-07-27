@@ -13,9 +13,13 @@ enum Design {
     enum Spacing {
         static let tight: CGFloat = 6
         static let small: CGFloat = 10
+        /// 卡片之间、两栏之间的沟槽。整页要在一屏内放下，卡片间距是第一个
+        /// 该省的地方 —— 它出现的次数最多，而信息密度为零。
+        static let gutter: CGFloat = 12
         static let medium: CGFloat = 16
         static let large: CGFloat = 24
-        static let section: CGFloat = 20
+        /// 卡片内边距。
+        static let section: CGFloat = 16
     }
 
     enum Radius {
@@ -25,13 +29,16 @@ enum Design {
 
     /// 窗口尺寸。
     ///
-    /// 宽度 720 的依据：主界面是两栏卡片布局，每栏至少要放得下一行
-    /// 「192.168.35.128 / 255.255.255.0」而不折行。
+    /// 布局的硬目标是**默认尺寸下整页不滚动**（见 ContentView）。
+    /// 宽度的依据：两栏布局，每栏至少放得下静态 IP 表单的一行两格
+    /// （两个「标签 + 255.255.255.255」的输入格并排）。
+    /// 高度的依据：左栏最高的状态 —— 静态模式表单展开且「当前生效」同时
+    /// 显示 —— 也要放得下。
     enum Window {
-        static let minWidth: CGFloat = 720
-        static let minHeight: CGFloat = 560
-        static let defaultWidth: CGFloat = 820
-        static let defaultHeight: CGFloat = 720
+        static let minWidth: CGFloat = 900
+        static let minHeight: CGFloat = 700
+        static let defaultWidth: CGFloat = 990
+        static let defaultHeight: CGFloat = 780
     }
 
     // MARK: - 状态色
@@ -153,26 +160,6 @@ struct MetricTile: View {
                 .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// 键值对的一行，用于「详情」类展示。
-struct DetailRow: View {
-    let label: String
-    let value: String
-    var monospaced: Bool = false
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Design.Spacing.small) {
-            Text(label)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(width: 92, alignment: .leading)
-            Text(value.isEmpty ? "—" : value)
-                .font(monospaced ? .system(.callout, design: .monospaced) : .callout)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 }
 

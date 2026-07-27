@@ -9,15 +9,28 @@ import TetherKitIPC
 ///   最典型的是静态模式下的 DNS：IPConfiguration 只在 DHCP 模式发布 DNS，
 ///   静态模式我们只能尽力而为地补一个键，能不能被系统采纳取决于 IPMonitor。
 ///   与其向用户承诺一个可能不成立的结果，不如把真实状态摆出来。
+///
+/// 这张卡的高度直接决定左栏能不能一屏放下（最高的状态是「静态表单 + 当前生效」
+/// 同时展开），所以输入格与回读值都排成两列，长解释一律进悬停提示。
 struct NetworkCard: View {
     @Bindable var model: AppModel
 
     /// 网卡还没创建时整块禁用 —— 没有网卡可配，让用户填完再报错是最糟的顺序。
     private var interfaceReady: Bool { !model.status.systemInterface.isEmpty }
 
+    private var canAddDNS: Bool {
+        // 上限与 C ABI 的 TK_DNS_MAX 一致，多填的会被丢弃，不如直接不让加。
+        model.networkConfiguration.dnsServers.count < 4
+    }
+
+    /// 静态 DNS 的悬停说明。它属于「什么时候需要在意」级别的信息，
+    /// 不值得常驻一行。
+    private static let dnsHint =
+        "静态模式下 DNS 是否生效取决于系统的解析器管理，请以「当前生效」里的回读结果为准。"
+
     var body: some View {
         Card(title: "上网方式", systemImage: "network", accessory: AnyView(interfaceBadge)) {
-            VStack(alignment: .leading, spacing: Design.Spacing.medium) {
+            VStack(alignment: .leading, spacing: Design.Spacing.small) {
                 modePicker
 
                 switch model.networkConfiguration.mode {
@@ -82,90 +95,105 @@ struct NetworkCard: View {
         }
     }
 
+    /// 静态表单。四个地址格排成两列网格 —— IPv4 短，半栏宽度足够，
+    /// 而高度直接砍半。
     private var manualForm: some View {
-        VStack(alignment: .leading, spacing: Design.Spacing.small) {
-            AddressField(label: "IP 地址",
-                         placeholder: "192.168.42.100",
-                         text: $model.networkConfiguration.address,
-                         isValid: NetworkValidator.isValidIPv4(model.networkConfiguration.address))
-
-            AddressField(label: "子网掩码",
-                         placeholder: "255.255.255.0",
-                         text: $model.networkConfiguration.netmask,
-                         isValid: NetworkValidator.isValidNetmask(model.networkConfiguration.netmask))
-
-            AddressField(label: "网关",
-                         placeholder: "192.168.42.1（可留空）",
-                         text: $model.networkConfiguration.router,
-                         isValid: model.networkConfiguration.router.isEmpty
-                             || NetworkValidator.isValidIPv4(model.networkConfiguration.router))
-
-            dnsEditor
-
-            Label("静态模式下 DNS 是否生效取决于系统的解析器管理，"
-                  + "请以下方「当前生效」里的回读结果为准。",
-                  systemImage: "info.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        Grid(alignment: .leading,
+             horizontalSpacing: Design.Spacing.medium,
+             verticalSpacing: Design.Spacing.small) {
+            GridRow {
+                AddressField(label: "IP 地址",
+                             placeholder: "192.168.42.100",
+                             text: $model.networkConfiguration.address,
+                             isValid: NetworkValidator.isValidIPv4(model.networkConfiguration.address))
+                AddressField(label: "子网掩码",
+                             placeholder: "255.255.255.0",
+                             text: $model.networkConfiguration.netmask,
+                             isValid: NetworkValidator.isValidNetmask(model.networkConfiguration.netmask))
+            }
+            GridRow {
+                AddressField(label: "网关",
+                             placeholder: "可留空",
+                             text: $model.networkConfiguration.router,
+                             isValid: model.networkConfiguration.router.isEmpty
+                                 || NetworkValidator.isValidIPv4(model.networkConfiguration.router))
+                if model.networkConfiguration.dnsServers.isEmpty {
+                    emptyDNSCell
+                } else {
+                    dnsField(at: 0)
+                }
+            }
+            // 第 2 条起的 DNS 各占一行的右格，左格空着 —— 和上面的 DNS 对齐。
+            ForEach(Array(model.networkConfiguration.dnsServers.indices.dropFirst()),
+                    id: \.self) { index in
+                GridRow {
+                    Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    dnsField(at: index)
+                }
+            }
         }
     }
 
-    private var dnsEditor: some View {
-        VStack(alignment: .leading, spacing: Design.Spacing.tight) {
-            ForEach(model.networkConfiguration.dnsServers.indices, id: \.self) { index in
-                HStack(spacing: Design.Spacing.small) {
-                    AddressField(
-                        label: index == 0 ? "DNS" : "",
-                        placeholder: "223.5.5.5",
-                        text: $model.networkConfiguration.dnsServers[index],
-                        isValid: model.networkConfiguration.dnsServers[index].isEmpty
-                            || NetworkValidator.isValidIPv4(model.networkConfiguration.dnsServers[index]))
+    /// 一条 DNS：输入格 + 删除，最后一条再带一个「添加」。
+    private func dnsField(at index: Int) -> some View {
+        HStack(spacing: Design.Spacing.tight) {
+            AddressField(label: index == 0 ? "DNS" : "",
+                         placeholder: "223.5.5.5",
+                         text: $model.networkConfiguration.dnsServers[index],
+                         isValid: model.networkConfiguration.dnsServers[index].isEmpty
+                             || NetworkValidator.isValidIPv4(model.networkConfiguration.dnsServers[index]))
 
-                    Button {
-                        model.networkConfiguration.dnsServers.remove(at: index)
-                    } label: {
-                        Image(systemName: "minus.circle")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("删除这一条")
-                }
+            Button {
+                model.networkConfiguration.dnsServers.remove(at: index)
+            } label: {
+                Image(systemName: "minus.circle")
             }
+            .buttonStyle(.borderless)
+            .help("删除这一条")
 
-            HStack {
-                if model.networkConfiguration.dnsServers.isEmpty {
-                    Text("DNS")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 92, alignment: .leading)
-                } else {
-                    Spacer().frame(width: 92)
-                }
+            if index == model.networkConfiguration.dnsServers.count - 1, canAddDNS {
                 Button {
                     model.networkConfiguration.dnsServers.append("")
                 } label: {
-                    Label("添加 DNS 服务器", systemImage: "plus.circle")
+                    Image(systemName: "plus.circle")
                 }
                 .buttonStyle(.borderless)
-                .font(.callout)
-                // 上限与 C ABI 的 TK_DNS_MAX 一致，多填的会被丢弃，不如直接不让加。
-                .disabled(model.networkConfiguration.dnsServers.count >= 4)
-                Spacer()
+                .help("添加 DNS 服务器（最多 4 条）")
             }
         }
+        .help(Self.dnsHint)
+    }
+
+    /// 一条 DNS 都没有时占住格子的「添加」。
+    private var emptyDNSCell: some View {
+        HStack(spacing: Design.Spacing.tight) {
+            Text("DNS")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(width: AddressField.labelWidth, alignment: .leading)
+            Button {
+                model.networkConfiguration.dnsServers.append("")
+            } label: {
+                Label("添加", systemImage: "plus.circle")
+            }
+            .buttonStyle(.borderless)
+            .font(.callout)
+            Spacer(minLength: 0)
+        }
+        .help(Self.dnsHint)
     }
 
     private var defaultRouteToggle: some View {
         Toggle(isOn: $model.networkConfiguration.setDefaultRoute) {
             VStack(alignment: .leading, spacing: 1) {
                 Text("让所有流量默认走这张网卡")
-                Text("不开启时，只有明确绑定到本网卡的流量走它，其余仍走当前的主网络。"
-                     + "如果本机没有别的可用网络，通常不需要开 —— 系统会自己把它选为主服务。")
+                Text("不开启时，只有明确绑定到本网卡的流量走它。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .help("不开启时其余流量仍走当前的主网络。如果本机没有别的可用网络，"
+              + "通常不需要开 —— 系统会自己把它选为主服务。")
     }
 
     private var actionRow: some View {
@@ -195,35 +223,41 @@ struct NetworkCard: View {
     }
 }
 
-/// 一个带即时校验反馈的地址输入框。
+/// 一个带即时校验反馈的紧凑地址输入框：标签在左，校验图标叠在输入框内侧
+/// （两列布局里每一点宽度都金贵）。
 ///
 /// 校验放在输入时而不是提交时：地址填错是最常见的操作失误，等点了「应用」再报错
 /// 会让用户来回猜是哪一格错了。
 private struct AddressField: View {
+    /// 标签列宽。回读区的标签也用它，两块的竖向对齐线才是同一条。
+    static let labelWidth: CGFloat = 56
+
     let label: String
     let placeholder: String
     @Binding var text: String
     let isValid: Bool
 
     var body: some View {
-        HStack(spacing: Design.Spacing.small) {
+        HStack(spacing: Design.Spacing.tight) {
             Text(label)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .frame(width: 92, alignment: .leading)
+                .frame(width: Self.labelWidth, alignment: .leading)
 
             TextField(placeholder, text: $text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.callout, design: .monospaced))
-                .frame(maxWidth: 220)
-
-            // 空输入不标红：还没填完不算错。
-            if !text.isEmpty {
-                Image(systemName: isValid ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                    .foregroundStyle(isValid ? Color.green : Color.orange)
-                    .font(.callout)
-            }
-            Spacer()
+                .overlay(alignment: .trailing) {
+                    // 空输入不标红：还没填完不算错。
+                    if !text.isEmpty {
+                        Image(systemName: isValid ? "checkmark.circle.fill"
+                                                  : "exclamationmark.circle.fill")
+                            .foregroundStyle(isValid ? Color.green : Color.orange)
+                            .font(.caption)
+                            .padding(.trailing, 4)
+                            .allowsHitTesting(false)
+                    }
+                }
         }
     }
 }
@@ -251,18 +285,42 @@ private struct EffectiveStateView: View {
             }
 
             if state.hasAddress {
-                DetailRow(label: "IP 地址", value: state.address, monospaced: true)
-                DetailRow(label: "子网掩码", value: state.netmask, monospaced: true)
-                DetailRow(label: "网关", value: state.router, monospaced: true)
-                DetailRow(label: "DNS",
-                          value: state.dnsServers.isEmpty
-                              ? "未生效" : state.dnsServers.joined(separator: "、"),
-                          monospaced: true)
+                // 两列四格而不是四行：这是纯展示区，紧凑优先。放不下的值
+                // （多条 DNS）中截显示，悬停能看全，也能选中复制。
+                Grid(alignment: .leading,
+                     horizontalSpacing: Design.Spacing.medium,
+                     verticalSpacing: Design.Spacing.tight) {
+                    GridRow {
+                        readbackCell("IP 地址", state.address)
+                        readbackCell("子网掩码", state.netmask)
+                    }
+                    GridRow {
+                        readbackCell("网关", state.router)
+                        readbackCell("DNS", state.dnsServers.isEmpty
+                                     ? "未生效" : state.dnsServers.joined(separator: "、"))
+                    }
+                }
             } else {
                 Text("\(interface) 目前没有 IP 地址。选择上网方式后点「应用」。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func readbackCell(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Design.Spacing.tight) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: AddressField.labelWidth, alignment: .leading)
+            Text(value.isEmpty ? "—" : value)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(value)
     }
 }
