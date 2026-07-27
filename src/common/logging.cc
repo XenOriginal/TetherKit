@@ -31,6 +31,11 @@ std::mutex& OutputMutex() {
   return mutex;
 }
 
+/// 宿主安装的日志汇。sink 与 user 必须**成对**更新，所以用 OutputMutex 保护
+/// 而不是两个独立的原子 —— 两个原子无法一起原子更新，会读到错配的组合。
+LogSink g_log_sink = nullptr;
+void* g_log_sink_user = nullptr;
+
 /// 线程名。thread_local 而非查询 pthread_getname_np：后者是系统调用。
 constexpr std::size_t kThreadNameCapacity = 16;
 thread_local std::array<char, kThreadNameCapacity> t_thread_name{};
@@ -107,6 +112,12 @@ void SetLogColorEnabled(bool enabled) noexcept {
   g_color_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
 }
 
+void SetLogSink(LogSink sink, void* user) noexcept {
+  const std::lock_guard<std::mutex> guard(OutputMutex());
+  g_log_sink = sink;
+  g_log_sink_user = user;
+}
+
 void SetCurrentThreadName(std::string_view name) noexcept {
   const std::size_t copy_len = std::min(name.size(), kThreadNameCapacity - 1);
   std::memcpy(t_thread_name.data(), name.data(), copy_len);
@@ -141,6 +152,12 @@ void EmitLogLine(LogLevel level, std::string_view file, unsigned line,
                timestamp.data(), static_cast<int>(thread_name.size()), thread_name.data(),
                static_cast<int>(file.size()), file.data(), line, static_cast<int>(message.size()),
                message.data());
+
+  // 转交给宿主。在锁内调用是刻意的：这样宿主看到的行序与 stderr 完全一致。
+  // 代价是 sink 里绝不能再打日志（会自等死锁），该约束写在 logging.h 上。
+  if (g_log_sink != nullptr) {
+    g_log_sink(level, thread_name, message, g_log_sink_user);
+  }
 }
 
 }  // namespace detail

@@ -11,6 +11,7 @@
 #   tk_core    ← common+rndis+net+usb （数据路径桥接与运行时编排）
 #      ↑
 #   tetherkit  ← core            （命令行可执行程序）
+#   tk_capi    ← core            （C ABI，供 Swift GUI 使用）
 
 # ------------------------------------------------------------------------------
 # 公共编译属性：所有本项目目标都继承它
@@ -34,4 +35,5 @@ add_subdirectory(rndis)
 add_subdirectory(net)
 add_subdirectory(usb)
 add_subdirectory(core)
+add_subdirectory(capi)
 add_subdirectory(app)

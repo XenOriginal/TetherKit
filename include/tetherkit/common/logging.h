@@ -50,6 +50,22 @@ void SetLogColorEnabled(bool enabled) noexcept;
 /// 同时调用 pthread_setname_np，使其在 Instruments / lldb 里也可见。
 void SetCurrentThreadName(std::string_view name) noexcept;
 
+/// 日志汇：把已格式化好的日志行**额外**转交给宿主（GUI 需要在界面上显示日志，
+/// 而日志本身只往 stderr 走）。stderr 输出不受影响，两者并行。
+///
+/// ★ 实现日志汇时的三条硬约束 ★
+///   1. 会在**任意线程**上被调用（含 libusb 事件线程）；
+///   2. 会在日志互斥锁**内部**被调用 —— 因此实现里**绝不能再打日志**
+///      （std::mutex 不可重入，会当场死锁）；
+///   3. 绝不能做阻塞 I/O —— 它会把所有正在打日志的线程一起拖住。
+///
+/// 满足这三条的唯一合理实现就是「拷进定长环形缓冲，由宿主轮询取走」。
+using LogSink = void (*)(LogLevel level, std::string_view thread_name, std::string_view message,
+                         void* user) noexcept;
+
+/// 安装 / 卸载日志汇。传 nullptr 卸载。线程安全。
+void SetLogSink(LogSink sink, void* user) noexcept;
+
 namespace detail {
 
 [[nodiscard]] bool IsLogLevelEnabled(LogLevel level) noexcept;

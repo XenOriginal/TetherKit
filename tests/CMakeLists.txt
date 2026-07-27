@@ -18,13 +18,17 @@ add_executable(
   test_rndis_packet_codec.cc
   test_rndis_state_machine.cc
   test_net_link.cc
-  test_core_bridge.cc)
+  test_core_bridge.cc
+  test_capi.cc)
 
 # tk_rndis / tk_net 都 PUBLIC 链接了 tk_common，无需重复列出（否则链接器报
 # "ignoring duplicate libraries"）。
 # tk_core PUBLIC 链接了 tk_common/tk_rndis/tk_net/tk_usb，列它一个就够。
-target_link_libraries(tetherkit_tests PRIVATE tetherkit_base doctest tk_version tk_core)
-target_include_directories(tetherkit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+# tk_capi PUBLIC 链接了 tk_version 与 tk_core，因此这两个都不用重复列出。
+target_link_libraries(tetherkit_tests PRIVATE tetherkit_base doctest tk_capi)
+# src/capi 目录：capi_support.h 是实现内部头，不对外安装，但要能被测试直接覆盖。
+target_include_directories(tetherkit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                                                   "${PROJECT_SOURCE_DIR}/src/capi")
 
 # ------------------------------------------------------------------------------
 # CTest 注册
@@ -63,7 +67,10 @@ set(TETHERKIT_TEST_SUITES
     net.abi
     net.loopback
     net.feth
-    core.bridge)
+    core.bridge
+    capi.support
+    capi.basics
+    capi.log_ring)
 
 foreach(_suite IN LISTS TETHERKIT_TEST_SUITES)
   # 注意：--test-suite= 后面**不要**加引号，见上方说明。

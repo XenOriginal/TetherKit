@@ -1,0 +1,177 @@
+// 免 root 的三件事：版本、环境预检、设备枚举。
+//
+// GUI 本体（uid 501）只调这一组；需要 root 的会话与网卡配置全部交给
+// tetherkit-helper。这个划分是 docs/GUI-SPIKE.md 的核心结论之一。
+#include <libusb.h>
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+#include "capi_support.h"
+#include "tetherkit/capi/tetherkit_c.h"
+#include "tetherkit/net/feth_device.h"
+#include "tetherkit/usb/context.h"
+#include "tetherkit/usb/device.h"
+#include "tetherkit/version.h"
+
+namespace {
+
+using tetherkit::capi::ClearError;
+using tetherkit::capi::CopyText;
+using tetherkit::capi::FillError;
+
+/// 读一个 USB 字符串描述符到定长缓冲。索引为 0 表示设备没提供该字符串。
+///
+/// 用 libusb 的 `_ascii` 变体：它把 UTF-16LE 里超出 ASCII 的码位替换成 '?'。
+/// 对我们够用 —— 这些字符串只用于让用户区分两台同型号设备，绝大多数厂商名与
+/// 序列号本来就是 ASCII。自己做完整的 UTF-16 → UTF-8 转换收益太小。
+void ReadStringDescriptor(::libusb_device_handle* handle, std::uint8_t index, char* destination,
+                          std::size_t capacity) noexcept {
+  if (index == 0) {
+    return;
+  }
+  std::array<unsigned char, TK_USB_STRING_CAPACITY> buffer{};
+  const int length = ::libusb_get_string_descriptor_ascii(
+      handle, index, buffer.data(), static_cast<int>(buffer.size()));
+  if (length <= 0) {
+    return;
+  }
+  CopyText(destination, capacity,
+           std::string_view{reinterpret_cast<const char*>(buffer.data()),
+                            static_cast<std::size_t>(length)});
+}
+
+/// 尽力而为地补上厂商名 / 产品名 / 序列号。
+///
+/// 为什么是「尽力而为」：读字符串描述符必须先 libusb_open，而设备可能已被本机
+/// 另一个进程（比如正在跑的 tetherkit-helper）独占，darwin 后端会返回
+/// LIBUSB_ERROR_ACCESS。那不是错误，只是拿不到名字 —— 此时 GUI 回落到展示
+/// VID:PID。绝不能因此让整个枚举失败。
+void TryReadStrings(::libusb_context* context, tk_device_info_t& info) noexcept {
+  ::libusb_device** list = nullptr;
+  const ssize_t count = ::libusb_get_device_list(context, &list);
+  if (count < 0) {
+    return;
+  }
+
+  for (ssize_t i = 0; i < count; ++i) {
+    if (::libusb_get_bus_number(list[i]) != info.bus_number ||
+        ::libusb_get_device_address(list[i]) != info.device_address) {
+      continue;
+    }
+
+    ::libusb_device_descriptor descriptor{};
+    if (::libusb_get_device_descriptor(list[i], &descriptor) != LIBUSB_SUCCESS) {
+      break;
+    }
+    ::libusb_device_handle* handle = nullptr;
+    if (::libusb_open(list[i], &handle) != LIBUSB_SUCCESS) {
+      break;
+    }
+    ReadStringDescriptor(handle, descriptor.iManufacturer, info.manufacturer,
+                         sizeof(info.manufacturer));
+    ReadStringDescriptor(handle, descriptor.iProduct, info.product, sizeof(info.product));
+    ReadStringDescriptor(handle, descriptor.iSerialNumber, info.serial, sizeof(info.serial));
+    ::libusb_close(handle);
+    break;
+  }
+
+  // 第二个参数为 1：连同 list 里每个设备的引用计数一起释放。
+  ::libusb_free_device_list(list, 1);
+}
+
+void FillDeviceInfo(const tetherkit::usb::DeviceCandidate& candidate,
+                    tk_device_info_t& info) noexcept {
+  info = tk_device_info_t{};
+  info.vendor_id = candidate.vendor_id;
+  info.product_id = candidate.product_id;
+  info.bus_number = candidate.bus_number;
+  info.device_address = candidate.device_address;
+  info.control_interface = candidate.control_interface;
+  info.data_interface = candidate.data_interface;
+  info.interface_class = candidate.signature.interface_class;
+  info.interface_subclass = candidate.signature.interface_subclass;
+  info.interface_protocol = candidate.signature.interface_protocol;
+  info.used_android_quirk = candidate.used_android_quirk;
+  CopyText(info.description, candidate.Describe());
+}
+
+}  // namespace
+
+void tk_version(tk_version_info_t* out_version) {
+  if (out_version == nullptr) {
+    return;
+  }
+  *out_version = tk_version_info_t{};
+  const tetherkit::Version version = tetherkit::GetVersion();
+  out_version->major = version.major;
+  out_version->minor = version.minor;
+  out_version->patch = version.patch;
+  CopyText(out_version->text, tetherkit::GetVersionString());
+  CopyText(out_version->build, tetherkit::GetBuildDescription());
+  CopyText(out_version->libusb, tetherkit::usb::Context::VersionString());
+}
+
+tk_result_t tk_check_environment(tk_environment_t* out_environment) {
+  if (out_environment == nullptr) {
+    return TK_ERR_INVALID_ARGUMENT;
+  }
+  *out_environment = tk_environment_t{};
+
+  out_environment->is_root = tetherkit::net::IsRunningAsRoot();
+
+  // 这批 sysctl 是 feth 的**创建期快照**，创建后再改无效，所以必须提前查。
+  // 不合格时把原因原样交给 GUI 展示 —— 用户看到具体是哪个开关被打开了，
+  // 才知道该改什么。
+  if (const auto status = tetherkit::net::VerifyFethSysctls(); status) {
+    out_environment->sysctls_ok = true;
+  } else {
+    out_environment->sysctls_ok = false;
+    CopyText(out_environment->sysctl_detail, status.error().ToString());
+  }
+
+  if (const auto max_mtu = tetherkit::net::QueryFethMaxMtu(); max_mtu) {
+    out_environment->feth_max_mtu = *max_mtu;
+  }
+
+  // 刻意永远返回成功：「环境不合格」是要展示给用户的**结果**，不是调用失败。
+  return TK_OK;
+}
+
+tk_result_t tk_list_devices(tk_device_info_t* out_devices, size_t capacity, size_t* out_count,
+                            bool read_strings, tk_error_t* out_error) {
+  if (out_count == nullptr) {
+    return TK_ERR_INVALID_ARGUMENT;
+  }
+  ClearError(out_error);
+  *out_count = 0;
+
+  auto context = tetherkit::usb::Context::Create();
+  if (!context) {
+    FillError(out_error, context.error());
+    return TK_ERR_FAILED;
+  }
+
+  auto candidates = tetherkit::usb::FindRndisDevices(**context, {});
+  if (!candidates) {
+    FillError(out_error, candidates.error());
+    return TK_ERR_FAILED;
+  }
+
+  *out_count = candidates->size();
+  if (out_devices == nullptr) {
+    return TK_OK;
+  }
+
+  const std::size_t writable = std::min(capacity, candidates->size());
+  for (std::size_t i = 0; i < writable; ++i) {
+    FillDeviceInfo((*candidates)[i], out_devices[i]);
+    if (read_strings) {
+      TryReadStrings((*context)->Raw(), out_devices[i]);
+    }
+  }
+  return TK_OK;
+}
