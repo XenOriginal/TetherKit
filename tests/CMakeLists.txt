@@ -70,7 +70,8 @@ set(TETHERKIT_TEST_SUITES
     core.bridge
     capi.support
     capi.basics
-    capi.log_ring)
+    capi.log_ring
+    capi.session)
 
 foreach(_suite IN LISTS TETHERKIT_TEST_SUITES)
   # 注意：--test-suite= 后面**不要**加引号，见上方说明。

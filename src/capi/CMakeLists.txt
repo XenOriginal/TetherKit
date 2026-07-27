@@ -10,7 +10,8 @@ add_library(
   tk_capi STATIC
   capi_support.cc
   environment.cc
-  log_ring.cc)
+  log_ring.cc
+  session.cc)
 
 target_link_libraries(tk_capi PUBLIC tetherkit_base tk_version tk_core)
 

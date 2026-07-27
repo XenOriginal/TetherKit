@@ -196,3 +196,76 @@ TEST_CASE("缓冲写满时丢最旧的并汇报丢弃数") {
 }
 
 }  // TEST_SUITE("capi.log_ring")
+
+TEST_SUITE("capi.session") {
+
+TEST_CASE("tk_session_config_init 填出可直接使用的默认值") {
+  tk_session_config_t config{};
+  tk_session_config_init(&config);
+
+  CHECK(config.mtu == 1500);
+  CHECK(config.adopt_device_mac);
+  CHECK(config.rx_transfer_count > 0);
+  CHECK(config.tx_transfer_count > 0);
+  CHECK(config.rx_transfer_kib > 0);
+  CHECK(config.max_transfer_kib > 0);
+  CHECK(config.bpf_buffer_kib > 0);
+  // 设备筛选默认不限，否则 GUI 一上来就筛不到任何设备。
+  CHECK(config.vendor_id == 0);
+  CHECK(config.product_id == 0);
+}
+
+TEST_CASE("会话可创建、可查状态、可销毁（不需要 root）") {
+  tk_session_config_t config{};
+  tk_session_config_init(&config);
+
+  tk_error_t error{};
+  tk_session_t* session = tk_session_create(&config, &error);
+  REQUIRE(session != nullptr);
+  CHECK(std::strlen(error.message) == 0);
+
+  SUBCASE("未启动时是 IDLE，且各字段都是干净的零值") {
+    tk_session_status_t status{};
+    REQUIRE(tk_session_status_get(session, &status) == TK_OK);
+    CHECK(status.run_state == TK_RUN_IDLE);
+    CHECK(status.rndis_state == TK_RNDIS_UNINITIALIZED);
+    CHECK_FALSE(status.link_up);
+    CHECK(std::strlen(status.system_interface) == 0);
+    CHECK(std::strlen(status.fatal) == 0);
+    CHECK(status.rx_frames == 0);
+    CHECK(status.monotonic_nanos > 0);
+  }
+
+  SUBCASE("未启动时事件队列是空的") {
+    std::array<tk_event_t, 8> events{};
+    CHECK(tk_session_poll_events(session, events.data(), events.size()) == 0);
+  }
+
+  SUBCASE("非 root 启动返回 TK_ERR_PERMISSION 而不是笼统的失败") {
+    // GUI 靠这个码区分「该弹授权」和「真的出错了」。
+    CHECK(tk_session_start(session, &error) == TK_ERR_PERMISSION);
+    CHECK(std::strlen(error.message) > 0);
+  }
+
+  SUBCASE("重复 stop 是幂等的") {
+    CHECK(tk_session_stop(session) == TK_OK);
+    CHECK(tk_session_stop(session) == TK_OK);
+  }
+
+  tk_session_destroy(session);
+}
+
+TEST_CASE("会话接口对空指针一律安全") {
+  tk_error_t error{};
+  CHECK(tk_session_create(nullptr, &error) == nullptr);
+  CHECK(std::strlen(error.message) > 0);
+
+  CHECK(tk_session_start(nullptr, nullptr) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_session_stop(nullptr) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_session_status_get(nullptr, nullptr) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_session_poll_events(nullptr, nullptr, 4) == 0);
+  tk_session_destroy(nullptr);  // 不崩即通过
+  tk_session_config_init(nullptr);
+}
+
+}  // TEST_SUITE("capi.session")
