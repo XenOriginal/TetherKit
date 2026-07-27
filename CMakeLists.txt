@@ -51,6 +51,13 @@ endif()
 # 始终导出 compile_commands.json，供 clangd / clang-tidy 使用。
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# 全局开启位置无关代码。
+#
+# 各功能模块都是静态库，但它们最终要被链进共享库 libtetherkit —— 非 PIC 的目标
+# 文件链不进 dylib。macOS/clang 上 PIC 本来就是默认，这里显式写出来是为了让
+# 「为什么必须 PIC」这件事在构建脚本里有据可查。
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # 可执行文件与库统一输出到 build/bin、build/lib，方便脚本引用。
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
@@ -63,6 +70,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # ------------------------------------------------------------------------------
 option(TETHERKIT_BUILD_TESTS "构建单元测试" ON)
 option(TETHERKIT_BUILD_BENCHMARKS "构建性能基准" ON)
+option(TETHERKIT_BUILD_SHARED_LIB "构建共享库 libtetherkit（GUI 与其它语言绑定需要）" ON)
 option(TETHERKIT_WARNINGS_AS_ERRORS "把编译警告当作错误" OFF)
 option(TETHERKIT_NATIVE_ARCH "为本机 CPU 微架构优化（-mcpu=native，产物不可移植）" OFF)
 option(TETHERKIT_ENABLE_LTO "启用链接时优化（Release 类构建）" OFF)
