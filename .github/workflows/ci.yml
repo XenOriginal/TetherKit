@@ -113,6 +113,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # macos-14 镜像默认 xcode-select 到 Xcode 15.0，那个 SDK 里 SwiftUI 的
+      # View 还不是整体 @MainActor，本仓库代码按新语义写、编不过。选镜像里
+      # 最新的 Xcode：要证明的是「macOS 14 这个运行时下限成立」，编译器新旧
+      # 与此无关。macos-26 上此步等价于默认值，无副作用。
+      - name: 选择镜像里最新的 Xcode
+        run: |
+          latest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          echo "selected: ${latest}"
+          sudo xcode-select -s "${latest}"
+          swift --version
+
       - name: 安装 libusb
         run: brew install libusb
 
