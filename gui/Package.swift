@@ -99,4 +99,8 @@ let package = Package(
         // 用户看到的 SwiftUI App（普通用户身份运行）。
         .executableTarget(name: "TetherKitApp",
                           dependencies: ["TetherKitCore", "TetherKitIPC"]),
+
+        // 只测 TetherKitIPC：它是唯一「纯逻辑、不碰硬件也不需要 root」的层。
+        // 会话与网卡配置的测试在 C++ 侧（tests/test_capi.cc），不在这里重复。
+        .testTarget(name: "TetherKitIPCTests", dependencies: ["TetherKitIPC"]),
     ])

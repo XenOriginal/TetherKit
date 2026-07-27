@@ -63,6 +63,7 @@ gui/
 │   ├── TetherKitCore/                 C ABI 的 Swift 封装
 │   ├── TetherKitHelper/               特权 helper
 │   └── TetherKitApp/                  SwiftUI 界面
+├── Tests/TetherKitIPCTests/           授权凭据生命周期的回归测试（不弹授权框）
 ├── Resources/                         Info.plist、LaunchDaemon plist
 └── Scripts/                           构建 / 安装 / 卸载脚本
 ```
@@ -140,6 +141,22 @@ gui/
 
 取凭据（App 侧，**要**带 `.interactionAllowed`）与复核（helper 侧，**不**带）
 刻意写在同一个文件里：它们的差别只有一个标志位，改一边时另一边就在眼前。
+
+第四条，**实际踩过一次**：
+
+4. **`AuthorizationMakeExternalForm` 产出的 32 字节不是凭据本身，只是指向
+   securityd 里那份授权的一把钥匙。** App 侧一旦在 XPC 往返完成**之前**释放
+   `AuthorizationRef`（尤其是带 `.destroyRights`），helper 还原时就会失败，
+   报 `errAuthorizationDenied (-60005)`。
+
+   而这个错误码从代码上完全看不出「是被自己提前销毁的」—— 它看起来像是用户
+   授权被拒。所以凭据由 `AuthorizationToken` 持有、`AuthorizationBroker
+   .withAuthorization` 用 `withExtendedLifetime` 保证它活到调用结束。
+   **不要裸接住 `requestAuthorization()` 的返回值再用** —— ARC 完全可以在最后
+   一次读 `externalForm` 之后就把令牌释放掉。
+
+   `gui/Tests/TetherKitIPCTests/AuthorizationTests.swift` 把这个行为钉住了，
+   两条用例都不弹授权框，可以进 CI。
 
 ### 4.5 Swift 侧
 
@@ -228,6 +245,7 @@ open dist/TetherKit.app
 ```bash
 export TETHERKIT_LIB_DIR="$PWD/build/lib"
 swift build --package-path gui
+swift test  --package-path gui     # TetherKitIPC 的单元测试
 ```
 
 卸载：
@@ -244,3 +262,4 @@ sudo ./gui/Scripts/uninstall-helper.sh
 | helper 起不来 | `/var/log/tetherkit-helper.log` |
 | 连接失败 | 界面里的「运行日志」面板（可一键复制） |
 | 装完还是依赖 Homebrew | `otool -L dist/TetherKit.app/Contents/Frameworks/libtetherkit.0.*.dylib` |
+| 点「连接」报「无法还原授权凭据（-60005）」 | App 侧提前释放了 AuthorizationRef，见第 4.4 节第 4 条 |

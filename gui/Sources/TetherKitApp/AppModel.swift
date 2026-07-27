@@ -218,10 +218,6 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
 
-        // 每次特权操作都单独取一次凭据。不缓存是刻意的：缓存等于在 App 进程里
-        // 留一张长期有效的通行证，而重新弹框的代价只是一次 Touch ID。
-        guard let authorization = await requestAuthorization() else { return }
-
         var configuration = SessionConfiguration(mtu: requestedMTU,
                                                  adoptDeviceMAC: adoptDeviceMAC)
         // 指定总线 + 地址而不是 VID/PID：同型号两台设备 VID/PID 完全一样，
@@ -231,12 +227,10 @@ final class AppModel {
             configuration.deviceAddress = device.deviceAddress
         }
 
-        do {
+        await authorized { [self] authorization in
             throughputHistory.removeAll()
             try await client.startSession(authorization: authorization,
                                           configuration: configuration)
-        } catch {
-            alertMessage = error.localizedDescription
         }
     }
 
@@ -246,11 +240,8 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
 
-        guard let authorization = await requestAuthorization() else { return }
-        do {
+        await authorized { [self] authorization in
             try await client.stopSession(authorization: authorization)
-        } catch {
-            alertMessage = error.localizedDescription
         }
     }
 
@@ -270,14 +261,11 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
 
-        guard let authorization = await requestAuthorization() else { return }
-        do {
+        await authorized { [self] authorization in
             try await client.applyNetwork(authorization: authorization, interface: interface,
                                           configuration: networkConfiguration)
             // 立刻回读一次，让界面马上反映真实生效的地址，而不用等下一个轮询周期。
             networkState = (try? await client.queryNetwork(interface: interface)) ?? .empty
-        } catch {
-            alertMessage = error.localizedDescription
         }
     }
 
@@ -293,13 +281,10 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
 
-        guard let authorization = await requestAuthorization() else { return }
-        do {
+        await authorized { [self] authorization in
             try await client.applyNetwork(authorization: authorization, interface: interface,
                                           configuration: NetworkConfiguration(mode: .none))
             networkState = (try? await client.queryNetwork(interface: interface)) ?? .empty
-        } catch {
-            alertMessage = error.localizedDescription
         }
     }
 
@@ -313,16 +298,26 @@ final class AppModel {
         droppedLogCount = 0
     }
 
-    /// 弹系统授权框。用户取消时返回 nil，且**不**当作错误弹提示 ——
-    /// 取消是正常操作，再弹一个「已取消」的框只会烦人。
-    private func requestAuthorization() async -> Data? {
+    /// 弹系统授权框，然后带着凭据执行一次特权操作。
+    ///
+    /// ★ 为什么一定要走这个包装，不能自己接住凭据再用 ★
+    ///   外部形式只是指向 securityd 里那份授权的一把钥匙，不是凭据本身。
+    ///   App 这边一旦把 AuthorizationRef 释放掉，helper 还原时就会失败
+    ///   （errAuthorizationDenied，-60005）。withAuthorization 用
+    ///   withExtendedLifetime 保证令牌活到 XPC 往返结束之后。
+    ///
+    /// 每次特权操作都单独取一次凭据。不缓存是刻意的：缓存等于在 App 进程里留
+    /// 一张长期有效的通行证，而重新弹框的代价只是一次 Touch ID。
+    ///
+    /// 用户取消时**不**弹错误提示 —— 取消是正常操作，再弹一个「已取消」的框
+    /// 只会烦人。
+    private func authorized(_ body: @escaping (Data) async throws -> Void) async {
         do {
-            return try AuthorizationBroker.requestAuthorization()
+            try await AuthorizationBroker.withAuthorization(body)
         } catch AuthorizationBroker.Failure.userCancelled {
-            return nil
+            return
         } catch {
             alertMessage = error.localizedDescription
-            return nil
         }
     }
 }

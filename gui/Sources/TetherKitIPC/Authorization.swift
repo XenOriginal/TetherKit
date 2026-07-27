@@ -15,6 +15,37 @@ import Security
 ///   所以顺序不能反：不是「先弹指纹拿到 root，再去建网卡」，而是「先有常驻的
 ///   root helper，每次操作弹指纹拿凭据交给它复核」。
 
+/// 一次授权的持有者。
+///
+/// ★ 它存在的唯一理由：外部形式**不是凭据本身，只是一个引用** ★
+///
+///   `AuthorizationMakeExternalForm` 产出的 32 字节里没有任何权利信息，它只是
+///   指向 securityd 里那份授权的一把钥匙。只要 App 这边把 AuthorizationRef 释放
+///   掉（尤其是带 `.destroyRights` 释放），securityd 里的东西就没了 ——
+///   helper 随后 `AuthorizationCreateFromExternalForm` 会失败，
+///   报 `errAuthorizationDenied (-60005)`。
+///
+///   所以 AuthorizationRef 必须**活到 XPC 往返结束之后**。用一个类来持有它，
+///   让 ARC 去管这件事，比在每个调用点手写「记得最后再 free」可靠得多。
+public final class AuthorizationToken {
+    /// 可以跨进程传给 helper 的 32 字节外部形式。
+    public let externalForm: Data
+
+    private let authorization: AuthorizationRef
+
+    init(authorization: AuthorizationRef, externalForm: Data) {
+        self.authorization = authorization
+        self.externalForm = externalForm
+    }
+
+    deinit {
+        // 带 .destroyRights：凭据归 App 所有，用完就销毁，不在进程里留一张
+        // 长期有效的通行证。（helper 那边复核时**不能**带这个标志，
+        // 否则会把这边的授权一起作废 —— 见 AuthorizationVerifier。）
+        AuthorizationFree(authorization, [.destroyRights])
+    }
+}
+
 /// App 侧：向用户请求授权，拿到可以跨进程传递的凭据。
 public enum AuthorizationBroker {
     public enum Failure: LocalizedError {
@@ -34,20 +65,29 @@ public enum AuthorizationBroker {
         }
     }
 
-    /// 弹出系统授权框（密码 / Touch ID），成功后返回凭据的外部形式。
+    /// 弹出系统授权框（密码 / Touch ID），成功后返回持有这次授权的令牌。
+    ///
+    /// ⚠️ **调用方必须让返回的令牌活到 XPC 往返结束之后。** 令牌一释放，
+    /// securityd 里的授权就没了，helper 还原外部形式时会报
+    /// `errAuthorizationDenied (-60005)`。用 `withAuthorization` 那类包装函数
+    /// 而不是裸接住返回值，能让 ARC 替你保证这件事。
     ///
     /// 必须在主线程调用 —— 它会呈现 UI。
     public static func requestAuthorization(
         right: String = HelperConstants.privilegedRightName
-    ) throws -> Data {
+    ) throws -> AuthorizationToken {
         var authorization: AuthorizationRef?
         let createStatus = AuthorizationCreate(nil, nil, [], &authorization)
         guard createStatus == errAuthorizationSuccess, let authorization else {
             throw Failure.internalFailure(createStatus)
         }
-        // App 这一侧持有凭据，用完要连同权利一起销毁 —— 不留一张长期有效的
-        // 「通行证」在进程里。
-        defer { AuthorizationFree(authorization, [.destroyRights]) }
+        // 失败路径上要立刻释放；成功路径上所有权交给 AuthorizationToken。
+        var handedOff = false
+        defer {
+            if !handedOff {
+                AuthorizationFree(authorization, [.destroyRights])
+            }
+        }
 
         var name = Array(right.utf8CString)
         let copyStatus: OSStatus = name.withUnsafeMutableBufferPointer { buffer in
@@ -72,7 +112,24 @@ public enum AuthorizationBroker {
         guard externalStatus == errAuthorizationSuccess else {
             throw Failure.internalFailure(externalStatus)
         }
-        return withUnsafeBytes(of: &external) { Data($0) }
+
+        handedOff = true
+        return AuthorizationToken(authorization: authorization,
+                                  externalForm: withUnsafeBytes(of: &external) { Data($0) })
+    }
+
+    /// 取一次授权，在 `body` 里用它，并保证令牌活到 `body` 结束之后。
+    ///
+    /// 这是**推荐的用法** —— 裸接住 `requestAuthorization()` 的返回值时，ARC
+    /// 完全可以在最后一次使用 `externalForm` 之后就把令牌释放掉，而那时 XPC
+    /// 往返还没结束。`withExtendedLifetime` 把这个窗口堵死。
+    public static func withAuthorization<T>(
+        right: String = HelperConstants.privilegedRightName,
+        _ body: (Data) async throws -> T
+    ) async throws -> T {
+        let token = try requestAuthorization(right: right)
+        defer { withExtendedLifetime(token) {} }
+        return try await body(token.externalForm)
     }
 }
 
