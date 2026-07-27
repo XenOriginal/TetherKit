@@ -256,6 +256,12 @@ sudo ./gui/Scripts/install-helper.sh
 显示上/下行速率；点开是一块小面板，可随时回到主窗口或退出。已建立的连接由
 特权组件持有，即使退出界面也不会断。
 
+**检查更新**：菜单「TetherKit → 检查更新…」手动查；App 也会每天自动查一次
+（只访问 GitHub 的公开 Releases API，不上报任何信息），发现新版在仪表盘
+底部点亮一条提示。更新本身仍走 `brew upgrade` 或源码重编 —— 免证书分发下
+自动替换 .app 会被 Gatekeeper 拦下，所以刻意只查不换。不想要自动检查：
+`defaults write com.tetherkit.app updateCheckDisabled -bool YES`。
+
 **要求**：macOS 14+（命令行部分仍支持 13.3+）。实现细节与设计取舍见
 [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md)。
 

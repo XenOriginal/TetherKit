@@ -64,6 +64,15 @@ enum HelperAvailability: Equatable {
     }
 }
 
+/// 手动「检查更新」的结果，驱动一个弹窗。
+enum UpdateCheckResult: Equatable {
+    case upToDate(current: String)
+    case updateAvailable(UpdateChecker.Release)
+    case failed(String)
+    /// 开发构建（`swift run` 的裸可执行文件）没有版本号，没法比。
+    case unavailable
+}
+
 /// 界面的全部状态与动作。
 ///
 /// ★ 为什么所有事都经过 helper，而不是 App 自己调库 ★
@@ -97,6 +106,11 @@ final class AppModel {
     private(set) var isBusy: Bool = false
     /// 需要弹给用户看的错误。
     var alertMessage: String?
+
+    /// 已知的新版本。驱动管理行里的「有新版」提示；nil = 没有或没查过。
+    private(set) var availableUpdate: UpdateChecker.Release?
+    /// 手动「检查更新」的结果弹窗。视图关掉弹窗时置回 nil。
+    var updateCheckResult: UpdateCheckResult?
 
     var logLevelFilter: LogLevel = .info
 
@@ -175,6 +189,8 @@ final class AppModel {
                 try? await Task.sleep(for: self.pollDelay)
             }
         }
+        restoreKnownUpdate()
+        Task { await checkForUpdatesQuietly() }
     }
 
     func stopPolling() {
@@ -532,6 +548,70 @@ final class AppModel {
         }
         alertMessage = "\(failureNotice)脚本输出：\n\(Self.tail(of: output))"
     }
+
+    // MARK: - 检查更新
+
+    /// 手动检查（App 菜单「检查更新…」）。结果无论好坏都弹窗。
+    func checkForUpdates() async {
+        guard let current = UpdateChecker.currentVersion else {
+            updateCheckResult = .unavailable
+            return
+        }
+        do {
+            let latest = try await UpdateChecker.fetchLatestRelease()
+            remember(latest)
+            if UpdateChecker.isNewer(latest.version, than: current) {
+                availableUpdate = latest
+                updateCheckResult = .updateAvailable(latest)
+            } else {
+                availableUpdate = nil
+                updateCheckResult = .upToDate(current: current)
+            }
+        } catch {
+            updateCheckResult = .failed(error.localizedDescription)
+        }
+    }
+
+    /// 自动检查：每天至多一次、失败静默、发现新版只点亮管理行的提示，
+    /// 绝不弹窗打断 —— 更新是「顺便知道」的事，不值得一个模态框。
+    /// `defaults write com.tetherkit.app updateCheckDisabled -bool YES` 可关掉。
+    private func checkForUpdatesQuietly() async {
+        guard let current = UpdateChecker.currentVersion else { return }
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.updateCheckDisabledKey) else { return }
+        if let last = defaults.object(forKey: Self.updateLastCheckedKey) as? Date,
+           Date().timeIntervalSince(last) < 24 * 60 * 60 {
+            return
+        }
+
+        guard let latest = try? await UpdateChecker.fetchLatestRelease() else { return }
+        defaults.set(Date(), forKey: Self.updateLastCheckedKey)
+        remember(latest)
+        availableUpdate = UpdateChecker.isNewer(latest.version, than: current) ? latest : nil
+    }
+
+    /// 把查到的最新版记进 defaults —— 明天的启动被节流拦住时，提示不该消失。
+    private func remember(_ release: UpdateChecker.Release) {
+        let defaults = UserDefaults.standard
+        defaults.set(release.version, forKey: Self.updateKnownVersionKey)
+        defaults.set(release.pageURL.absoluteString, forKey: Self.updateKnownPageKey)
+    }
+
+    /// 启动时恢复上次查到的新版提示。升级完成后（当前版本 ≥ 记住的版本）
+    /// 自然失效，不需要任何清理逻辑。
+    private func restoreKnownUpdate() {
+        guard let current = UpdateChecker.currentVersion,
+              let version = UserDefaults.standard.string(forKey: Self.updateKnownVersionKey),
+              let page = UserDefaults.standard.string(forKey: Self.updateKnownPageKey),
+              let pageURL = URL(string: page),
+              UpdateChecker.isNewer(version, than: current) else { return }
+        availableUpdate = UpdateChecker.Release(version: version, pageURL: pageURL)
+    }
+
+    private static let updateCheckDisabledKey = "updateCheckDisabled"
+    private static let updateLastCheckedKey = "updateLastCheckedAt"
+    private static let updateKnownVersionKey = "updateKnownVersion"
+    private static let updateKnownPageKey = "updateKnownPageURL"
 
     /// 取输出的末尾几行给弹窗用 —— 完整输出可能很长，真实原因几乎总在结尾。
     /// 顺手剥掉脚本里的 ANSI 颜色码，弹窗里那是乱码。

@@ -30,6 +30,13 @@ struct TetherKitApplication: App {
         .commands {
             // 「新建窗口」对单窗口应用没有意义，去掉免得用户点了没反应。
             CommandGroup(replacing: .newItem) {}
+            // 「检查更新…」放在 App 菜单「关于」下面的惯例位置。
+            // 只查不换 —— 原因见 UpdateChecker.swift 的类型注释。
+            CommandGroup(after: .appInfo) {
+                Button("检查更新…") {
+                    Task { await model.checkForUpdates() }
+                }
+            }
         }
 
         // 菜单栏常驻项：图标 + 实时速率。

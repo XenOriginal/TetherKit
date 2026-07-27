@@ -65,6 +65,43 @@ struct ContentView: View {
         } message: {
             Text(uninstallWarning)
         }
+        .alert("检查更新",
+               isPresented: Binding(get: { model.updateCheckResult != nil },
+                                    set: { if !$0 { model.updateCheckResult = nil } })) {
+            if case .updateAvailable(let release) = model.updateCheckResult {
+                Button("前往发布页") { NSWorkspace.shared.open(release.pageURL) }
+                Button("复制 brew 升级命令") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString("brew upgrade tetherkit-gui", forType: .string)
+                }
+                Button("好", role: .cancel) {}
+            } else {
+                Button("好", role: .cancel) {}
+            }
+        } message: {
+            Text(updateCheckDescription)
+        }
+    }
+
+    /// 「检查更新」弹窗的正文。
+    ///
+    /// brew 命令名与 tap 里计划的 GUI formula（tetherkit-gui）一致；
+    /// 手动构建的用户按第二句走。
+    private var updateCheckDescription: String {
+        switch model.updateCheckResult {
+        case .upToDate(let current):
+            return "当前已是最新版本（v\(current)）。"
+        case .updateAvailable(let release):
+            return "发现新版本 v\(release.version)。通过 Homebrew 安装的话，"
+                + "在终端执行 brew upgrade tetherkit-gui；"
+                + "从源码构建的话，拉取最新代码重新编译即可。"
+        case .failed(let reason):
+            return "无法完成检查：\(reason)"
+        case .unavailable:
+            return "这是开发构建（没有版本号），无从比较。"
+        case nil:
+            return ""
+        }
     }
 
     private var uninstallWarning: String {
@@ -119,6 +156,16 @@ struct ContentView: View {
                     .foregroundStyle(.tertiary)
                     .textSelection(.enabled)
                     .lineLimit(1)
+                // 塞在既有行里而不是另起一行：整页预算 700pt 已经没有余粮
+                // 给新行了（管理行自己就险些顶破过一次）。
+                if let update = model.availableUpdate {
+                    Button("有新版 \(update.version)") {
+                        model.updateCheckResult = .updateAvailable(update)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+                }
                 Spacer()
                 Button("卸载特权组件…") { confirmingHelperUninstall = true }
                     .buttonStyle(.borderless)

@@ -283,6 +283,25 @@ helper 缺失或版本不匹配时，界面给一个「安装 / 更新特权组�
   `uninstall-helper.sh`。成败判定方向相反：等的是「连不上」。卸载后界面
   自然回到安装引导页，随时可重装。
 
+### 4.10 检查更新（只查不换）
+
+`UpdateChecker.swift` 请求 GitHub 的 `releases/latest`，和 Info.plist 里的
+版本号（CMakeLists 单一来源）做语义化比较。**刻意不做自动下载替换**：
+免证书分发下，下载物带 quarantine，替换完的 .app 会被 Gatekeeper 拦死 ——
+和不能走 Cask 是同一堵墙。真正的更新通道是 `brew upgrade` 或源码重编。
+
+- 入口两个：App 菜单「检查更新…」（结果弹窗，带可复制的 brew 命令与
+  发布页链接）；自动检查每天至多一次，发现新版只点亮管理行里的
+  「有新版 x.y.z」，绝不弹窗打断。提示跨启动记忆（defaults），升级完成后
+  因版本比较自然熄灭。
+- 隐私：只访问 GitHub 公开 API，失败静默；
+  `defaults write com.tetherkit.app updateCheckDisabled -bool YES` 彻底关闭。
+- `swift run` 的裸可执行文件没有 Info.plist 版本号，检查自动跳过。
+- 发版纪律：检查读的是 GitHub Releases，**每个版本必须打 `vX.Y.Z` tag 并
+  发布 Release**，否则查不到。
+- 查到新版后的落地由既有机制接力：`brew upgrade` 换掉 App，重启后
+  `protocolRevision` 不匹配触发「更新特权组件」一键重装（4.6 / 4.9 节）。
+
 ---
 
 ## 5. 已实现 / 未实现
@@ -300,6 +319,7 @@ helper 缺失或版本不匹配时，界面给一个「安装 / 更新特权组�
 | 孤儿 feth 清理 | `tk_cleanup_orphan_interfaces` |
 | 特权 helper + 凭据复核 | `gui/Sources/TetherKitHelper` |
 | App 内一键安装 / 更新 / 卸载特权组件 | `gui/Sources/TetherKitApp/HelperInstaller.swift` |
+| 检查更新（只查不换，每日自动 + 手动菜单） | `gui/Sources/TetherKitApp/UpdateChecker.swift` |
 | SwiftUI 界面（状态、设备、网络、吞吐、日志） | `gui/Sources/TetherKitApp` |
 | 菜单栏实时速率 + 后台运行（仅菜单栏模式） | `gui/Sources/TetherKitApp/Views/MenuBarPanel.swift` |
 
