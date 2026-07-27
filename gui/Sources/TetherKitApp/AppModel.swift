@@ -57,6 +57,11 @@ enum HelperAvailability: Equatable {
     /// 单独一个状态而不是并进 missing：这两种情况的解决办法不一样，
     /// 一个是「去装」，一个是「去重装」，提示文案必须能区分。
     case outdated(installed: Int, expected: Int)
+
+    var isAvailable: Bool {
+        if case .available = self { return true }
+        return false
+    }
 }
 
 /// 界面的全部状态与动作。
@@ -123,6 +128,17 @@ final class AppModel {
     /// 不写这一句的话框里只有「TetherKit 想要进行更改」，用户无从判断该不该批准。
     private static let authorizationPrompt =
         "TetherKit 需要管理员权限来创建虚拟网卡、打开数据链路并配置 IP 地址。"
+
+    /// 安装特权组件时授权框里的说明。单独一句 —— 这次批准的是「往系统目录里
+    /// 装东西」，和上面的日常操作不是一回事，文案必须说实话。
+    private static let helperInstallPrompt =
+        "TetherKit 需要管理员权限来安装特权组件"
+        + "（复制到 /Library/PrivilegedHelperTools 并注册系统服务）。"
+
+    /// 卸载特权组件时授权框里的说明。
+    private static let helperUninstallPrompt =
+        "TetherKit 需要管理员权限来卸载特权组件"
+        + "（注销系统服务并删除 /Library 里的组件文件）。"
 
     /// 轮询周期。
     ///
@@ -443,6 +459,92 @@ final class AppModel {
     func clearLogs() {
         logs.removeAll()
         droppedLogCount = 0
+    }
+
+    /// 安装 / 更新特权组件（引导卡上的「一键安装」按钮）。
+    func installHelper() async {
+        await maintainHelper(.install, prompt: Self.helperInstallPrompt,
+                             expectAvailable: true,
+                             failureNotice: "安装脚本执行完毕，但仍连不上特权组件。")
+    }
+
+    /// 卸载特权组件（仪表盘底部的「卸载…」，确认框在 UI 层）。
+    ///
+    /// bootout 给 helper 发 SIGTERM —— 正在跑的会话被优雅停掉、虚拟网卡销毁，
+    /// 这一点必须在确认框里向用户说明。卸载完成后界面自然回到安装引导页。
+    func uninstallHelper() async {
+        await maintainHelper(.uninstall, prompt: Self.helperUninstallPrompt,
+                             expectAvailable: false,
+                             failureNotice: "卸载脚本执行完毕，但特权组件仍在响应。")
+    }
+
+    /// 安装与卸载共用的执行壳：授权（复用缓存令牌）→ AEWP 执行 → XPC 探测
+    /// 兜底确认。
+    ///
+    /// 授权与日常特权操作共用同一条权利（system.privilege.admin），令牌缓存
+    /// 因此天然通用：装完 5 分钟内接着点「连接」不会再弹框。缓存令牌已过期的
+    /// 罕见路径由 AEWP 自己弹系统默认文案的框兜底，不为它专造一次「带自定义
+    /// 文案的重新授权」。
+    ///
+    /// ★ 成败判定 ★
+    ///   AEWP 不给退出码（见 HelperInstaller 的说明），所以脚本跑完后用真实的
+    ///   XPC 往返确认，兜几秒等 launchd 完成登记与按需拉起（或注销生效）。
+    ///   方向由 expectAvailable 决定：安装等「连得上」，卸载等「连不上」。
+    ///   失败时把脚本输出的末尾放进弹窗 —— 真实原因几乎总写在结尾。
+    private func maintainHelper(_ action: HelperInstaller.Action,
+                                prompt: String,
+                                expectAvailable: Bool,
+                                failureNotice: String) async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+
+        // 载荷与 AEWP 先行自检 —— 缺哪样都必须在弹授权框**之前**说清楚。
+        if let failure = HelperInstaller.preflightError() {
+            alertMessage = failure.localizedDescription
+            return
+        }
+
+        let output: String
+        do {
+            let token: AuthorizationToken
+            if let cached = cachedAuthorization {
+                token = cached
+            } else {
+                token = try AuthorizationBroker.requestAuthorization(prompt: prompt)
+                cachedAuthorization = token
+            }
+            defer { withExtendedLifetime(token) {} }
+            output = try await HelperInstaller.run(action, with: token)
+        } catch AuthorizationBroker.Failure.userCancelled {
+            return
+        } catch HelperInstaller.Failure.userCancelled {
+            return
+        } catch {
+            alertMessage = error.localizedDescription
+            return
+        }
+
+        for _ in 0..<6 {
+            await refresh()
+            if helperAvailability.isAvailable == expectAvailable { return }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        alertMessage = "\(failureNotice)脚本输出：\n\(Self.tail(of: output))"
+    }
+
+    /// 取输出的末尾几行给弹窗用 —— 完整输出可能很长，真实原因几乎总在结尾。
+    /// 顺手剥掉脚本里的 ANSI 颜色码，弹窗里那是乱码。
+    private static func tail(of output: String,
+                             maxLines: Int = 10, maxCharacters: Int = 700) -> String {
+        let plain = output.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "",
+                                                options: .regularExpression)
+        let lines = plain.split(separator: "\n", omittingEmptySubsequences: true)
+        var kept = lines.suffix(maxLines).joined(separator: "\n")
+        if kept.count > maxCharacters {
+            kept = String(kept.suffix(maxCharacters))
+        }
+        return kept.isEmpty ? "（无输出）" : kept
     }
 
     /// 带着授权凭据执行一次特权操作，必要时才弹系统授权框。

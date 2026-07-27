@@ -27,7 +27,13 @@ import Security
 ///
 ///   所以 AuthorizationRef 必须**活到 XPC 往返结束之后**。用一个类来持有它，
 ///   让 ARC 去管这件事，比在每个调用点手写「记得最后再 free」可靠得多。
-public final class AuthorizationToken {
+///
+/// ★ 为什么敢标 @unchecked Sendable ★
+///   HelperInstaller 要把令牌递到后台队列（AEWP 会阻塞在授权框上，不能占主
+///   线程）。这里没有可变状态 —— 两个存储属性都是 let；AuthorizationRef 本身
+///   按 Authorization Services 的文档是线程安全的（真正的状态在 securityd
+///   进程里，跨进程调用天然串行化）；deinit 由 ARC 保证只跑一次。
+public final class AuthorizationToken: @unchecked Sendable {
     /// 可以跨进程传给 helper 的 32 字节外部形式。
     public let externalForm: Data
 
@@ -36,6 +42,15 @@ public final class AuthorizationToken {
     init(authorization: AuthorizationRef, externalForm: Data) {
         self.authorization = authorization
         self.externalForm = externalForm
+    }
+
+    /// 把底层的 AuthorizationRef 短暂借给需要它本体的 API（目前只有
+    /// `AuthorizationExecuteWithPrivileges` 一处 —— 它要的是 ref，不是外部形式）。
+    ///
+    /// 做成作用域借用而不是直接暴露属性：ref 的生命周期归本类管，谁把它存到
+    /// 闭包外面，令牌一释放就是悬垂引用 —— 那种错误编译器查不出来。
+    public func withReference<T>(_ body: (AuthorizationRef) throws -> T) rethrows -> T {
+        try body(authorization)
     }
 
     deinit {

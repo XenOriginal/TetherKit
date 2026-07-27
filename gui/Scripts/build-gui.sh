@@ -7,9 +7,12 @@
 #   TETHERKIT_BUILD_DIR=/path ./gui/Scripts/build-gui.sh
 #   ./gui/Scripts/build-gui.sh --debug      # 调试构建，编译快、便于断点
 #
-# 产物都在 dist/ 下：
+# 产物只有一个：
 #   dist/TetherKit.app        —— 双击运行的图形界面
-#   dist/helper/              —— 交给 install-helper.sh 安装的特权组件
+#
+# 特权组件的安装载荷（helper 二进制 + dylib + plist + 安装脚本）内嵌在
+# .app 的 Contents/Library/HelperTools/ 里，App 内「一键安装」与终端里的
+# install-helper.sh 用的都是这一份。
 #
 # ⚠️ 本脚本里所有「变量后面紧跟中文标点」的地方都必须写成 ${VAR}。
 #    bash 按字节判断标识符字符，UTF-8 locale 下全角标点的首字节（0xEF）会被
@@ -91,16 +94,31 @@ sed "s/__TETHERKIT_VERSION__/${VERSION}/g" \
 cp -a "${LIB_DIR}"/libtetherkit*.dylib "${APP_DIR}/Contents/Frameworks/"
 
 # ------------------------------------------------------------------------------
-# 组装 helper
+# 组装特权组件载荷（内嵌进 .app）
+#
+# ★ 为什么放在 Contents/Library/HelperTools/ 而不是旁边的 dist/helper/ ★
+#   App 内「一键安装」要从一个固定位置拿到载荷，而 .app 是唯一保证被整体
+#   分发的单位 —— 载荷跟着它走，装到哪台机器都找得到。
+#
+# ★ 为什么平铺一个目录 ★
+#   二进制、dylib、plist、安装脚本全在一层，install-helper.sh 整目录拷走
+#   即可，不用关心 bundle 的内部结构。dylib 在 Frameworks/ 已有一份给 App
+#   运行时用，这里再放一份给安装器拷 —— 约 0.8 MB 的重复，换来安装源目录
+#   自包含，值得。
 # ------------------------------------------------------------------------------
-HELPER_DIR="${DIST_DIR}/helper"
-log "组装 ${HELPER_DIR}"
+PAYLOAD_DIR="${APP_DIR}/Contents/Library/HelperTools"
+log "组装 ${PAYLOAD_DIR}"
 
-rm -rf "${HELPER_DIR}"
-mkdir -p "${HELPER_DIR}"
-cp "${SWIFT_BIN_DIR}/tetherkit-helper" "${HELPER_DIR}/com.tetherkit.helper"
-cp -a "${LIB_DIR}"/libtetherkit*.dylib "${HELPER_DIR}/"
-cp "${GUI_DIR}/Resources/com.tetherkit.helper.plist" "${HELPER_DIR}/"
+mkdir -p "${PAYLOAD_DIR}"
+cp "${SWIFT_BIN_DIR}/tetherkit-helper" "${PAYLOAD_DIR}/com.tetherkit.helper"
+cp -a "${LIB_DIR}"/libtetherkit*.dylib "${PAYLOAD_DIR}/"
+cp "${GUI_DIR}/Resources/com.tetherkit.helper.plist" "${PAYLOAD_DIR}/"
+# 安装 / 卸载脚本也进载荷：只有 .app（没有仓库）的机器也能装能卸。
+cp "${SCRIPT_DIR}/install-helper.sh" "${SCRIPT_DIR}/uninstall-helper.sh" "${PAYLOAD_DIR}/"
+chmod 755 "${PAYLOAD_DIR}/install-helper.sh" "${PAYLOAD_DIR}/uninstall-helper.sh"
+
+# 旧版布局把载荷放在 dist/helper/，留着只会误导 —— 那份不再被更新。
+rm -rf "${DIST_DIR}/helper"
 
 # ------------------------------------------------------------------------------
 # 内嵌 libusb
@@ -146,7 +164,7 @@ embed_libusb() {
 
 log "内嵌 libusb"
 embed_libusb "${APP_DIR}/Contents/Frameworks"
-embed_libusb "${HELPER_DIR}"
+embed_libusb "${PAYLOAD_DIR}"
 
 # ------------------------------------------------------------------------------
 # 摘掉指向构建目录的 rpath
@@ -166,7 +184,7 @@ strip_build_rpath() {
   fi
 }
 strip_build_rpath "${APP_DIR}/Contents/MacOS/TetherKit"
-strip_build_rpath "${HELPER_DIR}/com.tetherkit.helper"
+strip_build_rpath "${PAYLOAD_DIR}/com.tetherkit.helper"
 
 # ------------------------------------------------------------------------------
 # 签名
@@ -176,7 +194,7 @@ strip_build_rpath "${HELPER_DIR}/com.tetherkit.helper"
 # 顺序必须是「先签内部的库，再签外层的 .app」—— 反过来内层的改动会让外层签名失效。
 # ------------------------------------------------------------------------------
 log "ad-hoc 签名"
-codesign --force --sign - --timestamp=none "${HELPER_DIR}/com.tetherkit.helper" >/dev/null
+codesign --force --sign - --timestamp=none "${PAYLOAD_DIR}/com.tetherkit.helper" >/dev/null
 codesign --force --sign - --timestamp=none --deep "${APP_DIR}" >/dev/null
 
 # ------------------------------------------------------------------------------
@@ -195,11 +213,10 @@ cat <<EOF
 
 构建完成：
   ${APP_DIR}
-  ${HELPER_DIR}
+  （特权组件载荷内嵌在 Contents/Library/HelperTools/）
 
 接下来：
-  1. 安装特权组件（需要输入密码）：
-       sudo ./gui/Scripts/install-helper.sh
-  2. 运行：
-       open ${APP_DIR}
+  open ${APP_DIR}
+  首次运行会引导安装特权组件 —— 点「安装特权组件」、输一次管理员密码即可。
+  偏好终端的话：sudo ./gui/Scripts/install-helper.sh
 EOF

@@ -227,14 +227,20 @@ cmake --build build -j
 # 2. 构建界面与特权组件（需要 Xcode 工具链）
 cmake --build build --target gui        # 等价于 ./gui/Scripts/build-gui.sh
 
-# 3. 安装特权组件（需要输入密码）
-sudo ./gui/Scripts/install-helper.sh
-
-# 4. 运行
+# 3. 运行
 open dist/TetherKit.app
 ```
 
-卸载：`sudo ./gui/Scripts/uninstall-helper.sh`
+首次运行界面会引导安装特权组件：点「安装特权组件」、在系统授权框里输一次
+管理员密码即可，装好后界面自动恢复。特权组件的安装载荷内嵌在 .app 里
+（`Contents/Library/HelperTools/`），偏好终端的话效果完全相同：
+
+```bash
+sudo ./gui/Scripts/install-helper.sh
+```
+
+卸载：仪表盘底部有「卸载特权组件…」按钮（终端等价命令
+`sudo ./gui/Scripts/uninstall-helper.sh`）。
 
 界面里可以配置**上网方式**：
 

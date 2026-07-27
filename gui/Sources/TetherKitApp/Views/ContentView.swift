@@ -22,6 +22,9 @@ import TetherKitIPC
 struct ContentView: View {
     @Bindable var model: AppModel
 
+    /// 卸载是破坏性动作（断开连接、删系统文件），必须先确认。
+    @State private var confirmingHelperUninstall = false
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -30,9 +33,10 @@ struct ContentView: View {
                     case .unknown:
                         ProbingCard()
                     case .missing(let reason):
-                        HelperMissingCard(reason: reason)
+                        HelperMissingCard(model: model, reason: reason)
                     case .outdated(let installed, let expected):
-                        HelperOutdatedCard(installed: installed, expected: expected)
+                        HelperOutdatedCard(model: model, installed: installed,
+                                           expected: expected)
                     case .available:
                         dashboard
                     }
@@ -53,6 +57,21 @@ struct ContentView: View {
         } message: {
             Text(model.alertMessage ?? "")
         }
+        .confirmationDialog("卸载特权组件？", isPresented: $confirmingHelperUninstall) {
+            Button("卸载", role: .destructive) {
+                Task { await model.uninstallHelper() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(uninstallWarning)
+        }
+    }
+
+    private var uninstallWarning: String {
+        let base = "将注销系统服务并删除 /Library 里的组件文件，之后随时可以重新安装。"
+        return model.status.runState == .running
+            ? "当前连接会被断开、虚拟网卡销毁。" + base
+            : base
     }
 
     private var dashboard: some View {
@@ -64,6 +83,11 @@ struct ContentView: View {
                 VStack(spacing: Design.Spacing.gutter) {
                     DeviceCard(model: model)
                     NetworkCard(model: model)
+                    // Spacer 把管理行压到左栏底部的既有空隙里。放在外层 VStack
+                    // 末尾会新增一行整页高度 —— 「一屏放完」的布局刚好被它
+                    // 顶破，footer 落到折叠线以下（实测踩过）。
+                    Spacer(minLength: 0)
+                    helperManagementFooter
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
@@ -73,6 +97,31 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
+        }
+    }
+
+    /// 左栏底部的特权组件管理行。
+    ///
+    /// 刻意做得低调（caption + borderless）：卸载是极低频的管理动作，不该
+    /// 从正常使用里抢走任何注意力 —— 但它必须存在于主界面，否则组件
+    /// 「装得上、删不掉」，只能回终端翻脚本。
+    @ViewBuilder
+    private var helperManagementFooter: some View {
+        if case .available(let version) = model.helperAvailability {
+            HStack(spacing: Design.Spacing.small) {
+                Text("特权组件 · \(version)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                Spacer()
+                Button("卸载特权组件…") { confirmingHelperUninstall = true }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .disabled(model.isBusy)
+            }
+            .padding(.horizontal, Design.Spacing.tight)
         }
     }
 
@@ -108,14 +157,11 @@ private struct ProbingCard: View {
 
 /// helper 没装时的引导。
 ///
-/// 这是新用户最可能撞上的一屏，所以把「为什么需要」和「怎么装」一次说清楚，
-/// 并且命令可以一键复制 —— 让用户自己去 README 里翻是最差的体验。
+/// 这是新用户最可能撞上的一屏，所以把「为什么需要」说清楚之后直接给一个
+/// 「安装」按钮 —— 弹一次系统授权框就装好。终端方案降级成折叠里的备选。
 private struct HelperMissingCard: View {
+    @Bindable var model: AppModel
     let reason: String
-
-    private var installCommand: String {
-        "sudo \(FileManager.default.currentDirectoryPath)/gui/Scripts/install-helper.sh"
-    }
 
     var body: some View {
         Card(title: "需要先安装特权组件", systemImage: "lock.shield") {
@@ -126,16 +172,11 @@ private struct HelperMissingCard: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                VStack(alignment: .leading, spacing: Design.Spacing.tight) {
-                    Text("在终端里执行安装脚本：")
-                        .font(.callout)
-                    CopyableCommand(command: "sudo ./gui/Scripts/install-helper.sh")
-                    Text("脚本会把组件装到 /Library/PrivilegedHelperTools 并注册\n"
-                         + "LaunchDaemon。装好后本页会自动恢复，不需要重启 App。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                HelperInstallSection(
+                    model: model,
+                    buttonTitle: "安装特权组件",
+                    detail: "组件会被装到 /Library/PrivilegedHelperTools 并注册为\n"
+                        + "LaunchDaemon。装好后本页自动恢复，不需要重启 App。")
 
                 DisclosureGroup("查看连接失败的详细原因") {
                     Text(reason)
@@ -156,6 +197,7 @@ private struct HelperMissingCard: View {
 /// 单独一屏而不是复用「没安装」：这两种情况下用户要做的事不一样，而且如果不
 /// 明说，症状会表现成调用卡住或直接崩溃 —— 那是最难自查的一类问题。
 private struct HelperOutdatedCard: View {
+    @Bindable var model: AppModel
     let installed: Int
     let expected: Int
 
@@ -168,15 +210,64 @@ private struct HelperOutdatedCard: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                HelperInstallSection(
+                    model: model,
+                    buttonTitle: "更新特权组件",
+                    detail: "更新会先注销旧版本再装新的，装好后本页自动恢复。")
+            }
+        }
+    }
+}
+
+/// 「一键安装」按钮 + 终端备选方案。missing / outdated 两张卡共用。
+///
+/// 终端方案必须保留而不是彻底删掉：`swift run` 跑的裸可执行文件没有内嵌载荷，
+/// 按钮会明确报错引导到脚本；也总有人就是不愿意往 App 弹的框里输密码。
+private struct HelperInstallSection: View {
+    @Bindable var model: AppModel
+    let buttonTitle: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Design.Spacing.small) {
+            HStack(spacing: Design.Spacing.small) {
+                Button {
+                    Task { await model.installHelper() }
+                } label: {
+                    HStack(spacing: Design.Spacing.tight) {
+                        if model.isBusy {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.down.circle.fill")
+                        }
+                        Text(model.isBusy ? "正在安装……" : buttonTitle)
+                    }
+                    .frame(minWidth: 132)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(model.isBusy)
+
+                Text("会弹出系统授权框，需要输入一次管理员密码")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            DisclosureGroup("改用终端安装") {
                 VStack(alignment: .leading, spacing: Design.Spacing.tight) {
-                    Text("重新运行安装脚本即可覆盖更新：")
-                        .font(.callout)
                     CopyableCommand(command: "sudo ./gui/Scripts/install-helper.sh")
-                    Text("脚本会先注销旧版本再装新的。更新后本页会自动恢复。")
+                    Text("在仓库根目录执行，效果与按钮完全相同。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                .padding(.top, Design.Spacing.tight)
             }
+            .font(.caption)
         }
     }
 }

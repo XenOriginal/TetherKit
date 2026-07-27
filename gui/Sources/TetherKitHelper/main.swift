@@ -14,6 +14,12 @@ import Foundation
 import TetherKitCore
 import TetherKitIPC
 
+// ---- 安装模式 ----
+//
+// 被 App 以 `--install` 拉起时接管进程（见 InstallerMode.swift），与下面的
+// daemon 模式无关 —— 必须放在最前面，日志捕获、孤儿清理都不该在安装模式里跑。
+runInstallerModeIfRequested()
+
 /// 往 stderr 写一行。helper 由 launchd 拉起，stderr 进的是 LaunchDaemon 的
 /// 日志文件 —— 排查「helper 起不来」这类问题时，那是唯一能看到东西的地方。
 func writeToStandardError(_ message: String) {

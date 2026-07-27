@@ -145,6 +145,30 @@ helper 的 root **来自 launchd**，跟用户按没按指纹毫无关系 ——
 3. **连通性探测方法不要求授权。** 否则"helper 没装"和"授权没过"两种失败混在一起，
    没法给用户准确提示。
 
+### 后补：helper 的安装本身也能走同一套授权（AEWP）
+
+后来把「安装 helper」也从终端挪进了 App（`HelperInstaller.swift`）。机制是
+废弃已久的 `AuthorizationExecuteWithPrivileges`，macOS 26 实测：
+
+- `dlsym(RTLD_DEFAULT, "AuthorizationExecuteWithPrivileges")` 仍能解析；
+- setuid 的执行载体 `/usr/libexec/security_authtrampoline` 仍在（mode 04711）。
+
+它恰好接 `AuthorizationRef`，与 4 节的信任模型同源 —— App 缓存的令牌直接复用，
+5 分钟窗口内安装一次框都不弹。`osascript with administrator privileges` 因为
+自建授权会话、接不上令牌缓存而被排除。三个实测约束：
+
+- **AEWP 的执行对象必须是二进制，不能是 shell 脚本。** trampoline 给子进程的
+  凭据是 euid=0 / **ruid=调用者**，而 bash（zsh、dash 同理）在 euid ≠ ruid 且
+  未带 `-p` 时会把 euid 降回 ruid —— 防 setuid 脚本的老规矩。直接 AEWP
+  安装脚本，真机上得到的就是脚本自己的「需要 root 权限」报错。解法：AEWP
+  helper 二进制的 `--install` 模式，先 `setgid(0)` + `setuid(0)` 归一化成与
+  sudo 完全相同的凭据，再 exec 脚本（`InstallerMode.swift`）。
+- **不给 pid 也不给退出码**，只有连到子进程 stdout 的管道 —— stderr 要在
+  子进程里 dup2 并流，成败得用「装完能否连上匹配版本的 helper」这类真实
+  结果判定；
+- 用 dlsym 而不是直接链接：将来符号被移除时能降级成终端引导，而不是
+  dyld 绑定失败。
+
 ---
 
 ## 5. 关键澄清：授权 ≠ root

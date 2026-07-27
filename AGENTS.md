@@ -199,6 +199,7 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 | 20 | `feat(gui): 上网方式配置界面` | ✅ | DHCP / 静态 IP + 生效状态回读 |
 | 21 | `build(gui): 打包与安装脚本、GUI 架构文档` | ✅ | |
 | 22 | `feat(gui): 菜单栏实时速率与后台运行模式` | ✅ | MenuBarExtra + 仅菜单栏模式 + 自适应轮询；顺带修 helper 不清理失败态旧会话的缺陷 |
+| 23 | `feat(gui): App 内一键安装与卸载特权组件` | ✅ | AEWP + helper 二进制 setuid(0)；载荷内嵌 .app，dist/helper 废除；「bash 对 euid≠ruid 掉权」的坑记入 SPIKE |
 
 ### 当前状态
 
@@ -206,7 +207,8 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
   capi.log_ring / capi.session / capi.process / capi.net_config 六个 suite）
 - **构建**：`-Werror` 零告警；命令行、共享库、GUI 三套产物均可构建
 - **可运行**：`--version` / `--help` / `--list` 均正常；非 root 启动给出清晰提示
-  并返回退出码 1；`TetherKit.app` 与 `tetherkit-helper` 打包后均可启动
+  并返回退出码 1；`TetherKit.app` 与 `tetherkit-helper` 打包后均可启动；
+  特权组件可在 App 内一键安装 / 卸载（安装路径已真机走通）
 - **已验证**：USB 侧在真实 RNDIS 设备上跑通（枚举、声明接口、RNDIS 握手），
   且 USB 这一侧**不需要 root**；feth 私有 ABI、两个私有 BPF ioctl、
   以及「BPF 写入能让对侧 IP 栈收到帧」这个核心前提都已实测确认。详见第 6 节

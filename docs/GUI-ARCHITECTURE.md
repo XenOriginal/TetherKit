@@ -249,6 +249,40 @@ helper 根本没有它 —— 那就又回到了「对不上还查不出来」�
 - **bash 里变量后面紧跟中文标点必须写 `${VAR}`。** UTF-8 locale 下全角标点的
   首字节（0xEF）会被 `isalnum()` 判为真、吸进变量名。C locale 下不复现。
 
+### 4.9 App 内一键安装特权组件（AEWP）
+
+helper 缺失或版本不匹配时，界面给一个「安装 / 更新特权组件」按钮，点一下、
+输一次管理员密码就装好 —— 不用打开终端。机制（`HelperInstaller.swift`）：
+
+- **载荷内嵌在 .app 里**：`Contents/Library/HelperTools/` 平铺放着 helper
+  二进制、dylib、plist 和安装 / 卸载脚本，`build-gui.sh` 组装。装的时候整目录
+  拷走，安装源天然跟着 .app 走。旧的 `dist/helper/` 布局已废除。
+- **提权走 `AuthorizationExecuteWithPrivileges`（AEWP）**：它接的正是
+  AuthorizationRef，所以 App 缓存的授权令牌（4.4 节）直接复用 —— 5 分钟窗口内
+  一次框都不弹；装完接着点「连接」也不再弹。osascript 方案被排除就是因为它
+  自建授权会话，接不上这份缓存。SMJobBless / SMAppService 早已排除（SPIKE 3.3）。
+- **AEWP 已废弃但可用（macOS 26 实测）**：符号可解析，setuid 执行载体
+  `/usr/libexec/security_authtrampoline` 仍在。代码用 dlsym 运行时解析而不是
+  直接链接：将来系统移除它时降级成「请用终端安装」，而不是 dyld 绑定失败。
+- **AEWP 的执行对象必须是二进制，不能是脚本**：AEWP 给子进程的凭据是
+  euid=0 / ruid=普通用户，而 bash 在 euid ≠ ruid 且未带 `-p` 时会把 euid 降回
+  ruid —— 直接 AEWP 安装脚本，脚本开头的 root 检查必然报「需要 root 权限」
+  （**真机踩过**）。所以 App 拉起的是载荷里 helper 二进制的 `--install` 模式
+  （`InstallerMode.swift`）：setuid(0) 把凭据归一化成与 sudo 完全相同的真
+  root，dup2 把 stderr 并进 stdout（AEWP 的管道只接 stdout），再 exec 同目录
+  的 `install-helper.sh`。脚本按「脚本所在目录 → 仓库产物」自动定位载荷，
+  终端与 App 两个入口共用一份实现。
+- **成败不看退出码**：AEWP 不给 pid 也不给退出码，只有一根连到子进程 stdout
+  的管道。判定标准是「读到 EOF 后能否真的连上匹配版本的 helper」——
+  `AppModel.installHelper()` 用 XPC 往返兜底确认，失败时把脚本输出的末尾
+  （剥掉 ANSI 色码）放进弹窗。
+- **弹框之前先自检**：载荷不在（`swift run` 的裸可执行文件）或 AEWP 不在，
+  都要在要密码**之前**报出来，并引导回终端脚本。
+- **卸载走同一条链**：仪表盘底部的「卸载特权组件…」（低调的 caption 行 ——
+  极低频动作不抢注意力，但必须存在于主界面）→ 确认框 → `--uninstall` →
+  `uninstall-helper.sh`。成败判定方向相反：等的是「连不上」。卸载后界面
+  自然回到安装引导页，随时可重装。
+
 ---
 
 ## 5. 已实现 / 未实现
@@ -265,6 +299,7 @@ helper 根本没有它 —— 那就又回到了「对不上还查不出来」�
 | 真实生效状态回读（地址、网关、DNS、主默认路由） | `tk_net_query` |
 | 孤儿 feth 清理 | `tk_cleanup_orphan_interfaces` |
 | 特权 helper + 凭据复核 | `gui/Sources/TetherKitHelper` |
+| App 内一键安装 / 更新 / 卸载特权组件 | `gui/Sources/TetherKitApp/HelperInstaller.swift` |
 | SwiftUI 界面（状态、设备、网络、吞吐、日志） | `gui/Sources/TetherKitApp` |
 | 菜单栏实时速率 + 后台运行（仅菜单栏模式） | `gui/Sources/TetherKitApp/Views/MenuBarPanel.swift` |
 
@@ -292,10 +327,8 @@ cmake --build build -j
 # 2. GUI（等价于直接跑 ./gui/Scripts/build-gui.sh）
 cmake --build build --target gui
 
-# 3. 安装特权组件（需要密码）
-sudo ./gui/Scripts/install-helper.sh
-
-# 4. 运行
+# 3. 运行。首次会引导安装特权组件：点按钮、输一次管理员密码即可（见 4.9 节）。
+#    终端替代：sudo ./gui/Scripts/install-helper.sh
 open dist/TetherKit.app
 ```
 
@@ -307,7 +340,7 @@ swift build --package-path gui
 swift test  --package-path gui     # TetherKitIPC 的单元测试
 ```
 
-卸载：
+卸载：仪表盘底部的「卸载特权组件…」按钮（见 4.9 节），或：
 
 ```bash
 sudo ./gui/Scripts/uninstall-helper.sh
@@ -322,7 +355,8 @@ sudo ./gui/Scripts/uninstall-helper.sh
 | 连接失败 | 界面里的「运行日志」面板（可一键复制） |
 | 装完还是依赖 Homebrew | `otool -L dist/TetherKit.app/Contents/Frameworks/libtetherkit.0.*.dylib` |
 | 点「连接」报「无法还原授权凭据（-60005）」 | App 侧提前释放了 AuthorizationRef，见第 4.4 节第 4 条 |
-| 界面显示「特权组件需要更新」 | 改过 XPC 协议但没重装 helper，跑 `sudo ./gui/Scripts/install-helper.sh` |
+| 界面显示「特权组件需要更新」 | 改过 XPC 协议但没重装 helper，点「更新特权组件」（或跑安装脚本） |
+| 点「安装特权组件」报「不带安装载荷」 | 跑的是 `swift run` 的裸可执行文件，载荷只在 build-gui.sh 组装的 .app 里；用终端脚本装 |
 | 授权框只有密码、没有指纹 | 这是系统 API 的限制，不是缺陷，见第 4.5 节 |
 | 设备拔掉重插后点「连接」报「会话已经在运行了」 | helper 是旧版（失败态旧会话未被清理），重装 helper |
 | 仅菜单栏模式下双击访达图标没反应 | 已知权衡（见 MainWindowRoot 的说明），从菜单栏面板打开即可 |

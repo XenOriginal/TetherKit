@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
 #
-# 安装 tetherkit-helper 并注册 LaunchDaemon。**必须用 sudo 运行。**
+# 安装 tetherkit-helper 并注册 LaunchDaemon。**必须以 root 运行。**
 #
 #   sudo ./gui/Scripts/install-helper.sh
 #
 # 为什么要这一步：创建 feth 虚拟网卡与打开 /dev/bpf* 都需要 root，而 App 本身
 # 以普通用户身份运行。helper 的 root 来自 launchd —— 详见 docs/GUI-ARCHITECTURE.md。
 #
-# 为什么不能由 App 自己装：往 /Library/LaunchDaemons 写文件本身就需要 root，
-# 而现代的 SMAppService 路线在源码分发下不可用（每台机器编出的 cdhash 不同，
-# 代码签名绑定必然对不上，见 docs/GUI-SPIKE.md 第 3.3 节）。
+# App 里的「安装特权组件」按钮跑的也是本脚本：build-gui.sh 把它连同载荷一起
+# 打进 .app 的 Contents/Library/HelperTools/，App 经 AuthorizationExecuteWith-
+# Privileges 以 root 执行那份拷贝（SMAppService 路线在源码分发下不可用 ——
+# 每台机器编出的 cdhash 不同，代码签名绑定必然对不上，见 docs/GUI-SPIKE.md
+# 第 3.3 节）。终端入口保留给无 GUI 的场景和不愿在 App 里输密码的人。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-SOURCE_DIR="${TETHERKIT_HELPER_DIR:-${REPO_ROOT}/dist/helper}"
+
+# 载荷目录按优先级定位：
+#   1. TETHERKIT_HELPER_DIR —— 打包 / CI 想指哪就指哪；
+#   2. 脚本自己所在目录 —— 打进 .app 载荷目录的那份拷贝走这条：载荷就在旁边；
+#   3. 仓库默认产物位置 —— 在仓库里 sudo ./gui/Scripts/install-helper.sh 走这条。
+if [[ -n "${TETHERKIT_HELPER_DIR:-}" ]]; then
+  SOURCE_DIR="${TETHERKIT_HELPER_DIR}"
+elif [[ -f "${SCRIPT_DIR}/com.tetherkit.helper" ]]; then
+  SOURCE_DIR="${SCRIPT_DIR}"
+else
+  SOURCE_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)/dist/TetherKit.app/Contents/Library/HelperTools"
+fi
 
 LABEL="com.tetherkit.helper"
 TOOLS_DIR="/Library/PrivilegedHelperTools"
@@ -90,5 +102,5 @@ cat <<EOF
   /var/log/tetherkit-helper.log
 
 卸载：
-  sudo ./gui/Scripts/uninstall-helper.sh
+  sudo "${SOURCE_DIR}/uninstall-helper.sh"
 EOF
