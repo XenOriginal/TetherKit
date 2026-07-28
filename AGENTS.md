@@ -100,7 +100,8 @@ macOS **用户态** RNDIS 驱动：USB 侧用 libusb 与 RNDIS 设备（Android 
 ```
 TetherKit/
 ├── AGENTS.md              本文件：agent 工作记忆
-├── README.md              用户向文档：构建、运行、权限、故障排查
+├── README.md              用户向文档（**英文，GitHub 默认展示的那份**）
+├── README.zh-CN.md        同上的中文版；两份内容对等，改一份要同步另一份
 ├── CMakeLists.txt         顶层构建脚本
 ├── .clang-format          代码格式（Google 基线，100 列）
 ├── .clang-tidy            静态检查与命名约定

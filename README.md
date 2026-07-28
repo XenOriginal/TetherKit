@@ -1,247 +1,339 @@
 <p align="center">
-  <img src="docs/assets/icon.png" width="128" alt="TetherKit 图标">
+  <img src="docs/assets/icon.png" width="128" alt="TetherKit icon">
 </p>
 
 # TetherKit
 
-[English](README.en.md) | **简体中文**
+**English** | [简体中文](README.zh-CN.md)
 
-**macOS 用户态 RNDIS 驱动** —— 不写内核扩展，把 RNDIS 设备（Android 手机的 USB 网络共享、
-Windows Phone、嵌入式 Linux gadget 等）变成一张 macOS 系统可见的网卡。
-自带图形界面，「选设备 → 连接 → 配 IP」三步点击；也提供命令行工具 `tetherkit-cli`。
+**A kext-free HoRNDIS alternative that brings Android USB tethering on macOS back to life.**
 
-![TetherKit 主界面](docs/assets/screenshot-main.jpg)
+TetherKit is a **user-space RNDIS driver for macOS**: it turns an RNDIS device (Android USB
+tethering, Windows Phone, embedded Linux gadgets, …) into a network interface that macOS can
+see and use — with **no kernel extension, no DriverKit, no SIP changes and no developer
+account**. Works the same on Apple Silicon and Intel. Ships with a GUI — pick a device,
+connect, configure IP in three clicks — plus a command-line tool, `tetherkit-cli`.
 
-- **USB 侧**：[libusb](https://libusb.info/) 异步批量传输，完整实现 RNDIS 主机侧状态机。
-- **网卡侧**：macOS 的 `feth`（`if_fake`）虚拟网卡对 + BPF，直接读写原始以太帧。
-- **无内核代码**：纯用户态 C++23，不需要 kext、不需要 DriverKit、不需要关 SIP。
+![TetherKit main window](docs/assets/screenshot-main-en.jpg)
 
-> ⚠️ **状态**：全部模块已实现，197 个测试用例（7268 条断言）在普通构建与
-> ThreadSanitizer 构建下均通过。端到端已用 Android 手机压测：**RX 约 326 Mbps /
-> TX 约 240~300 Mbps，双向零重传**（USB 2.0 高速，理论上限 426 Mbps）。
-> 测量方法与完整结果见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)，
-> 验证清单见 [AGENTS.md](AGENTS.md) 第 6 节。
+- **USB side**: asynchronous bulk transfers via [libusb](https://libusb.info/), with a complete
+  host-side RNDIS state machine.
+- **Interface side**: macOS `feth` (`if_fake`) virtual interface pairs + BPF, reading and
+  writing raw Ethernet frames directly.
+- **No kernel code**: pure user-space C++23. No kext, no DriverKit, no need to disable SIP.
 
----
-
-## 为什么需要它
-
-macOS 内核**没有** RNDIS 驱动。插上开了 USB 网络共享的 Android 手机，系统不会出现新网卡。
-既有方案要么写 kext（需要关 SIP、签名门槛高、系统更新易失效），要么走 Network Extension
-（需要开发者账号 + 系统扩展审批）。TetherKit 选择第三条路：**在用户态同时扮演 USB 主机和
-网卡驱动**。
+> ⚠️ **Status**: all modules are implemented; 210 test cases (10,408 assertions) pass
+> under both a normal build and a ThreadSanitizer build. End-to-end throughput,
+> measured against a real Android phone: **~326 Mbps RX / ~240–300 Mbps TX, zero
+> retransmits in both directions** (USB 2.0 high-speed; theoretical ceiling 426 Mbps).
+> Methodology and full results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md); the
+> verification checklist lives in [AGENTS.md](AGENTS.md) §6 (Chinese).
 
 ---
 
-## 安装
+## Coming from HoRNDIS?
+
+If you landed here because **HoRNDIS stopped working after a macOS upgrade**, or because it
+shows up as blocked/"Disabled Software" with no *Allow* button on your Apple Silicon Mac —
+that is what TetherKit is for.
+
+[HoRNDIS](https://github.com/jwise/HoRNDIS) was the answer for years, and it is good software.
+But it is a **kernel extension**, and that is the part macOS keeps tightening:
+
+| | HoRNDIS | TetherKit |
+|---|---|---|
+| Kind of software | Kernel extension (kext) | Plain user-space program |
+| Apple Silicon | Needs *Reduced Security* set in Recovery + a reboot before a third-party kext can load at all | Nothing to change — it is not a driver as far as the OS is concerned |
+| SIP | Commonly needs to be weakened | Untouched |
+| After a macOS upgrade | Kext may stop loading; re-approval or a rebuild is often needed | Just an app; nothing to re-approve |
+| Worst case failure | Kernel panic | The process exits |
+| Upstream status | Latest release 9.2 (Aug 2024); ["MacOS Sonoma not supported"](https://github.com/jwise/HoRNDIS/issues/169) still open | Actively developed |
+
+TetherKit reaches the same goal from the other side: instead of teaching the kernel to speak
+RNDIS, it speaks RNDIS **in user space** over libusb, and hands the resulting Ethernet frames
+to macOS through a `feth` virtual interface pair. The kernel never loads any of our code.
+
+**What you give up:** the interface is created by an app you have to start (the connection
+itself survives quitting the UI — it lives in a small privileged background component), and
+throughput is bounded by user-space copies rather than the USB link. In practice that has not
+been the limit: see the measured numbers above.
+
+---
+
+## Why this exists
+
+The macOS kernel has **no** RNDIS driver. Plug in an Android phone with USB tethering enabled
+and no new interface shows up. Existing approaches either ship a kext (requires weakening SIP
+or Apple Silicon's security policy, a high signing bar, and breaks easily on system updates)
+or go through a Network Extension (requires a developer account plus system-extension
+approval). TetherKit takes a third route: **act as both the USB host and the network driver,
+entirely in user space**.
+
+---
+
+## Installation
+
+**Compatibility**: macOS 14 Sonoma, 15 Sequoia and 26 Tahoe, on Apple Silicon (M1–M4) and
+Intel. The command-line tool goes back to macOS 13.3 Ventura. Nothing needs to be disabled —
+SIP stays on, the Apple Silicon security policy stays at *Full Security*.
 
 ```bash
-# 图形界面 TetherKit.app（macOS 14+）
+# The GUI, TetherKit.app (macOS 14+)
 brew install XiaoMiku01/tap/tetherkit
 
-# 命令行工具 tetherkit-cli（macOS 13.3+）
+# The command-line tool, tetherkit-cli (macOS 13.3+)
 brew install XiaoMiku01/tap/tetherkit-cli
 ```
 
-两个 formula 都从源码构建，`libusb` 会被自动带上。tap 仓库在
-[XiaoMiku01/homebrew-tap](https://github.com/XiaoMiku01/homebrew-tap)。
+Both formulae build from source and pull in `libusb` automatically. The tap
+lives at [XiaoMiku01/homebrew-tap](https://github.com/XiaoMiku01/homebrew-tap).
 
-图形界面装完这样启动（首次启动会自动在「应用程序」里建立 Finder 别名，
-之后在聚焦里搜 TetherKit 即可直接启动）：
+Launch the GUI like this (on first launch the app drops a Finder alias into
+/Applications, so Spotlight can find and launch TetherKit from then on):
 
 ```bash
 open "$(brew --prefix)/opt/tetherkit/TetherKit.app"
 ```
 
-首次运行界面会引导安装特权组件：点「安装特权组件」、输一次管理员密码即可。
+On first run the app walks you through installing the privileged helper —
+one click, one admin password prompt.
 
-升级：
+To upgrade:
 
 ```bash
 brew upgrade tetherkit tetherkit-cli
 ```
 
-> **旧版用户注意**：自 v0.1.2 起 `tetherkit` 这个 formula 名归图形界面，
-> 命令行改名 `tetherkit-cli`（二进制同名）。之前装过命令行的请
-> `brew uninstall tetherkit && brew install tetherkit-cli`。
+> **Note for existing users**: as of v0.1.2 the formula name `tetherkit` belongs
+> to the GUI; the CLI was renamed `tetherkit-cli` (binary included). If you had
+> the CLI installed, run `brew uninstall tetherkit && brew install tetherkit-cli`.
 
-也可以从 [Releases](https://github.com/XiaoMiku01/TetherKit/releases) 直接下预编译产物
-（仅 arm64）。但它们**没有签名**，浏览器下载后会被 Gatekeeper 隔离，得手动解除：
+You can also grab prebuilt artifacts straight from
+[Releases](https://github.com/XiaoMiku01/TetherKit/releases) (arm64 only). They are
+**unsigned**, so a browser download gets quarantined by Gatekeeper and you have to
+clear the attribute yourself:
 
 ```bash
-xattr -d com.apple.quarantine tetherkit-cli     # 命令行
-xattr -dr com.apple.quarantine TetherKit.app    # 图形界面（递归）
+xattr -d com.apple.quarantine tetherkit-cli     # CLI
+xattr -dr com.apple.quarantine TetherKit.app    # GUI (recursive)
 ```
 
-介意这一步的话就走上面的 Homebrew，或者按下文「[从源码构建](#从源码构建)」自己构建
-—— 本地构建的产物不带隔离属性。
+If that bothers you, use Homebrew above, or build it yourself as described in
+[Building from source](#building-from-source) — locally built artifacts carry no
+quarantine attribute.
 
 ---
 
-## 图形界面
+## Graphical interface
 
-TetherKit.app（SwiftUI）把「选设备 → 连接 → 配 IP」做成了三步点击，实时显示吞吐与日志。
+TetherKit.app (SwiftUI) reduces the whole flow to three clicks — pick a device,
+connect, configure IP — and shows live throughput and logs.
 
-它由两部分组成：`TetherKit.app` 以**普通用户身份**运行，需要 root 的操作交给一个
-由 launchd 按需拉起的特权组件 `tetherkit-helper`，每次调用都附带一份用户刚确认过
-的授权凭据。App 本身不需要任何 entitlement。
+It comes in two pieces: `TetherKit.app` runs as a **normal user**, and anything
+that needs root is handed to `tetherkit-helper`, a privileged component launched
+on demand by launchd. Every privileged call carries an authorization credential
+the user has just confirmed. The app itself needs no entitlements.
 
-特权组件的安装载荷内嵌在 .app 里（`Contents/Library/HelperTools/`），首次运行时
-界面会引导安装（见上文「安装」）；偏好终端的话效果完全相同：
+The helper's installation payload is embedded in the .app
+(`Contents/Library/HelperTools/`); on first run the app walks you through
+installing it (see Installation above). If you prefer the terminal, this is
+exactly equivalent:
 
 ```bash
 sudo ./gui/Scripts/install-helper.sh
 ```
 
-卸载：仪表盘底部有「卸载特权组件…」按钮（终端等价命令
-`sudo ./gui/Scripts/uninstall-helper.sh`）。
+Uninstall: the dashboard has an "Uninstall privileged component…" button at the
+bottom (terminal equivalent: `sudo ./gui/Scripts/uninstall-helper.sh`).
 
-界面里可以配置**上网方式**：
+The app lets you choose how the virtual interface gets its address:
 
-| 方式 | 说明 |
+| Mode | Notes |
 |---|---|
-| 自动（DHCP） | 交给系统的 IPConfiguration，租约、DNS、路由全部自动配好。绝大多数手机都自带 DHCP 服务器，推荐 |
-| 静态 IP | 手动指定 IP、子网掩码、网关与 DNS。输入时即时校验（含子网掩码的连续性） |
+| Automatic (DHCP) | Handled by the system's IPConfiguration — lease, DNS and routes are all set up for you. Most phones ship a DHCP server, so this is the recommended choice |
+| Static IP | Enter address, netmask, gateway and DNS yourself. Validated as you type, including netmask contiguity |
 
-另有一个「让所有流量默认走这张网卡」开关。不开时只有绑定到本网卡的流量走它；
-本机没有别的可用网络时通常不需要开 —— 系统会自己把它选为主服务。
+There is also a "route all traffic through this interface" switch. With it off,
+only traffic explicitly bound to the interface uses it. You usually do not need
+it — when no other network is available, macOS picks this interface as the
+primary service on its own.
 
-**后台运行**：关闭主窗口后 App 驻留菜单栏（程序坞图标隐藏），菜单栏项实时
-显示上/下行速率；点开是一块小面板，可随时回到主窗口或退出。已建立的连接由
-特权组件持有，即使退出界面也不会断。
+**Background mode**: closing the main window keeps the app in the menu bar
+(the Dock icon is hidden) with live up/down rates on the status item; click it
+for a compact panel with shortcuts back to the main window. The connection
+itself lives in the privileged helper, so quitting the UI never drops it.
 
-**检查更新**：菜单「TetherKit → 检查更新…」手动查；App 也会每天自动查一次
-（只访问 GitHub 的公开 Releases API，不上报任何信息），发现新版在仪表盘
-底部点亮一条提示。更新本身仍走 `brew upgrade` 或源码重编 —— 免证书分发下
-自动替换 .app 会被 Gatekeeper 拦下，所以刻意只查不换。不想要自动检查：
-`defaults write com.tetherkit.app updateCheckDisabled -bool YES`。
+**Update check**: "TetherKit → Check for Updates…" checks on demand; the app also
+checks once a day on its own (it only hits GitHub's public Releases API and
+reports nothing), lighting up a notice at the bottom of the dashboard when a new
+version is out. The update itself still goes through `brew upgrade` or a source
+rebuild — with certificate-free distribution, auto-replacing the .app would be
+blocked by Gatekeeper, so the app deliberately only checks, never swaps. To
+disable the automatic check:
+`defaults write com.tetherkit.app updateCheckDisabled -bool YES`.
 
-**界面语言**：菜单「TetherKit → 语言」可选「跟随系统 / 中文 / English」，
-菜单栏面板里也有同一个开关。切换**立即生效**，不需要重启 App —— 库产生的
-日志行也会跟着换（语言会一并同步给特权组件）。默认跟随系统语言。
+**Interface language**: "TetherKit → Language" offers Follow system / 中文 /
+English, and the menu bar panel carries the same switch. Changes take effect
+**immediately** — no restart — and the log lines coming out of the library
+follow along (the language is pushed to the privileged helper too). The default
+is to follow the system language.
 
-**要求**：macOS 14+（命令行部分仍支持 13.3+）。实现细节与设计取舍见
-[docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md)。
+**Requires** macOS 14+ (the CLI still supports 13.3+). Design notes and
+trade-offs are in [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md).
 
 ---
 
-## 命令行工具
+## Command-line tool
 
-图形界面之外还有命令行工具 `tetherkit-cli`（安装见上文）：
+Besides the GUI there is a command-line tool, `tetherkit-cli` (installation above):
 
 ```bash
-# 先看看设备有没有被识别（**不需要 root**）
+# First check whether the device is recognized (**no root needed**)
 tetherkit-cli --list
 
-# 启动驱动
+# Start the driver
 sudo tetherkit-cli
 
-# 另开一个终端，给新出现的网卡配 IP（RNDIS 设备通常自带 DHCP 服务器）
+# In another terminal, configure the new interface (RNDIS devices usually run a DHCP server)
 sudo ipconfig set feth0 DHCP
 ipconfig getifaddr feth0
 ```
 
-> 上面的命令都按已安装（`tetherkit-cli` 在 PATH 里）来写。从源码构建的话
-> 换成 `./build/bin/tetherkit-cli` 即可。
+> The commands above assume an installed `tetherkit-cli` (on your `PATH`). If you
+> built from source, substitute `./build/bin/tetherkit-cli`.
 
-启动成功后程序会打印它创建的网卡名与后续命令。按 `Ctrl-C` 优雅退出
-（会先让设备退出 RNDIS，再销毁网卡）。
+On a successful start the program prints the interface it created along with the follow-up
+commands. `Ctrl-C` shuts down gracefully (the device is taken out of RNDIS first, then the
+interface is destroyed).
 
-常用选项（完整列表见 `--help`）：
+Common options (see `--help` for the full list):
 
-| 选项 | 说明 |
+| Option | Description |
 |---|---|
-| `--list` | 列出识别到的 RNDIS 设备后退出，不需要 root |
-| `--vid` / `--pid` | 指定设备（十六进制），用于多设备场景 |
-| `--stats 1000` | 每秒打印一行吞吐/丢包统计 |
-| `--log debug` | 打开协议交互细节日志 |
-| `--max-transfer-kb` | 吞吐的主要调优旋钮，见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
-| `--lang zh\|en\|auto` | 界面语言，默认 `auto`（见下） |
+| `--list` | List detected RNDIS devices and exit; no root required |
+| `--vid` / `--pid` | Select a device (hex), for multi-device setups |
+| `--stats 1000` | Print a throughput/drop statistics line every second |
+| `--log debug` | Enable detailed protocol interaction logging |
+| `--max-transfer-kb` | The main throughput tuning knob — see [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
+| `--lang zh\|en\|auto` | Interface language, default `auto` (see below) |
 
-**语言**：默认按 `TETHERKIT_LANG` → `LC_ALL` → `LC_MESSAGES` → `LANG` 依次推断，
-取第一个非空值，以 `zh` 开头算中文、其余算英文。
+**Language**: by default the tool checks `TETHERKIT_LANG`, `LC_ALL`,
+`LC_MESSAGES` and `LANG` in that order and takes the first non-empty value.
+Anything starting with `zh` means Chinese; everything else means English.
 
 ```bash
-tetherkit-cli --lang en --help     # 显式指定
-TETHERKIT_LANG=en tetherkit-cli --list
+tetherkit-cli --lang zh --help     # pick explicitly
+TETHERKIT_LANG=zh tetherkit-cli --list
 ```
 
-> ⚠️ `sudo` 是否把 `LANG` 透传给命令取决于 sudoers 的 `env_keep`，因此
-> `sudo tetherkit-cli` 未必跟随你的终端语言 —— 那时显式写 `--lang`。
+> ⚠️ Whether `sudo` passes `LANG` through depends on your sudoers `env_keep`, so
+> `sudo tetherkit-cli` does not necessarily follow your terminal's language —
+> pass `--lang` explicitly in that case.
 
-### 为什么需要 root
+### Why root is needed
 
-| 操作 | 需要 root？ | 原因 |
+| Operation | Root? | Reason |
 |---|---|---|
-| 创建 / 销毁 `feth` | ✔ | 内核对 `SIOCIFCREATE2` / `SIOCSDRVSPEC` 有 `proc_suser` 检查 |
-| 打开 `/dev/bpf*` | ✔ | 节点是 `0600 root:wheel`，且 macOS **没有** FreeBSD 的 `access_bpf` 组 |
-| libusb 声明 RNDIS 接口 | ✘ | macOS 内核**没有** RNDIS 驱动，接口本来就没人占。非沙箱命令行程序不需要 root、也不需要 entitlement |
+| Create / destroy `feth` | ✔ | The kernel enforces `proc_suser` on `SIOCIFCREATE2` / `SIOCSDRVSPEC` |
+| Open `/dev/bpf*` | ✔ | The nodes are `0600 root:wheel`, and macOS has **no** equivalent of FreeBSD's `access_bpf` group |
+| libusb claiming the RNDIS interface | ✘ | The macOS kernel has **no** RNDIS driver, so nothing else holds the interface. A non-sandboxed command line program needs neither root nor an entitlement |
 
-也就是说 root 是网卡侧的要求，不是 USB 侧的。`--list` 因此不需要 root。
+In other words, root is a requirement of the interface side, not the USB side — which is why
+`--list` works without it.
 
 ---
 
-## 故障排查
+## Troubleshooting
 
-| 现象 | 原因与对策 |
+| Symptom | Cause and fix |
 |---|---|
-| `--list` 找不到设备 | ① 换一根**数据线**（很多线只供电）；② 在设备上开启「USB 网络共享 / USB tethering」；③ 解锁手机并信任本机。用 `system_profiler SPUSBDataType` 确认系统是否看到该设备 |
-| `声明 RNDIS 数据接口失败 [libusb: LIBUSB_ERROR_ACCESS]` | 接口被别的东西占了。检查是否装过 HoRNDIS 之类的第三方 kext，或有别的用户态程序在用该设备 |
-| `创建 feth 虚拟网卡需要 root` | 用 `sudo` 运行 |
-| `sysctl net.link.fake.hwcsum 当前是 1，要求 0` | 这批开关在 feth **创建时被快照**，创建后改无效。按提示先 `sudo sysctl -w net.link.fake.hwcsum=0` 再启动 |
-| `ipconfig set feth0 DHCP` 拿不到地址 | 确认设备侧的网络共享真的开着；用 `--stats 1000` 看 TX 有没有帧发出去、RX 有没有回包 |
-| 网卡配好了但上不了网 | 默认路由还指向原来的网卡。`sudo route -n change default $(ipconfig getoption feth0 router)`，注意这会顶掉现有默认路由 |
-| 吞吐远低于预期 | 看启动日志里的「设备聚合上限 N 包」与「链路批量写」两项，再对照 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) 的排查表 |
-| 重启后网卡不见了 | `ipconfig set` 建立的是**临时**服务，只存活到下一次网络配置变更，且不出现在系统设置里。这是 macOS 的限制，不是 bug |
+| `--list` finds no device | ① Try a different **data** cable (many are power-only); ② enable "USB tethering" on the device; ③ unlock the phone and trust this computer. Use `system_profiler SPUSBDataType` to check whether the system sees the device at all |
+| `claiming the RNDIS data interface failed [libusb: LIBUSB_ERROR_ACCESS]` | Something else owns the interface. Check for a third-party kext such as HoRNDIS, or another user-space program using the device |
+| `creating the feth virtual interface requires root` | Run it with `sudo` |
+| `sysctl net.link.fake.hwcsum is 1, expected 0` | These switches are **snapshotted when the feth is created**; changing them afterwards has no effect. Do `sudo sysctl -w net.link.fake.hwcsum=0` first, then start |
+| `ipconfig set feth0 DHCP` gets no address | Make sure tethering is actually on at the device side; use `--stats 1000` to see whether TX frames go out and RX frames come back |
+| Interface is configured but there is no connectivity | The default route still points at the old interface. `sudo route -n change default $(ipconfig getoption feth0 router)` — note this displaces the existing default route |
+| Throughput far below expectations | Check the "device aggregation limit N packets" and "link batch write" lines in the startup log, then work through the checklist in [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
+| The interface is gone after a reboot | `ipconfig set` creates a **temporary** service that only lives until the next network configuration change, and never appears in System Settings. That is a macOS limitation, not a bug |
+
+### Questions people usually arrive with
+
+**Does Android USB tethering work on macOS at all?**
+Not out of the box — macOS ships no RNDIS driver, so an Android phone in USB tethering mode
+simply produces no network interface. That is what TetherKit adds.
+
+**Do I have to disable SIP, or lower the security policy on Apple Silicon?**
+No. Those are requirements of *kernel extensions*. TetherKit is an ordinary program; the
+kernel never loads any of its code. The privileged part is a small background component that
+needs an admin password once, at install time.
+
+**HoRNDIS shows as "Disabled Software" / has no *Allow* button. Can I fix it?**
+That is macOS refusing to load a third-party kext, not something the kext can fix from its
+side. On Apple Silicon, loading one at all requires booting into Recovery and lowering the
+security policy. TetherKit avoids the whole category of problem.
+
+**Does it work on M1 / M2 / M3 / M4?**
+Yes — Apple Silicon and Intel take the same code path. There is nothing architecture-specific
+about it beyond ordinary compilation.
+
+**Is my device supported?**
+Anything that presents an RNDIS interface: most Android phones with USB tethering enabled,
+Windows Phone, and Linux `g_ether`/`u_ether` USB gadgets (Raspberry Pi Zero, BeagleBone …).
+Run `tetherkit-cli --list` to check — it needs no root.
+
+**Does iPhone tethering need this?**
+No. macOS supports iPhone USB tethering natively; TetherKit is for the devices it does not
+cover.
 
 ---
 
-## 架构
+## Architecture
 
 ```
-        ┌──────────────────────────── macOS 内核 ────────────────────────────┐
-        │                                                                    │
-        │   IP 栈 / 路由 / DHCP 客户端                                        │
-        │        │                                                           │
-        │        ▼                                                           │
-        │   ┌─────────┐   if_fake peer 对   ┌─────────┐                       │
-        │   │  feth0  │ ◄─────────────────► │  feth1  │                       │
-        │   │(系统侧) │                     │(驱动侧) │                       │
-        │   └─────────┘                     └────┬────┘                      │
-        │    配 IP/路由                          │ BPF                       │
-        └────────────────────────────────────────┼───────────────────────────┘
-                                                 │ read()/write() 原始以太帧
-        ┌────────────────────────────────────────┼───────────────────────────┐
-        │                     TetherKit（用户态） │                           │
-        │                                        ▼                           │
-        │   ┌──────────────────── 数据路径桥接 ─────────────────────┐         │
-        │   │  TX: BPF 批量读 → 聚合多帧 → RNDIS_PACKET_MSG → bulk OUT│        │
-        │   │  RX: bulk IN → 拆 RNDIS_PACKET_MSG → SPSC 队列 → BPF 写 │        │
-        │   └───────────────────────────┬───────────────────────────┘         │
-        │                               │                                     │
-        │   ┌──────────── RNDIS 状态机 ──┴──────────────┐                      │
-        │   │ INITIALIZE / QUERY / SET / KEEPALIVE /   │                      │
-        │   │ RESET / INDICATE_STATUS / HALT           │                      │
-        │   └───────────────────────────┬──────────────┘                      │
-        │                               │                                     │
-        │   ┌────────── libusb ─────────┴──────────────┐                      │
-        │   │ 控制通道：SEND_ENCAPSULATED_COMMAND /     │                      │
-        │   │           GET_ENCAPSULATED_RESPONSE      │                      │
-        │   │ 通知通道：中断 IN（RESPONSE_AVAILABLE）    │                      │
-        │   │ 数据通道：bulk IN / bulk OUT（异步池化）   │                      │
-        │   └───────────────────────────┬──────────────┘                      │
-        └───────────────────────────────┼─────────────────────────────────────┘
-                                        │ USB
-                                   ┌────┴─────┐
-                                   │ RNDIS 设备 │
-                                   └──────────┘
+        ┌──────────────────────────────── macOS kernel ────────────────────────────────┐
+        │                                                                              │
+        │   IP stack / routing / DHCP client                                           │
+        │        │                                                                     │
+        │        ▼                                                                     │
+        │   ┌─────────┐    if_fake peer pair    ┌─────────┐                            │
+        │   │  feth0  │ ◄─────────────────────► │  feth1  │                            │
+        │   │(system) │                         │(driver) │                            │
+        │   └─────────┘                         └────┬────┘                            │
+        │    IP + routes                             │ BPF                             │
+        └────────────────────────────────────────────┼─────────────────────────────────┘
+                                                     │ read() / write() raw Ethernet frames
+        ┌────────────────────────────────────────────┼─────────────────────────────────┐
+        │   TetherKit (user space)                   │                                 │
+        │                                            ▼                                 │
+        │   ┌───────────────────────── data path bridge ─────────────────────────┐     │
+        │   │ TX: BPF batch read → coalesce frames → RNDIS_PACKET_MSG → bulk OUT │     │
+        │   │ RX: bulk IN → split RNDIS_PACKET_MSG → SPSC queue → BPF write      │     │
+        │   └──────────────────────────────────┬─────────────────────────────────┘     │
+        │                                      │                                       │
+        │   ┌───────── RNDIS state machine ──────────┐                                 │
+        │   │ INITIALIZE / QUERY / SET / KEEPALIVE / │                                 │
+        │   │ RESET / INDICATE_STATUS / HALT         │                                 │
+        │   └────────────────────┬───────────────────┘                                 │
+        │                        │                                                     │
+        │   ┌───────────────────── libusb ─────────────────────┐                       │
+        │   │ control:      SEND_ENCAPSULATED_COMMAND /        │                       │
+        │   │               GET_ENCAPSULATED_RESPONSE          │                       │
+        │   │ notification: interrupt IN (RESPONSE_AVAILABLE)  │                       │
+        │   │ data:         bulk IN / bulk OUT (async, pooled) │                       │
+        │   └─────────────────────────┬────────────────────────┘                       │
+        └─────────────────────────────┼────────────────────────────────────────────────┘
+                                      │ USB
+                                ┌─────┴──────┐
+                                │RNDIS device│
+                                └────────────┘
 ```
 
 ---
 
-## 从源码构建
+## Building from source
 
-依赖：macOS 13.3+、Xcode 命令行工具（Apple clang 支持 C++23）、CMake ≥ 3.24、libusb 1.0。
+Requirements: macOS 13.3+, Xcode command line tools (Apple clang with C++23 support),
+CMake ≥ 3.24, libusb 1.0.
 
 ```bash
 brew install libusb cmake
@@ -252,37 +344,38 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
 ```
 
-产物：`build/bin/tetherkit-cli`。
+Output: `build/bin/tetherkit-cli`.
 
-### 构建图形界面
+### Building the GUI
 
-需要完整 Xcode 工具链。在上面的构建目录基础上：
+Requires the full Xcode toolchain. On top of the build directory above:
 
 ```bash
-cmake --build build --target gui        # 等价于 ./gui/Scripts/build-gui.sh
+cmake --build build --target gui        # same as ./gui/Scripts/build-gui.sh
 open dist/TetherKit.app
 ```
 
-### 构建选项
+### Build options
 
-| 选项 | 默认 | 说明 |
+| Option | Default | Description |
 |---|---|---|
-| `TETHERKIT_BUILD_TESTS` | `ON` | 构建单元测试 |
-| `TETHERKIT_BUILD_BENCHMARKS` | `ON` | 构建性能基准 |
-| `TETHERKIT_WARNINGS_AS_ERRORS` | `OFF` | 警告当错误 |
-| `TETHERKIT_NATIVE_ARCH` | `OFF` | `-mcpu=native`，产物不可移植 |
-| `TETHERKIT_ENABLE_LTO` | `OFF` | 链接时优化 |
+| `TETHERKIT_BUILD_TESTS` | `ON` | Build unit tests |
+| `TETHERKIT_BUILD_BENCHMARKS` | `ON` | Build benchmarks |
+| `TETHERKIT_WARNINGS_AS_ERRORS` | `OFF` | Treat warnings as errors |
+| `TETHERKIT_NATIVE_ARCH` | `OFF` | `-mcpu=native`; the binary is no longer portable |
+| `TETHERKIT_ENABLE_LTO` | `OFF` | Link-time optimization |
 | `TETHERKIT_ENABLE_ASAN` | `OFF` | AddressSanitizer |
 | `TETHERKIT_ENABLE_UBSAN` | `OFF` | UndefinedBehaviorSanitizer |
-| `TETHERKIT_ENABLE_TSAN` | `OFF` | ThreadSanitizer（**验证无锁数据结构必备**） |
+| `TETHERKIT_ENABLE_TSAN` | `OFF` | ThreadSanitizer (**required to validate the lock-free structures**) |
 
-### 测试
+### Tests
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-无锁队列与多线程数据路径的正确性用 ThreadSanitizer 单独验证：
+The lock-free queue and the multi-threaded data path are validated separately under
+ThreadSanitizer:
 
 ```bash
 cmake -S . -B build-tsan -DTETHERKIT_ENABLE_TSAN=ON
@@ -290,7 +383,7 @@ cmake --build build-tsan -j
 ctest --test-dir build-tsan --output-on-failure
 ```
 
-### 性能基准
+### Benchmarks
 
 ```bash
 cmake -S . -B build-rel -DCMAKE_BUILD_TYPE=Release
@@ -298,24 +391,26 @@ cmake --build build-rel -j
 ./build-rel/bin/tetherkit_bench
 ```
 
-汇总结果见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)。
+Aggregated results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ---
 
-## 文档
+## Documentation
 
-| 文档 | 内容 |
+The documents below are written in Chinese.
+
+| Document | Contents |
 |---|---|
-| [docs/DESIGN.md](docs/DESIGN.md) | **总体设计**：为什么选 feth+BPF、模块划分、并发模型、拆除顺序、私有 ABI 的风险评估 |
-| [docs/RNDIS-PROTOCOL.md](docs/RNDIS-PROTOCOL.md) | **协议参考**：字段偏移、状态码、OID、状态机、设备 quirk。含三条最容易搞错的规则 |
-| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | **调优指南**：旋钮、怎么判断瓶颈、已知限制 |
-| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | **基准结果**（自动生成）+ 测量方法与已知局限 |
-| [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md) | **图形界面**：进程与信任模型、数据流、实现约束、已实现/未实现清单 |
-| [docs/GUI-SPIKE.md](docs/GUI-SPIKE.md) | **可行性验证**：为什么这么做特权提升，以及被排除的三条路线 |
-| [AGENTS.md](AGENTS.md) | 实现备忘：已实测确认的环境事实、进度、**踩过的坑**、待验证清单 |
+| [docs/DESIGN.md](docs/DESIGN.md) | **Overall design**: why feth+BPF, module breakdown, concurrency model, teardown ordering, risk assessment of the private ABI |
+| [docs/RNDIS-PROTOCOL.md](docs/RNDIS-PROTOCOL.md) | **Protocol reference**: field offsets, status codes, OIDs, state machine, device quirks. Includes the three rules that are easiest to get wrong |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | **Tuning guide**: the knobs, how to identify the bottleneck, known limits |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | **Benchmark results** (auto-generated) + methodology and known limitations |
+| [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md) | **Graphical interface**: process and trust model, data flow, implementation constraints, what is and is not implemented |
+| [docs/GUI-SPIKE.md](docs/GUI-SPIKE.md) | **Feasibility spike**: why privilege escalation is done this way, and the three routes that were ruled out |
+| [AGENTS.md](AGENTS.md) | Implementation notes: verified facts about the environment, progress, **pitfalls hit along the way**, and the to-be-verified checklist |
 
 ---
 
-## 许可
+## License
 
-见 [LICENSE](LICENSE)。
+See [LICENSE](LICENSE).
