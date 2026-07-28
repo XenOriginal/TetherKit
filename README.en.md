@@ -8,7 +8,10 @@
 
 **A user-space RNDIS driver for macOS** — no kernel extension required. It turns an RNDIS
 device (Android USB tethering, Windows Phone, embedded Linux gadgets, …) into a network
-interface that macOS can see and use.
+interface that macOS can see and use. Ships with a GUI — pick a device, connect,
+configure IP in three clicks — plus a command-line tool, `tetherkit-cli`.
+
+![TetherKit main window](docs/assets/screenshot-main.jpg)
 
 - **USB side**: asynchronous bulk transfers via [libusb](https://libusb.info/), with a complete
   host-side RNDIS state machine.
@@ -16,20 +19,12 @@ interface that macOS can see and use.
   writing raw Ethernet frames directly.
 - **No kernel code**: pure user-space C++23. No kext, no DriverKit, no need to disable SIP.
 
-> ⚠️ **Status**: all modules are implemented; 197 test cases (7268 assertions) pass under both
-> a normal build and a ThreadSanitizer build. RNDIS handshake, `feth` pair creation, BPF
-> attachment and graceful shutdown have all been exercised against a real RNDIS device; the
-> `feth` private ABI and the core premise that *a BPF write reaches the peer's IP stack* have
-> been confirmed by measurement — the latter is now guarded by an ARP round-trip root test
-> rather than living only in the docs.
-> End-to-end throughput has been measured against an Android phone:
-> **~326 Mbps RX / ~240–300 Mbps TX, zero retransmits in both directions**
-> (USB 2.0 high-speed; theoretical payload ceiling 426 Mbps). The TX frame loss that
-> stress testing uncovered has been root-caused and fixed (the bridge discarded frames
-> when the bulk OUT pool was momentarily full instead of waiting a few hundred
-> microseconds); concurrent bidirectional TX went from 4.8 Mbps back to 87 Mbps.
-> See [docs/BENCHMARKS.md](docs/BENCHMARKS.md). The verification checklist lives in
-> [AGENTS.md](AGENTS.md) §6 (Chinese).
+> ⚠️ **Status**: all modules are implemented; 197 test cases (7268 assertions) pass
+> under both a normal build and a ThreadSanitizer build. End-to-end throughput,
+> measured against a real Android phone: **~326 Mbps RX / ~240–300 Mbps TX, zero
+> retransmits in both directions** (USB 2.0 high-speed; theoretical ceiling 426 Mbps).
+> Methodology and full results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md); the
+> verification checklist lives in [AGENTS.md](AGENTS.md) §6 (Chinese).
 
 ---
 
@@ -40,49 +35,6 @@ and no new interface shows up. Existing approaches either ship a kext (requires 
 high signing bar, easily broken by system updates) or go through a Network Extension (requires
 a developer account plus system-extension approval). TetherKit takes a third route: **act as
 both the USB host and the network driver, entirely in user space**.
-
----
-
-## Architecture
-
-```
-        ┌──────────────────────────────── macOS kernel ────────────────────────────────┐
-        │                                                                              │
-        │   IP stack / routing / DHCP client                                           │
-        │        │                                                                     │
-        │        ▼                                                                     │
-        │   ┌─────────┐    if_fake peer pair    ┌─────────┐                            │
-        │   │  feth0  │ ◄─────────────────────► │  feth1  │                            │
-        │   │(system) │                         │(driver) │                            │
-        │   └─────────┘                         └────┬────┘                            │
-        │    IP + routes                             │ BPF                             │
-        └────────────────────────────────────────────┼─────────────────────────────────┘
-                                                     │ read() / write() raw Ethernet frames
-        ┌────────────────────────────────────────────┼─────────────────────────────────┐
-        │   TetherKit (user space)                   │                                 │
-        │                                            ▼                                 │
-        │   ┌───────────────────────── data path bridge ─────────────────────────┐     │
-        │   │ TX: BPF batch read → coalesce frames → RNDIS_PACKET_MSG → bulk OUT │     │
-        │   │ RX: bulk IN → split RNDIS_PACKET_MSG → SPSC queue → BPF write      │     │
-        │   └──────────────────────────────────┬─────────────────────────────────┘     │
-        │                                      │                                       │
-        │   ┌───────── RNDIS state machine ──────────┐                                 │
-        │   │ INITIALIZE / QUERY / SET / KEEPALIVE / │                                 │
-        │   │ RESET / INDICATE_STATUS / HALT         │                                 │
-        │   └────────────────────┬───────────────────┘                                 │
-        │                        │                                                     │
-        │   ┌───────────────────── libusb ─────────────────────┐                       │
-        │   │ control:      SEND_ENCAPSULATED_COMMAND /        │                       │
-        │   │               GET_ENCAPSULATED_RESPONSE          │                       │
-        │   │ notification: interrupt IN (RESPONSE_AVAILABLE)  │                       │
-        │   │ data:         bulk IN / bulk OUT (async, pooled) │                       │
-        │   └─────────────────────────┬────────────────────────┘                       │
-        └─────────────────────────────┼────────────────────────────────────────────────┘
-                                      │ USB
-                                ┌─────┴──────┐
-                                │RNDIS device│
-                                └────────────┘
-```
 
 ---
 
@@ -129,72 +81,68 @@ xattr -d com.apple.quarantine tetherkit-cli     # CLI
 xattr -dr com.apple.quarantine TetherKit.app    # GUI (recursive)
 ```
 
-If that bothers you, use Homebrew above, or build it yourself as described in the next
-section — locally built artifacts carry no quarantine attribute.
+If that bothers you, use Homebrew above, or build it yourself as described in
+[Building from source](#building-from-source) — locally built artifacts carry no
+quarantine attribute.
 
 ---
 
-## Building from source
+## Graphical interface
 
-Requirements: macOS 13.3+, Xcode command line tools (Apple clang with C++23 support),
-CMake ≥ 3.24, libusb 1.0.
+TetherKit.app (SwiftUI) reduces the whole flow to three clicks — pick a device,
+connect, configure IP — and shows live throughput and logs.
+
+It comes in two pieces: `TetherKit.app` runs as a **normal user**, and anything
+that needs root is handed to `tetherkit-helper`, a privileged component launched
+on demand by launchd. Every privileged call carries an authorization credential
+the user has just confirmed. The app itself needs no entitlements.
+
+The helper's installation payload is embedded in the .app
+(`Contents/Library/HelperTools/`); on first run the app walks you through
+installing it (see Installation above). If you prefer the terminal, this is
+exactly equivalent:
 
 ```bash
-brew install libusb cmake
+sudo ./gui/Scripts/install-helper.sh
 ```
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build -j
-```
+Uninstall: the dashboard has an "Uninstall privileged component…" button at the
+bottom (terminal equivalent: `sudo ./gui/Scripts/uninstall-helper.sh`).
 
-Output: `build/bin/tetherkit-cli`.
+The app lets you choose how the virtual interface gets its address:
 
-### Build options
+| Mode | Notes |
+|---|---|
+| Automatic (DHCP) | Handled by the system's IPConfiguration — lease, DNS and routes are all set up for you. Most phones ship a DHCP server, so this is the recommended choice |
+| Static IP | Enter address, netmask, gateway and DNS yourself. Validated as you type, including netmask contiguity |
 
-| Option | Default | Description |
-|---|---|---|
-| `TETHERKIT_BUILD_TESTS` | `ON` | Build unit tests |
-| `TETHERKIT_BUILD_BENCHMARKS` | `ON` | Build benchmarks |
-| `TETHERKIT_WARNINGS_AS_ERRORS` | `OFF` | Treat warnings as errors |
-| `TETHERKIT_NATIVE_ARCH` | `OFF` | `-mcpu=native`; the binary is no longer portable |
-| `TETHERKIT_ENABLE_LTO` | `OFF` | Link-time optimization |
-| `TETHERKIT_ENABLE_ASAN` | `OFF` | AddressSanitizer |
-| `TETHERKIT_ENABLE_UBSAN` | `OFF` | UndefinedBehaviorSanitizer |
-| `TETHERKIT_ENABLE_TSAN` | `OFF` | ThreadSanitizer (**required to validate the lock-free structures**) |
+There is also a "route all traffic through this interface" switch. With it off,
+only traffic explicitly bound to the interface uses it. You usually do not need
+it — when no other network is available, macOS picks this interface as the
+primary service on its own.
+
+**Background mode**: closing the main window keeps the app in the menu bar
+(the Dock icon is hidden) with live up/down rates on the status item; click it
+for a compact panel with shortcuts back to the main window. The connection
+itself lives in the privileged helper, so quitting the UI never drops it.
+
+**Update check**: "TetherKit → Check for Updates…" checks on demand; the app also
+checks once a day on its own (it only hits GitHub's public Releases API and
+reports nothing), lighting up a notice at the bottom of the dashboard when a new
+version is out. The update itself still goes through `brew upgrade` or a source
+rebuild — with certificate-free distribution, auto-replacing the .app would be
+blocked by Gatekeeper, so the app deliberately only checks, never swaps. To
+disable the automatic check:
+`defaults write com.tetherkit.app updateCheckDisabled -bool YES`.
+
+**Requires** macOS 14+ (the CLI still supports 13.3+). Design notes and
+trade-offs are in [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md).
 
 ---
 
-## Tests
+## Command-line tool
 
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-The lock-free queue and the multi-threaded data path are validated separately under
-ThreadSanitizer:
-
-```bash
-cmake -S . -B build-tsan -DTETHERKIT_ENABLE_TSAN=ON
-cmake --build build-tsan -j
-ctest --test-dir build-tsan --output-on-failure
-```
-
----
-
-## Benchmarks
-
-```bash
-cmake -S . -B build-rel -DCMAKE_BUILD_TYPE=Release
-cmake --build build-rel -j
-./build-rel/bin/tetherkit_bench
-```
-
-Aggregated results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-
----
-
-## Running
+Besides the GUI there is a command-line tool, `tetherkit-cli` (installation above):
 
 ```bash
 # First check whether the device is recognized (**no root needed**)
@@ -208,8 +156,8 @@ sudo ipconfig set feth0 DHCP
 ipconfig getifaddr feth0
 ```
 
-> The commands above assume an installed `tetherkit` (on your `PATH`). If you built from
-> source, substitute `./build/bin/tetherkit-cli`.
+> The commands above assume an installed `tetherkit-cli` (on your `PATH`). If you
+> built from source, substitute `./build/bin/tetherkit-cli`.
 
 On a successful start the program prints the interface it created along with the follow-up
 commands. `Ctrl-C` shuts down gracefully (the device is taken out of RNDIS first, then the
@@ -253,58 +201,111 @@ In other words, root is a requirement of the interface side, not the USB side �
 
 ---
 
-## Graphical interface
+## Architecture
 
-Besides the CLI there is a SwiftUI app that reduces the whole flow to three
-clicks — pick a device, connect, configure IP — and shows live throughput and
-logs.
+```
+        ┌──────────────────────────────── macOS kernel ────────────────────────────────┐
+        │                                                                              │
+        │   IP stack / routing / DHCP client                                           │
+        │        │                                                                     │
+        │        ▼                                                                     │
+        │   ┌─────────┐    if_fake peer pair    ┌─────────┐                            │
+        │   │  feth0  │ ◄─────────────────────► │  feth1  │                            │
+        │   │(system) │                         │(driver) │                            │
+        │   └─────────┘                         └────┬────┘                            │
+        │    IP + routes                             │ BPF                             │
+        └────────────────────────────────────────────┼─────────────────────────────────┘
+                                                     │ read() / write() raw Ethernet frames
+        ┌────────────────────────────────────────────┼─────────────────────────────────┐
+        │   TetherKit (user space)                   │                                 │
+        │                                            ▼                                 │
+        │   ┌───────────────────────── data path bridge ─────────────────────────┐     │
+        │   │ TX: BPF batch read → coalesce frames → RNDIS_PACKET_MSG → bulk OUT │     │
+        │   │ RX: bulk IN → split RNDIS_PACKET_MSG → SPSC queue → BPF write      │     │
+        │   └──────────────────────────────────┬─────────────────────────────────┘     │
+        │                                      │                                       │
+        │   ┌───────── RNDIS state machine ──────────┐                                 │
+        │   │ INITIALIZE / QUERY / SET / KEEPALIVE / │                                 │
+        │   │ RESET / INDICATE_STATUS / HALT         │                                 │
+        │   └────────────────────┬───────────────────┘                                 │
+        │                        │                                                     │
+        │   ┌───────────────────── libusb ─────────────────────┐                       │
+        │   │ control:      SEND_ENCAPSULATED_COMMAND /        │                       │
+        │   │               GET_ENCAPSULATED_RESPONSE          │                       │
+        │   │ notification: interrupt IN (RESPONSE_AVAILABLE)  │                       │
+        │   │ data:         bulk IN / bulk OUT (async, pooled) │                       │
+        │   └─────────────────────────┬────────────────────────┘                       │
+        └─────────────────────────────┼────────────────────────────────────────────────┘
+                                      │ USB
+                                ┌─────┴──────┐
+                                │RNDIS device│
+                                └────────────┘
+```
 
-![TetherKit main window](docs/assets/screenshot-main.jpg)
+---
 
-Install it with `brew install XiaoMiku01/tap/tetherkit` (see Installation above),
-or build from source as shown below.
+## Building from source
 
-It comes in two pieces: `TetherKit.app` runs as a **normal user**, and anything
-that needs root is handed to `tetherkit-helper`, a privileged component launched
-on demand by launchd. Every privileged call carries an authorization credential
-the user has just confirmed. The app itself needs no entitlements.
+Requirements: macOS 13.3+, Xcode command line tools (Apple clang with C++23 support),
+CMake ≥ 3.24, libusb 1.0.
 
 ```bash
-# 1. Build the C++ side first (produces libtetherkit.dylib)
+brew install libusb cmake
+```
+
+```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
+```
 
-# 2. Build the app and the helper (needs the Xcode toolchain)
+Output: `build/bin/tetherkit-cli`.
+
+### Building the GUI
+
+Requires the full Xcode toolchain. On top of the build directory above:
+
+```bash
 cmake --build build --target gui        # same as ./gui/Scripts/build-gui.sh
-
-# 3. Install the privileged component (asks for your password)
-sudo ./gui/Scripts/install-helper.sh
-
-# 4. Run
 open dist/TetherKit.app
 ```
 
-Uninstall: `sudo ./gui/Scripts/uninstall-helper.sh`
+### Build options
 
-The app lets you choose how the virtual interface gets its address:
+| Option | Default | Description |
+|---|---|---|
+| `TETHERKIT_BUILD_TESTS` | `ON` | Build unit tests |
+| `TETHERKIT_BUILD_BENCHMARKS` | `ON` | Build benchmarks |
+| `TETHERKIT_WARNINGS_AS_ERRORS` | `OFF` | Treat warnings as errors |
+| `TETHERKIT_NATIVE_ARCH` | `OFF` | `-mcpu=native`; the binary is no longer portable |
+| `TETHERKIT_ENABLE_LTO` | `OFF` | Link-time optimization |
+| `TETHERKIT_ENABLE_ASAN` | `OFF` | AddressSanitizer |
+| `TETHERKIT_ENABLE_UBSAN` | `OFF` | UndefinedBehaviorSanitizer |
+| `TETHERKIT_ENABLE_TSAN` | `OFF` | ThreadSanitizer (**required to validate the lock-free structures**) |
 
-| Mode | Notes |
-|---|---|
-| Automatic (DHCP) | Handled by the system's IPConfiguration — lease, DNS and routes are all set up for you. Most phones ship a DHCP server, so this is the recommended choice |
-| Static IP | Enter address, netmask, gateway and DNS yourself. Validated as you type, including netmask contiguity |
+### Tests
 
-There is also a "route all traffic through this interface" switch. With it off,
-only traffic explicitly bound to the interface uses it. You usually do not need
-it — when no other network is available, macOS picks this interface as the
-primary service on its own.
+```bash
+ctest --test-dir build --output-on-failure
+```
 
-**Background mode**: closing the main window keeps the app in the menu bar
-(the Dock icon is hidden) with live up/down rates on the status item; click it
-for a compact panel with shortcuts back to the main window. The connection
-itself lives in the privileged helper, so quitting the UI never drops it.
+The lock-free queue and the multi-threaded data path are validated separately under
+ThreadSanitizer:
 
-**Requires** macOS 14+ (the CLI still supports 13.3+). Design notes and
-trade-offs are in [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md).
+```bash
+cmake -S . -B build-tsan -DTETHERKIT_ENABLE_TSAN=ON
+cmake --build build-tsan -j
+ctest --test-dir build-tsan --output-on-failure
+```
+
+### Benchmarks
+
+```bash
+cmake -S . -B build-rel -DCMAKE_BUILD_TYPE=Release
+cmake --build build-rel -j
+./build-rel/bin/tetherkit_bench
+```
+
+Aggregated results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ---
 
