@@ -77,6 +77,123 @@ TEST_CASE("IsValidFethName 只接受 feth+数字") {
   }
 }
 
+namespace {
+
+using tetherkit::capi::DeviceIdentity;
+using tetherkit::capi::ReconcileDeviceStrings;
+using tetherkit::capi::RememberedDeviceStrings;
+
+/// 造一条已填好身份与字符串的枚举结果。字符串传空串表示「这次没读到」。
+tk_device_info_t DeviceInfo(const DeviceIdentity& identity, const char* manufacturer,
+                            const char* product, const char* serial) {
+  tk_device_info_t info{};
+  info.vendor_id = identity.vendor_id;
+  info.product_id = identity.product_id;
+  info.bus_number = identity.bus_number;
+  info.device_address = identity.device_address;
+  CopyText(info.manufacturer, manufacturer);
+  CopyText(info.product, product);
+  CopyText(info.serial, serial);
+  return info;
+}
+
+}  // namespace
+
+TEST_CASE("ReconcileDeviceStrings 在读不到时回填上次成功读到的名字") {
+  // 场景即 GUI 上那个真实缺陷：连接后设备被独占、读不到字符串，
+  // 「vivo iQOO Z10x」退化成「USB 设备 2d95:600b」。
+  const DeviceIdentity phone{.bus_number = 0, .device_address = 1,
+                             .vendor_id = 0x2d95, .product_id = 0x600b};
+  std::vector<RememberedDeviceStrings> memory;
+  const std::vector<DeviceIdentity> present{phone};
+
+  // 第一次：空闲时读到了 → 记住。
+  std::vector<tk_device_info_t> infos{DeviceInfo(phone, "vivo", "iQOO Z10x", "10AFAC2X72005KT")};
+  ReconcileDeviceStrings(memory, present, infos);
+  REQUIRE(memory.size() == 1);
+
+  // 第二次：会话启动，读被跳过（全空）→ 回填。
+  infos = {DeviceInfo(phone, "", "", "")};
+  ReconcileDeviceStrings(memory, present, infos);
+  CHECK(std::string{infos[0].manufacturer} == "vivo");
+  CHECK(std::string{infos[0].product} == "iQOO Z10x");
+  CHECK(std::string{infos[0].serial} == "10AFAC2X72005KT");
+
+  SUBCASE("再次读到新值时覆盖记忆") {
+    infos = {DeviceInfo(phone, "vivo", "iQOO Z10x", "NEWSERIAL")};
+    ReconcileDeviceStrings(memory, present, infos);
+    infos = {DeviceInfo(phone, "", "", "")};
+    ReconcileDeviceStrings(memory, present, infos);
+    CHECK(std::string{infos[0].serial} == "NEWSERIAL");
+  }
+}
+
+TEST_CASE("ReconcileDeviceStrings 不把旧名字安给接替同一地址的另一台设备") {
+  const DeviceIdentity old_phone{.bus_number = 0, .device_address = 1,
+                                 .vendor_id = 0x2d95, .product_id = 0x600b};
+  std::vector<RememberedDeviceStrings> memory;
+  std::vector<tk_device_info_t> infos{DeviceInfo(old_phone, "vivo", "iQOO Z10x", "SN1")};
+  ReconcileDeviceStrings(memory, {std::vector<DeviceIdentity>{old_phone}}, infos);
+  REQUIRE(memory.size() == 1);
+
+  SUBCASE("同地址但 VID:PID 不同 → 身份不同，不回填") {
+    const DeviceIdentity other{.bus_number = 0, .device_address = 1,
+                               .vendor_id = 0x18d1, .product_id = 0x4ee4};
+    infos = {DeviceInfo(other, "", "", "")};
+    ReconcileDeviceStrings(memory, {std::vector<DeviceIdentity>{other}}, infos);
+    CHECK(std::string{infos[0].product}.empty());
+  }
+
+  SUBCASE("设备拔掉（不在场）→ 记忆清除；重插后读不到也不回填") {
+    // 拔掉：present 为空。
+    infos.clear();
+    ReconcileDeviceStrings(memory, {}, infos);
+    CHECK(memory.empty());
+
+    // 重插同身份（可能已是同型号的另一台），读不到 → 宁可显示 VID:PID。
+    infos = {DeviceInfo(old_phone, "", "", "")};
+    ReconcileDeviceStrings(memory, {std::vector<DeviceIdentity>{old_phone}}, infos);
+    CHECK(std::string{infos[0].product}.empty());
+  }
+}
+
+TEST_CASE("ReconcileDeviceStrings 对没有字符串的设备保持诚实的空串") {
+  const DeviceIdentity mute{.bus_number = 2, .device_address = 7,
+                            .vendor_id = 0x1234, .product_id = 0x5678};
+  std::vector<RememberedDeviceStrings> memory;
+  std::vector<tk_device_info_t> infos{DeviceInfo(mute, "", "", "")};
+  ReconcileDeviceStrings(memory, {std::vector<DeviceIdentity>{mute}}, infos);
+  // 不记忆（没读到东西）、不回填（无中生有）。
+  CHECK(memory.empty());
+  CHECK(std::string{infos[0].product}.empty());
+}
+
+TEST_CASE("ReconcileDeviceStrings 不清除仍在场但没被填出的设备的记忆") {
+  // 调用方数组容量不够时，present 比 infos 长 —— 超出部分只是没被填，
+  // 不是拔掉了。
+  const DeviceIdentity first{.bus_number = 0, .device_address = 1,
+                             .vendor_id = 0x2d95, .product_id = 0x600b};
+  const DeviceIdentity second{.bus_number = 0, .device_address = 2,
+                              .vendor_id = 0x18d1, .product_id = 0x4ee4};
+  std::vector<RememberedDeviceStrings> memory;
+  const std::vector<DeviceIdentity> both{first, second};
+
+  std::vector<tk_device_info_t> infos{DeviceInfo(first, "vivo", "iQOO Z10x", "SN1"),
+                                      DeviceInfo(second, "Google", "Pixel", "SN2")};
+  ReconcileDeviceStrings(memory, both, infos);
+  REQUIRE(memory.size() == 2);
+
+  // 容量降到 1：只填了第一台，第二台仍在场。
+  infos = {DeviceInfo(first, "", "", "")};
+  ReconcileDeviceStrings(memory, both, infos);
+  CHECK(memory.size() == 2);
+
+  // 之后第二台重新被填出且读不到时，记忆还在，能回填。
+  infos = {DeviceInfo(second, "", "", "")};
+  ReconcileDeviceStrings(memory, both, infos);
+  CHECK(std::string{infos[0].product} == "Pixel");
+}
+
 }  // TEST_SUITE("capi.support")
 
 TEST_SUITE("capi.basics") {
