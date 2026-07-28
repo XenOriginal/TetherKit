@@ -1,4 +1,5 @@
 import Foundation
+import TetherKitIPC
 
 /// 在「应用程序」目录里维护一个指向本 .app 的 Finder 别名，让聚焦搜得到。
 ///
@@ -23,11 +24,11 @@ enum FinderAlias {
     @discardableResult
     static func ensure(for bundleURL: URL) -> String {
         guard bundleURL.pathExtension == "app" else {
-            return "跳过：不是 .app 包（开发构建）"
+            return L(.aliasSkippedNotBundle)
         }
         let target = bundleURL.standardizedFileURL.resolvingSymlinksInPath()
         guard !target.path.hasPrefix("/Applications/") else {
-            return "跳过：App 已在 /Applications 里"
+            return L(.aliasSkippedAlreadyInApplications)
         }
 
         // 先试全局 /Applications（admin 组可写，不需要 root）；
@@ -46,7 +47,7 @@ enum FinderAlias {
                 continue
             }
         }
-        return "失败：/Applications 与 ~/Applications 都没能写入别名"
+        return L(.aliasFailed)
     }
 
     /// 在指定目录里建立/修复别名。位置被非别名文件占用时返回 nil（换下一个
@@ -64,7 +65,7 @@ enum FinderAlias {
             if let resolved = try? URL(resolvingAliasFileAt: aliasURL,
                                        options: [.withoutUI, .withoutMounting]),
                resolved.standardizedFileURL.path == target.path {
-                return "别名已就绪：\(path)"
+                return L(.aliasAlreadyPresent, path)
             }
             // 目标漂移（升级换了路径）—— 重写。
         }
@@ -73,6 +74,6 @@ enum FinderAlias {
                                                includingResourceValuesForKeys: nil,
                                                relativeTo: nil)
         try URL.writeBookmarkData(bookmark, to: aliasURL)
-        return "已建立别名：\(path) → \(target.path)"
+        return L(.aliasCreated, path, target.path)
     }
 }

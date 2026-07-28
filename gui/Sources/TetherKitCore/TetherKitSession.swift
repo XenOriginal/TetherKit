@@ -92,13 +92,13 @@ public final class TetherKitSession {
             // 字段是 int32_t —— 两者不能直接比较，必须显式转一次。
             switch event.kind {
             case Int32(TK_EVENT_LINK.rawValue):
-                return event.a == 1 ? "链路已连接" : "链路已断开"
+                return L(event.a == 1 ? .eventLinkUp : .eventLinkDown)
             case Int32(TK_EVENT_DEVICE_RESET.rawValue):
-                return event.a == 1 ? "设备已软复位，寻址信息已重放" : "设备已软复位"
+                return L(event.a == 1 ? .eventDeviceResetReplayed : .eventDeviceReset)
             case Int32(TK_EVENT_FATAL.rawValue):
                 return String(fixedCArray: event.text)
             case Int32(TK_EVENT_NEGOTIATED.rawValue):
-                return "RNDIS 协商完成：MTU \(event.a)，链路 \(event.b) Mbps"
+                return L(.eventNegotiated, Int(event.a), Int(event.b))
             default:
                 return nil
             }

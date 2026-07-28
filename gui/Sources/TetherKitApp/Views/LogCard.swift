@@ -11,12 +11,12 @@ struct LogCard: View {
     @State private var autoScroll = true
 
     var body: some View {
-        Card(title: "运行日志", systemImage: "text.alignleft") {
+        Card(title: L(.logSectionTitle), systemImage: "text.alignleft") {
             VStack(alignment: .leading, spacing: Design.Spacing.small) {
                 toolbar
                 logList
                 if model.droppedLogCount > 0 {
-                    Label("有 \(model.droppedLogCount) 条日志因缓冲写满被丢弃",
+                    Label(L(.logDroppedNotice, Int(model.droppedLogCount)),
                           systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -27,12 +27,12 @@ struct LogCard: View {
 
     private var toolbar: some View {
         HStack(spacing: Design.Spacing.small) {
-            Picker("级别", selection: $model.logLevelFilter) {
-                Text("全部").tag(LogLevel.trace)
-                Text("调试").tag(LogLevel.debug)
-                Text("信息").tag(LogLevel.info)
-                Text("警告").tag(LogLevel.warning)
-                Text("错误").tag(LogLevel.error)
+            Picker(L(.logLevelLabel), selection: $model.logLevelFilter) {
+                Text(L(.logLevelAll)).tag(LogLevel.trace)
+                Text(L(.logLevelDebug)).tag(LogLevel.debug)
+                Text(L(.logLevelInfo)).tag(LogLevel.info)
+                Text(L(.logLevelWarning)).tag(LogLevel.warning)
+                Text(L(.logLevelError)).tag(LogLevel.error)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -40,7 +40,7 @@ struct LogCard: View {
 
             Spacer()
 
-            Toggle("自动滚动", isOn: $autoScroll)
+            Toggle(L(.logAutoScroll), isOn: $autoScroll)
                 .toggleStyle(.checkbox)
                 .font(.callout)
 
@@ -51,7 +51,7 @@ struct LogCard: View {
                 Image(systemName: "doc.on.doc")
             }
             .buttonStyle(.borderless)
-            .help("复制全部日志")
+            .help(L(.logCopyAll))
 
             Button {
                 model.clearLogs()
@@ -59,7 +59,7 @@ struct LogCard: View {
                 Image(systemName: "trash")
             }
             .buttonStyle(.borderless)
-            .help("清空日志")
+            .help(L(.logClear))
         }
     }
 
@@ -101,7 +101,7 @@ struct LogCard: View {
                 var line = "\(Format.time(item.latest.timestamp)) [\(item.latest.level.label)] "
                     + "[\(item.latest.thread)] \(item.latest.message)"
                 if item.count > 1 {
-                    line += "（×\(item.count)，自 \(Format.time(item.first.timestamp)) 起）"
+                    line += L(.logRepeatSuffix, item.count, Format.time(item.first.timestamp))
                 }
                 return line
             }
@@ -132,7 +132,8 @@ private struct LogRow: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(.quaternary, in: Capsule())
-                    .help("这句话连续出现了 \(entry.count) 次，首次在 \(Format.time(entry.first.timestamp))")
+                    .help(L(.logRepeatTooltip, entry.count,
+                            Format.time(entry.first.timestamp)))
             }
         }
         .font(.system(size: 11, design: .monospaced))

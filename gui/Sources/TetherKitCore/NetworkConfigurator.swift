@@ -109,21 +109,21 @@ public enum NetworkValidator {
         guard configuration.mode == .manual else { return nil }
 
         if !isValidIPv4(configuration.address) {
-            return "IP 地址格式不正确"
+            return L(.invalidIPAddress)
         }
         if !isValidNetmask(configuration.netmask) {
-            return "子网掩码不正确（必须是连续的掩码，如 255.255.255.0）"
+            return L(.invalidNetmask)
         }
         let router = configuration.router.trimmingCharacters(in: .whitespaces)
         if !router.isEmpty, !isValidIPv4(router) {
-            return "网关地址格式不正确"
+            return L(.invalidRouter)
         }
         if configuration.setDefaultRoute, router.isEmpty {
-            return "要把流量默认走这张网卡，必须填写网关地址"
+            return L(.routerRequiredForDefaultRoute)
         }
         for server in configuration.dnsServers where !server.trimmingCharacters(in: .whitespaces).isEmpty {
             if !isValidIPv4(server.trimmingCharacters(in: .whitespaces)) {
-                return "DNS 服务器 \(server) 格式不正确"
+                return L(.invalidDNSServer, server)
             }
         }
         return nil

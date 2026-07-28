@@ -1,4 +1,5 @@
 import Darwin
+import TetherKitIPC
 import Foundation
 
 /// 「App 内一键安装 / 卸载」的执行入口：本二进制以 `--install` 或 `--uninstall`
@@ -34,8 +35,8 @@ func runInstallerModeIfRequested() {
     dup2(STDOUT_FILENO, STDERR_FILENO)
 
     guard setgid(0) == 0, setuid(0) == 0 else {
-        print("错误：无法取得 root（euid=\(geteuid())，ruid=\(getuid())）。"
-              + "请改用终端：sudo \(scriptName)")
+        print(L(.installerNeedsRoot, Int(geteuid()), Int(getuid()))
+              + L(.installerUseTerminal, scriptName))
         exit(1)
     }
 
@@ -44,7 +45,7 @@ func runInstallerModeIfRequested() {
     let script = executable.resolvingSymlinksInPath().deletingLastPathComponent()
         .appendingPathComponent(scriptName).path
     guard FileManager.default.isExecutableFile(atPath: script) else {
-        print("错误：找不到脚本 \(script)")
+        print(L(.installerScriptMissing, script))
         exit(1)
     }
 

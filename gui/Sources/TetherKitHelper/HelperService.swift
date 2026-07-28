@@ -86,6 +86,16 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         reply(try? JSONEncoder().encode(feed))
     }
 
+    func setLanguage(_ rawValue: String, reply: @escaping () -> Void) {
+        // 认不出来就保持原样。宁可继续用上一种语言，也不要因为 App 传了个新值
+        // 就退回默认 —— 那会表现成「切了个语言，helper 的日志反而变回英文」。
+        if let language = Language(rawValue: rawValue) {
+            L10n.apply(language == .chinese ? .chinese : .english)
+            TetherKitLibrary.setLanguage(language)
+        }
+        reply()
+    }
+
     // MARK: - 需要授权的特权接口
 
     func startSession(authorization: Data, configuration: Data,
@@ -107,7 +117,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
             if let existing = self.withState({ $0 }) {
                 let state = existing.status().runState
                 guard state == .failed || state == .stopped else {
-                    reply("会话已经在运行了", false)
+                    reply(L(.helperSessionAlreadyRunning), false)
                     return
                 }
                 existing.stop()  // 幂等，只是保险
@@ -141,7 +151,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
                 return self.session
             }
             session?.stop()
-            self.appendNotices(["会话已停止"])
+            self.appendNotices([L(.helperSessionStopped)])
             reply(nil, false)
         }
     }
@@ -163,7 +173,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         networkQueue.async { [weak self] in
             do {
                 try NetworkConfigurator.apply(configuration, to: interface)
-                self?.appendNotices(["已应用网络配置：\(configuration.mode.displayName)"])
+                self?.appendNotices([L(.helperNetworkApplied, configuration.mode.displayName)])
                 reply(nil, false)
             } catch {
                 reply(error.localizedDescription, false)
@@ -205,7 +215,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         do {
             return try JSONDecoder().decode(type, from: data)
         } catch {
-            reply("请求参数无法解析：\(error.localizedDescription)", false)
+            reply(L(.helperRequestDecodeFailed, error.localizedDescription), false)
             return nil
         }
     }
@@ -214,7 +224,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         do {
             reply(try JSONEncoder().encode(value), nil)
         } catch {
-            reply(nil, "应答编码失败：\(error.localizedDescription)")
+            reply(nil, L(.helperReplyEncodeFailed, error.localizedDescription))
         }
     }
 

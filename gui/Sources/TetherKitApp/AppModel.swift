@@ -102,6 +102,22 @@ final class AppModel {
     /// 网络配置表单。
     var networkConfiguration: NetworkConfiguration = .dhcp
 
+    /// 界面语言偏好。改它会**同时**做三件事：切 Swift 侧的文案表、把语言推给
+    /// libtetherkit（否则日志卡里会混进另一种语言）、再推给 helper（它以 root
+    /// 跑在 launchd 下，看不到用户的语言偏好）。
+    ///
+    /// `didSet` 里顺带把 `languageRevision` 加一 —— 文案是从全局表里查的，
+    /// SwiftUI 无从得知它变了，得靠这个值把视图树整个重建一次。
+    var languagePreference: LanguagePreference = .system {
+        didSet {
+            guard languagePreference != oldValue else { return }
+            applyLanguage(languagePreference)
+        }
+    }
+
+    /// 语言换了多少次。视图根上挂 `.id(model.languageRevision)`，靠它触发重建。
+    private(set) var languageRevision = 0
+
     /// 正在等待某个特权操作完成 —— 界面据此禁用按钮并显示进度。
     private(set) var isBusy: Bool = false
     /// 需要弹给用户看的错误。
@@ -140,19 +156,16 @@ final class AppModel {
     /// 系统授权框里显示的说明。
     ///
     /// 不写这一句的话框里只有「TetherKit 想要进行更改」，用户无从判断该不该批准。
-    private static let authorizationPrompt =
-        "TetherKit 需要管理员权限来创建虚拟网卡、打开数据链路并配置 IP 地址。"
+    /// 用计算属性而不是 `static let`：`static let` 只在类型第一次被用到时求值
+    /// 一次，用户之后切换语言就再也不会更新了。
+    private static var authorizationPrompt: String { L(.authPromptSession) }
 
     /// 安装特权组件时授权框里的说明。单独一句 —— 这次批准的是「往系统目录里
     /// 装东西」，和上面的日常操作不是一回事，文案必须说实话。
-    private static let helperInstallPrompt =
-        "TetherKit 需要管理员权限来安装特权组件"
-        + "（复制到 /Library/PrivilegedHelperTools 并注册系统服务）。"
+    private static var helperInstallPrompt: String { L(.authPromptInstall) }
 
     /// 卸载特权组件时授权框里的说明。
-    private static let helperUninstallPrompt =
-        "TetherKit 需要管理员权限来卸载特权组件"
-        + "（注销系统服务并删除 /Library 里的组件文件）。"
+    private static var helperUninstallPrompt: String { L(.authPromptUninstall) }
 
     /// 轮询周期。
     ///
@@ -179,8 +192,36 @@ final class AppModel {
 
     // MARK: - 生命周期
 
+    /// 应用一个语言偏好：本进程 → libtetherkit → helper，一处都不能漏。
+    ///
+    /// UserDefaults 只在这里写，读在 `restoreLanguagePreference()` 里 ——
+    /// 两边都走同一个键名常量，改名不会漏改一半。
+    func applyLanguage(_ preference: LanguagePreference) {
+        let resolved = L10n.apply(preference)
+        TetherKitLibrary.setLanguage(resolved)
+        UserDefaults.standard.set(preference.rawValue, forKey: Self.languageDefaultsKey)
+        languageRevision += 1
+        Task { await client.setLanguage(resolved) }
+    }
+
+    /// 启动时恢复上次选的语言。没存过就是 `.system`。
+    private func restoreLanguagePreference() {
+        let stored = UserDefaults.standard.string(forKey: Self.languageDefaultsKey)
+        let preference = stored.flatMap(LanguagePreference.init(rawValue:)) ?? .system
+        // 直接写存储属性会触发 didSet 再存一次盘，绕开它：这里是「恢复」，
+        // 不是「用户改了」。
+        if preference != languagePreference {
+            languagePreference = preference
+        } else {
+            applyLanguage(preference)
+        }
+    }
+
+    private static let languageDefaultsKey = "TetherKitLanguagePreference"
+
     func start() {
         guard pollingTask == nil else { return }
+        restoreLanguagePreference()
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -416,7 +457,7 @@ final class AppModel {
         guard !isBusy else { return }
         let interface = status.systemInterface
         guard !interface.isEmpty else {
-            alertMessage = "虚拟网卡还没创建，请先连接设备"
+            alertMessage = L(.interfaceNotReadyYet)
             return
         }
         if let message = NetworkValidator.validationMessage(for: networkConfiguration) {
@@ -481,7 +522,7 @@ final class AppModel {
     func installHelper() async {
         await maintainHelper(.install, prompt: Self.helperInstallPrompt,
                              expectAvailable: true,
-                             failureNotice: "安装脚本执行完毕，但仍连不上特权组件。")
+                             failureNotice: L(.installScriptRanButUnreachable))
     }
 
     /// 卸载特权组件（仪表盘底部的「卸载…」，确认框在 UI 层）。
@@ -491,7 +532,7 @@ final class AppModel {
     func uninstallHelper() async {
         await maintainHelper(.uninstall, prompt: Self.helperUninstallPrompt,
                              expectAvailable: false,
-                             failureNotice: "卸载脚本执行完毕，但特权组件仍在响应。")
+                             failureNotice: L(.uninstallScriptRanButStillAlive))
     }
 
     /// 安装与卸载共用的执行壳：授权（复用缓存令牌）→ AEWP 执行 → XPC 探测
@@ -546,7 +587,7 @@ final class AppModel {
             if helperAvailability.isAvailable == expectAvailable { return }
             try? await Task.sleep(for: .milliseconds(500))
         }
-        alertMessage = "\(failureNotice)脚本输出：\n\(Self.tail(of: output))"
+        alertMessage = L(.scriptOutput, failureNotice, Self.tail(of: output))
     }
 
     // MARK: - 检查更新
@@ -624,7 +665,7 @@ final class AppModel {
         if kept.count > maxCharacters {
             kept = String(kept.suffix(maxCharacters))
         }
-        return kept.isEmpty ? "（无输出）" : kept
+        return kept.isEmpty ? L(.scriptNoOutput) : kept
     }
 
     /// 带着授权凭据执行一次特权操作，必要时才弹系统授权框。

@@ -56,12 +56,12 @@ enum Design {
 
     static func statusLabel(for status: SessionStatus) -> String {
         switch status.runState {
-        case .idle: return "未连接"
-        case .starting: return "正在连接"
-        case .running: return status.linkUp ? "已连接" : "已就绪（链路未连通）"
-        case .stopping: return "正在断开"
-        case .stopped: return "已断开"
-        case .failed: return "连接失败"
+        case .idle: return L(.statusDisconnected)
+        case .starting: return L(.statusConnecting)
+        case .running: return L(status.linkUp ? .statusConnected : .statusReadyLinkDown)
+        case .stopping: return L(.statusDisconnecting)
+        case .stopped: return L(.statusStopped)
+        case .failed: return L(.statusFailed)
         }
     }
 

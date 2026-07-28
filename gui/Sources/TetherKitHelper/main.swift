@@ -38,10 +38,10 @@ TetherKitLibrary.startLogCapture(level: .info)
 do {
     let removed = try TetherKitLibrary.cleanupOrphanInterfaces()
     if removed > 0 {
-        writeToStandardError("已清理 \(removed) 张上次残留的虚拟网卡")
+        writeToStandardError(L(.helperOrphansCleaned, Int(removed)))
     }
 } catch {
-    writeToStandardError("清理残留虚拟网卡失败：\(error.localizedDescription)")
+    writeToStandardError(L(.helperOrphanCleanupFailed, error.localizedDescription))
 }
 
 let service = HelperService()
@@ -60,7 +60,7 @@ let delegate = HelperListenerDelegate(service: service)
 signal(SIGTERM, SIG_IGN)
 let terminationSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 terminationSource.setEventHandler {
-    writeToStandardError("收到 SIGTERM，正在停机")
+    writeToStandardError(L(.helperSigtermReceived))
     service.shutdown()
     exit(0)
 }
@@ -70,7 +70,7 @@ let listener = NSXPCListener(machServiceName: HelperConstants.machServiceName)
 listener.delegate = delegate
 listener.resume()
 
-writeToStandardError("tetherkit-helper 已就绪：\(TetherKitLibrary.versionInfo.version)")
+writeToStandardError(L(.helperReady, TetherKitLibrary.versionInfo.version))
 
 // 阻塞在主 runloop 上。
 //

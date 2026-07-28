@@ -18,6 +18,15 @@ public enum TetherKitLibrary {
     /// 与 C 侧环形缓冲的容量（256）一致：小了会永远取不完积压，大了没意义。
     private static let logCapacity = 256
 
+    /// 把界面语言同步给 libtetherkit。
+    ///
+    /// 必须调 —— 否则会出现「界面是英文、日志卡里的库日志是中文」这种割裂。
+    /// 已经排队的日志不会被重新渲染（它们在产生的那一刻就已经是字符串了），
+    /// 所以越早调越好；语言切换时新产生的日志立刻就是新语言。
+    public static func setLanguage(_ language: Language) {
+        tk_set_language(language.cValue)
+    }
+
     public static var versionInfo: (version: String, build: String, libusb: String) {
         var info = tk_version_info_t()
         tk_version(&info)

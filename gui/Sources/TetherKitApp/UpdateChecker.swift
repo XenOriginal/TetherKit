@@ -1,4 +1,5 @@
 import Foundation
+import TetherKitIPC
 
 /// 到 GitHub Releases 查有没有更新的版本。
 ///
@@ -28,11 +29,11 @@ enum UpdateChecker {
         var errorDescription: String? {
             switch self {
             case .noReleases:
-                return "仓库还没有发布任何版本"
+                return L(.updateNoReleases)
             case .badStatus(let code):
-                return "GitHub 返回了 \(code)"
+                return L(.updateHTTPStatus, code)
             case .malformedPayload:
-                return "响应格式不符合预期"
+                return L(.updateBadResponse)
             }
         }
     }

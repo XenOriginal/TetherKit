@@ -35,11 +35,11 @@ struct StatusHeroCard: View {
                 .font(.system(.title2, design: .rounded).weight(.semibold))
 
             if model.status.runState == .running {
-                StatusBadge(text: model.status.linkUp ? "链路已连通" : "链路未连通",
+                StatusBadge(text: L(model.status.linkUp ? .linkUp : .linkDown),
                             color: model.status.linkUp ? .green : .orange)
             }
             if model.status.paused {
-                StatusBadge(text: "已暂停搬运", color: .orange)
+                StatusBadge(text: L(.transferPaused), color: .orange)
             }
         }
     }
@@ -57,11 +57,11 @@ struct StatusHeroCard: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else if let device = model.selectedDevice {
-            Text("待连接：\(device.displayName)")
+            Text(L(.pendingDevice, device.displayName))
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else {
-            Text("没有检测到 RNDIS 设备。请用数据线连接手机，并在手机上打开「USB 网络共享」。")
+            Text(L(.noRNDISDeviceDetected))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -87,12 +87,12 @@ struct StatusHeroCard: View {
     private var addressLine: some View {
         if model.status.runState == .running || model.status.runState == .starting {
             HStack(spacing: Design.Spacing.large) {
-                inlineMetric("网卡", model.status.systemInterface.isEmpty
-                    ? "创建中…" : model.status.systemInterface)
-                inlineMetric("IP 地址", model.networkState.hasAddress
-                    ? model.networkState.address : "未配置")
+                inlineMetric(L(.interfaceLabel), model.status.systemInterface.isEmpty
+                    ? L(.interfaceCreating) : model.status.systemInterface)
+                inlineMetric(L(.ipAddress), model.networkState.hasAddress
+                    ? model.networkState.address : L(.notConfigured))
                 if let duration = model.connectedDuration {
-                    inlineMetric("已连接", Format.duration(duration))
+                    inlineMetric(L(.statusConnected), Format.duration(duration))
                 }
             }
         }
@@ -129,7 +129,7 @@ struct StatusHeroCard: View {
                 } else {
                     Image(systemName: isRunning ? "stop.fill" : "play.fill")
                 }
-                Text(isRunning ? "断开" : "连接")
+                Text(L(isRunning ? .disconnect : .connect))
             }
             .frame(minWidth: 76)
         }
@@ -138,7 +138,7 @@ struct StatusHeroCard: View {
         .tint(isRunning ? .red : .accentColor)
         // 没有设备时不让点「连接」—— 点了必然失败，不如直接说明白。
         .disabled(model.isBusy || isTransitional || (!isRunning && model.devices.isEmpty))
-        .help(model.devices.isEmpty && !isRunning ? "先连接一台开启了 USB 网络共享的设备" : "")
+        .help(model.devices.isEmpty && !isRunning ? L(.connectDisabledHint) : "")
     }
 }
 

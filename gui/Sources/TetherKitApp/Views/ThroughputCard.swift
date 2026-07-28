@@ -12,7 +12,7 @@ struct ThroughputCard: View {
     private var hasData: Bool { !model.throughputHistory.isEmpty }
 
     var body: some View {
-        Card(title: "吞吐", systemImage: "chart.line.uptrend.xyaxis", accessory: AnyView(liveBadge)) {
+        Card(title: L(.throughputSectionTitle), systemImage: "chart.line.uptrend.xyaxis", accessory: AnyView(liveBadge)) {
             VStack(alignment: .leading, spacing: Design.Spacing.medium) {
                 rateRow
                 chart
@@ -28,7 +28,7 @@ struct ThroughputCard: View {
     @ViewBuilder
     private var liveBadge: some View {
         if model.status.runState == .running {
-            StatusBadge(text: "实时", color: .green)
+            StatusBadge(text: L(.throughputLive), color: .green)
         }
     }
 
@@ -39,20 +39,20 @@ struct ThroughputCard: View {
              horizontalSpacing: Design.Spacing.medium,
              verticalSpacing: Design.Spacing.small) {
             GridRow {
-                MetricTile(caption: "下行（设备 → 本机）",
+                MetricTile(caption: L(.throughputDownstream),
                            value: Format.bitrate(model.throughput.receiveBitsPerSecond),
                            systemImage: "arrow.down",
                            tint: .blue)
-                MetricTile(caption: "上行（本机 → 设备）",
+                MetricTile(caption: L(.throughputUpstream),
                            value: Format.bitrate(model.throughput.transmitBitsPerSecond),
                            systemImage: "arrow.up",
                            tint: .purple)
             }
             GridRow {
-                MetricTile(caption: "下行帧率",
+                MetricTile(caption: L(.throughputDownstreamFPS),
                            value: "\(Format.packetsPerSecond(model.throughput.receivePacketsPerSecond)) pps",
                            systemImage: "square.stack.3d.up")
-                MetricTile(caption: "上行帧率",
+                MetricTile(caption: L(.throughputUpstreamFPS),
                            value: "\(Format.packetsPerSecond(model.throughput.transmitPacketsPerSecond)) pps",
                            systemImage: "square.stack.3d.up")
             }
@@ -64,22 +64,22 @@ struct ThroughputCard: View {
         if hasData {
             Chart {
                 ForEach(model.throughputHistory) { sample in
-                    AreaMark(x: .value("时间", sample.timestamp),
-                             y: .value("速率", sample.receiveBitsPerSecond))
+                    AreaMark(x: .value(L(.chartTime), sample.timestamp),
+                             y: .value(L(.chartRate), sample.receiveBitsPerSecond))
                         .foregroundStyle(
                             .linearGradient(colors: [.blue.opacity(0.35), .blue.opacity(0.02)],
                                             startPoint: .top, endPoint: .bottom))
                         .interpolationMethod(.monotone)
 
-                    LineMark(x: .value("时间", sample.timestamp),
-                             y: .value("速率", sample.receiveBitsPerSecond),
-                             series: .value("方向", "下行"))
+                    LineMark(x: .value(L(.chartTime), sample.timestamp),
+                             y: .value(L(.chartRate), sample.receiveBitsPerSecond),
+                             series: .value(L(.chartDirection), L(.downstreamShort)))
                         .foregroundStyle(.blue)
                         .interpolationMethod(.monotone)
 
-                    LineMark(x: .value("时间", sample.timestamp),
-                             y: .value("速率", sample.transmitBitsPerSecond),
-                             series: .value("方向", "上行"))
+                    LineMark(x: .value(L(.chartTime), sample.timestamp),
+                             y: .value(L(.chartRate), sample.transmitBitsPerSecond),
+                             series: .value(L(.chartDirection), L(.upstreamShort)))
                         .foregroundStyle(.purple)
                         .interpolationMethod(.monotone)
                 }
@@ -103,7 +103,7 @@ struct ThroughputCard: View {
                 .fill(.quaternary.opacity(0.35))
                 .frame(height: 120)
                 .overlay(
-                    Text(model.status.runState == .running ? "正在采集…" : "连接后显示实时吞吐")
+                    Text(L(model.status.runState == .running ? .throughputCollecting : .throughputPlaceholder))
                         .font(.callout)
                         .foregroundStyle(.secondary))
         }
@@ -111,10 +111,10 @@ struct ThroughputCard: View {
 
     private var counterRow: some View {
         HStack(spacing: Design.Spacing.medium) {
-            MetricTile(caption: "累计下行", value: Format.bytes(model.status.rxBytes))
-            MetricTile(caption: "累计上行", value: Format.bytes(model.status.txBytes))
-            MetricTile(caption: "下行帧数", value: Format.count(model.status.rxFrames))
-            MetricTile(caption: "上行帧数", value: Format.count(model.status.txFrames))
+            MetricTile(caption: L(.totalDownstream), value: Format.bytes(model.status.rxBytes))
+            MetricTile(caption: L(.totalUpstream), value: Format.bytes(model.status.txBytes))
+            MetricTile(caption: L(.downstreamFrames), value: Format.count(model.status.rxFrames))
+            MetricTile(caption: L(.upstreamFrames), value: Format.count(model.status.txFrames))
         }
     }
 
@@ -130,10 +130,10 @@ struct ThroughputCard: View {
     /// 合并之后就分不清该调哪个参数了。
     private var dropHint: some View {
         HStack(spacing: Design.Spacing.medium) {
-            MetricTile(caption: "下行丢弃", value: Format.count(model.status.rxDropped), tint: .orange)
-            MetricTile(caption: "上行丢弃", value: Format.count(model.status.txDropped), tint: .orange)
-            MetricTile(caption: "内核丢包", value: Format.count(model.status.linkKernelDrops), tint: .orange)
-            MetricTile(caption: "发送背压", value: Format.count(model.status.txBackpressure), tint: .orange)
+            MetricTile(caption: L(.downstreamDropped), value: Format.count(model.status.rxDropped), tint: .orange)
+            MetricTile(caption: L(.upstreamDropped), value: Format.count(model.status.txDropped), tint: .orange)
+            MetricTile(caption: L(.kernelDrops), value: Format.count(model.status.linkKernelDrops), tint: .orange)
+            MetricTile(caption: L(.transmitBackpressure), value: Format.count(model.status.txBackpressure), tint: .orange)
         }
     }
 }

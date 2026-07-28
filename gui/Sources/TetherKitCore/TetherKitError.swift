@@ -1,4 +1,5 @@
 import CTetherKit
+import TetherKitIPC
 import Foundation
 
 /// 来自 C ABI 的错误。
@@ -30,7 +31,7 @@ public struct TetherKitError: LocalizedError, Sendable {
         let text = String(fixedCArray: error.message)
         // C 侧在参数校验失败的分支上未必填了消息（比如纯空指针检查），
         // 这时给一句兜底的，总比界面上出现一个空的错误框强。
-        self.message = text.isEmpty ? "操作失败（错误码 \(result)）" : text
+        self.message = text.isEmpty ? L(.libraryGenericFailure, Int(result)) : text
     }
 
     public init(message: String) {

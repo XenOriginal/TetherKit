@@ -167,7 +167,7 @@ public struct DeviceDescriptor: Codable, Hashable, Identifiable, Sendable {
         if !product.isEmpty {
             return manufacturer.isEmpty ? product : "\(manufacturer) \(product)"
         }
-        return String(format: "USB 设备 %04x:%04x", vendorID, productID)
+        return L(.usbDeviceFallbackName, Int(vendorID), Int(productID))
     }
 
     public init(vendorID: UInt16, productID: UInt16, busNumber: UInt8, deviceAddress: UInt8,
@@ -196,9 +196,9 @@ public enum IPMode: Int32, Codable, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .dhcp: return "自动（DHCP）"
-        case .manual: return "静态 IP"
-        case .none: return "不配置"
+        case .dhcp: return L(.ipModeDhcp)
+        case .manual: return L(.ipModeManual)
+        case .none: return L(.ipModeNone)
         }
     }
 }

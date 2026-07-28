@@ -25,11 +25,11 @@ struct NetworkCard: View {
 
     /// 静态 DNS 的悬停说明。它属于「什么时候需要在意」级别的信息，
     /// 不值得常驻一行。
-    private static let dnsHint =
-        "静态模式下 DNS 是否生效取决于系统的解析器管理，请以「当前生效」里的回读结果为准。"
+    /// 计算属性而非 `static let`：后者只求值一次，切换语言后就不再更新了。
+    private static var dnsHint: String { L(.dnsEffectivenessTooltip) }
 
     var body: some View {
-        Card(title: "上网方式", systemImage: "network", accessory: AnyView(interfaceBadge)) {
+        Card(title: L(.ipModeLabel), systemImage: "network", accessory: AnyView(interfaceBadge)) {
             VStack(alignment: .leading, spacing: Design.Spacing.small) {
                 modePicker
 
@@ -55,7 +55,7 @@ struct NetworkCard: View {
             .opacity(interfaceReady ? 1 : 0.55)
             .overlay(alignment: .center) {
                 if !interfaceReady {
-                    Text("连接设备后才能配置网络")
+                    Text(L(.connectBeforeConfiguring))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .padding(Design.Spacing.small)
@@ -73,7 +73,7 @@ struct NetworkCard: View {
     }
 
     private var modePicker: some View {
-        Picker("上网方式", selection: $model.networkConfiguration.mode) {
+        Picker(L(.ipModeLabel), selection: $model.networkConfiguration.mode) {
             // 刻意不把「不配置」放进选择器：它是一个动作（撤销），不是一种上网
             // 方式。混在一起会让人以为选中它就已经生效了。
             Text(IPMode.dhcp.displayName).tag(IPMode.dhcp)
@@ -85,10 +85,9 @@ struct NetworkCard: View {
 
     private var dhcpExplanation: some View {
         VStack(alignment: .leading, spacing: Design.Spacing.tight) {
-            Label("由系统向设备申请地址，DNS 与路由都自动配好", systemImage: "wand.and.stars")
+            Label(L(.dhcpHelp), systemImage: "wand.and.stars")
                 .font(.callout)
-            Text("绝大多数手机的 USB 网络共享都自带 DHCP 服务器，这是推荐选项。"
-                 + "应用后最多等待 10 秒；超时通常意味着设备侧没有开启网络共享。")
+            Text(L(.dhcpTooltip))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -102,18 +101,18 @@ struct NetworkCard: View {
              horizontalSpacing: Design.Spacing.medium,
              verticalSpacing: Design.Spacing.small) {
             GridRow {
-                AddressField(label: "IP 地址",
+                AddressField(label: L(.ipAddress),
                              placeholder: "192.168.42.100",
                              text: $model.networkConfiguration.address,
                              isValid: NetworkValidator.isValidIPv4(model.networkConfiguration.address))
-                AddressField(label: "子网掩码",
+                AddressField(label: L(.netmask),
                              placeholder: "255.255.255.0",
                              text: $model.networkConfiguration.netmask,
                              isValid: NetworkValidator.isValidNetmask(model.networkConfiguration.netmask))
             }
             GridRow {
-                AddressField(label: "网关",
-                             placeholder: "可留空",
+                AddressField(label: L(.router),
+                             placeholder: L(.routerOptional),
                              text: $model.networkConfiguration.router,
                              isValid: model.networkConfiguration.router.isEmpty
                                  || NetworkValidator.isValidIPv4(model.networkConfiguration.router))
@@ -149,7 +148,7 @@ struct NetworkCard: View {
                 Image(systemName: "minus.circle")
             }
             .buttonStyle(.borderless)
-            .help("删除这一条")
+            .help(L(.deleteThisEntry))
 
             if index == model.networkConfiguration.dnsServers.count - 1, canAddDNS {
                 Button {
@@ -158,7 +157,7 @@ struct NetworkCard: View {
                     Image(systemName: "plus.circle")
                 }
                 .buttonStyle(.borderless)
-                .help("添加 DNS 服务器（最多 4 条）")
+                .help(L(.addDNSServer))
             }
         }
         .help(Self.dnsHint)
@@ -174,7 +173,7 @@ struct NetworkCard: View {
             Button {
                 model.networkConfiguration.dnsServers.append("")
             } label: {
-                Label("添加", systemImage: "plus.circle")
+                Label(L(.add), systemImage: "plus.circle")
             }
             .buttonStyle(.borderless)
             .font(.callout)
@@ -186,14 +185,13 @@ struct NetworkCard: View {
     private var defaultRouteToggle: some View {
         Toggle(isOn: $model.networkConfiguration.setDefaultRoute) {
             VStack(alignment: .leading, spacing: 1) {
-                Text("让所有流量默认走这张网卡")
-                Text("不开启时，只有明确绑定到本网卡的流量走它。")
+                Text(L(.setDefaultRoute))
+                Text(L(.setDefaultRouteHelp))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
-        .help("不开启时其余流量仍走当前的主网络。如果本机没有别的可用网络，"
-              + "通常不需要开 —— 系统会自己把它选为主服务。")
+        .help(L(.setDefaultRouteTooltip))
     }
 
     private var actionRow: some View {
@@ -205,18 +203,18 @@ struct NetworkCard: View {
                     if model.isBusy {
                         ProgressView().controlSize(.small)
                     }
-                    Text("应用")
+                    Text(L(.apply))
                 }
                 .frame(minWidth: 56)
             }
             .buttonStyle(.borderedProminent)
             .disabled(model.isBusy)
 
-            Button("撤销配置") {
+            Button(L(.clearConfiguration)) {
                 Task { await model.clearNetworkConfiguration() }
             }
             .disabled(model.isBusy || !model.networkState.hasAddress)
-            .help("等同于 ipconfig set <网卡> NONE，会移除地址与相关路由")
+            .help(L(.clearConfigurationTooltip))
 
             Spacer()
         }
@@ -270,7 +268,7 @@ private struct EffectiveStateView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Design.Spacing.tight) {
             HStack(spacing: Design.Spacing.small) {
-                Text("当前生效")
+                Text(L(.currentlyEffective))
                     .font(.subheadline.weight(.medium))
                 if !state.method.isEmpty {
                     StatusBadge(text: state.method, color: .accentColor)
@@ -280,7 +278,7 @@ private struct EffectiveStateView: View {
                                 color: state.serviceState == "BOUND" ? .green : .orange)
                 }
                 if state.isPrimaryDefaultRoute {
-                    StatusBadge(text: "主默认路由", color: .green)
+                    StatusBadge(text: L(.primaryDefaultRoute), color: .green)
                 }
             }
 
@@ -291,17 +289,18 @@ private struct EffectiveStateView: View {
                      horizontalSpacing: Design.Spacing.medium,
                      verticalSpacing: Design.Spacing.tight) {
                     GridRow {
-                        readbackCell("IP 地址", state.address)
-                        readbackCell("子网掩码", state.netmask)
+                        readbackCell(L(.ipAddress), state.address)
+                        readbackCell(L(.netmask), state.netmask)
                     }
                     GridRow {
-                        readbackCell("网关", state.router)
+                        readbackCell(L(.router), state.router)
                         readbackCell("DNS", state.dnsServers.isEmpty
-                                     ? "未生效" : state.dnsServers.joined(separator: "、"))
+                                     ? L(.notEffective)
+                                     : state.dnsServers.joined(separator: L(.listSeparator)))
                     }
                 }
             } else {
-                Text("\(interface) 目前没有 IP 地址。选择上网方式后点「应用」。")
+                Text(L(.noAddressYet, interface))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

@@ -50,33 +50,33 @@ struct ContentView: View {
         .background(backgroundGradient)
         .animation(.smooth(duration: 0.25), value: model.status.runState)
         .animation(.smooth(duration: 0.25), value: model.helperAvailability)
-        .alert("操作失败",
+        .alert(L(.alertOperationFailed),
                isPresented: Binding(get: { model.alertMessage != nil },
                                     set: { if !$0 { model.alertMessage = nil } })) {
-            Button("好") { model.alertMessage = nil }
+            Button(L(.ok)) { model.alertMessage = nil }
         } message: {
             Text(model.alertMessage ?? "")
         }
-        .confirmationDialog("卸载特权组件？", isPresented: $confirmingHelperUninstall) {
-            Button("卸载", role: .destructive) {
+        .confirmationDialog(L(.confirmUninstallTitle), isPresented: $confirmingHelperUninstall) {
+            Button(L(.uninstall), role: .destructive) {
                 Task { await model.uninstallHelper() }
             }
-            Button("取消", role: .cancel) {}
+            Button(L(.cancel), role: .cancel) {}
         } message: {
             Text(uninstallWarning)
         }
-        .alert("检查更新",
+        .alert(L(.updateCheckTitle),
                isPresented: Binding(get: { model.updateCheckResult != nil },
                                     set: { if !$0 { model.updateCheckResult = nil } })) {
             if case .updateAvailable(let release) = model.updateCheckResult {
-                Button("前往发布页") { NSWorkspace.shared.open(release.pageURL) }
-                Button("复制 brew 升级命令") {
+                Button(L(.openReleasePage)) { NSWorkspace.shared.open(release.pageURL) }
+                Button(L(.copyBrewUpgradeCommand)) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString("brew upgrade tetherkit", forType: .string)
                 }
-                Button("好", role: .cancel) {}
+                Button(L(.ok), role: .cancel) {}
             } else {
-                Button("好", role: .cancel) {}
+                Button(L(.ok), role: .cancel) {}
             }
         } message: {
             Text(updateCheckDescription)
@@ -90,24 +90,22 @@ struct ContentView: View {
     private var updateCheckDescription: String {
         switch model.updateCheckResult {
         case .upToDate(let current):
-            return "当前已是最新版本（v\(current)）。"
+            return L(.updateUpToDate, current)
         case .updateAvailable(let release):
-            return "发现新版本 v\(release.version)。通过 Homebrew 安装的话，"
-                + "在终端执行 brew upgrade tetherkit；"
-                + "从源码构建的话，拉取最新代码重新编译即可。"
+            return L(.updateAvailable, release.version)
         case .failed(let reason):
-            return "无法完成检查：\(reason)"
+            return L(.updateCheckFailed, reason)
         case .unavailable:
-            return "这是开发构建（没有版本号），无从比较。"
+            return L(.updateDevBuild)
         case nil:
             return ""
         }
     }
 
     private var uninstallWarning: String {
-        let base = "将注销系统服务并删除 /Library 里的组件文件，之后随时可以重新安装。"
+        let base = L(.uninstallExplanation)
         return model.status.runState == .running
-            ? "当前连接会被断开、虚拟网卡销毁。" + base
+            ? L(.uninstallWhileRunningWarning) + base
             : base
     }
 
@@ -151,7 +149,7 @@ struct ContentView: View {
     private var helperManagementFooter: some View {
         if case .available(let version) = model.helperAvailability {
             HStack(spacing: Design.Spacing.small) {
-                Text("特权组件 · \(version)")
+                Text(L(.helperComponentVersion, version))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .textSelection(.enabled)
@@ -159,7 +157,7 @@ struct ContentView: View {
                 // 塞在既有行里而不是另起一行：整页预算 700pt 已经没有余粮
                 // 给新行了（管理行自己就险些顶破过一次）。
                 if let update = model.availableUpdate {
-                    Button("有新版 \(update.version)") {
+                    Button(L(.helperUpdateBadge, update.version)) {
                         model.updateCheckResult = .updateAvailable(update)
                     }
                     .buttonStyle(.borderless)
@@ -167,7 +165,7 @@ struct ContentView: View {
                     .foregroundStyle(Color.accentColor)
                 }
                 Spacer()
-                Button("卸载特权组件…") { confirmingHelperUninstall = true }
+                Button(L(.uninstallHelperMenuItem)) { confirmingHelperUninstall = true }
                     .buttonStyle(.borderless)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -198,7 +196,7 @@ private struct ProbingCard: View {
             HStack(spacing: Design.Spacing.small) {
                 ProgressView()
                     .controlSize(.small)
-                Text("正在检查特权组件……")
+                Text(L(.checkingHelper))
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .center)
@@ -216,21 +214,19 @@ private struct HelperMissingCard: View {
     let reason: String
 
     var body: some View {
-        Card(title: "需要先安装特权组件", systemImage: "lock.shield") {
+        Card(title: L(.needInstallTitle), systemImage: "lock.shield") {
             VStack(alignment: .leading, spacing: Design.Spacing.medium) {
-                Text("创建虚拟网卡和打开数据链路需要管理员权限。TetherKit 把这部分\n"
-                     + "放在一个独立的后台组件里，App 本身以普通用户身份运行。")
+                Text(L(.needInstallBody))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HelperInstallSection(
                     model: model,
-                    buttonTitle: "安装特权组件",
-                    detail: "组件会被装到 /Library/PrivilegedHelperTools 并注册为\n"
-                        + "LaunchDaemon。装好后本页自动恢复，不需要重启 App。")
+                    buttonTitle: L(.installHelperButton),
+                    detail: L(.installHelperDetail))
 
-                DisclosureGroup("查看连接失败的详细原因") {
+                DisclosureGroup(L(.showConnectFailureDetail)) {
                     Text(reason)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
@@ -254,18 +250,17 @@ private struct HelperOutdatedCard: View {
     let expected: Int
 
     var body: some View {
-        Card(title: "特权组件需要更新", systemImage: "arrow.triangle.2.circlepath") {
+        Card(title: L(.helperNeedsUpdateTitle), systemImage: "arrow.triangle.2.circlepath") {
             VStack(alignment: .leading, spacing: Design.Spacing.medium) {
-                Text("已安装的特权组件是升级前的版本，与当前 App 的通信接口对不上"
-                     + "（组件 v\(installed)，App 需要 v\(expected)）。")
+                Text(L(.helperNeedsUpdateBody, String(installed), String(expected)))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HelperInstallSection(
                     model: model,
-                    buttonTitle: "更新特权组件",
-                    detail: "更新会先注销旧版本再装新的，装好后本页自动恢复。")
+                    buttonTitle: L(.updateHelperButton),
+                    detail: L(.updateHelperDetail))
             }
         }
     }
@@ -292,7 +287,7 @@ private struct HelperInstallSection: View {
                         } else {
                             Image(systemName: "arrow.down.circle.fill")
                         }
-                        Text(model.isBusy ? "正在安装……" : buttonTitle)
+                        Text(model.isBusy ? L(.installingProgress) : buttonTitle)
                     }
                     .frame(minWidth: 132)
                 }
@@ -300,7 +295,7 @@ private struct HelperInstallSection: View {
                 .controlSize(.large)
                 .disabled(model.isBusy)
 
-                Text("会弹出系统授权框，需要输入一次管理员密码")
+                Text(L(.authorizationPromptHint))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -310,10 +305,10 @@ private struct HelperInstallSection: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            DisclosureGroup("改用终端安装") {
+            DisclosureGroup(L(.installViaTerminal)) {
                 VStack(alignment: .leading, spacing: Design.Spacing.tight) {
                     CopyableCommand(command: "sudo ./gui/Scripts/install-helper.sh")
-                    Text("在仓库根目录执行，效果与按钮完全相同。")
+                    Text(L(.installViaTerminalHint))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -346,11 +341,11 @@ struct CopyableCommand: View {
                     copied = false
                 }
             } label: {
-                Label(copied ? "已复制" : "复制", systemImage: copied ? "checkmark" : "doc.on.doc")
+                Label(L(copied ? .copied : .copy), systemImage: copied ? "checkmark" : "doc.on.doc")
                     .labelStyle(.iconOnly)
             }
             .buttonStyle(.borderless)
-            .help(copied ? "已复制到剪贴板" : "复制命令")
+            .help(L(copied ? .copiedToClipboard : .copyCommand))
         }
         .padding(Design.Spacing.small)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: Design.Radius.control))
@@ -363,10 +358,9 @@ private struct EnvironmentWarningCard: View {
 
     var body: some View {
         if let environment, !environment.sysctlsOK {
-            Card(title: "系统参数需要调整", systemImage: "exclamationmark.triangle.fill") {
+            Card(title: L(.sysctlNeedsFixTitle), systemImage: "exclamationmark.triangle.fill") {
                 VStack(alignment: .leading, spacing: Design.Spacing.small) {
-                    Text("下面这些开关会在虚拟网卡**创建时**被快照进去，创建后再改无效，\n"
-                         + "因此必须先修正再连接：")
+                    Text(L(.sysctlNeedsFixBody))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -30,6 +30,20 @@
     <key>CFBundleVersion</key>
     <string>__TETHERKIT_VERSION__</string>
 
+    <!-- 支持的界面语言。
+         文案本身是编进二进制的（见 TetherKitIPC/Localization.swift 里为什么不
+         走 .lproj），所以这里**不影响**实际显示什么 —— 它的作用是让
+         「系统设置 → 通用 → 语言与地区 → 应用程序」里能列出 TetherKit 并给出
+         这两个选项。App 内的语言菜单与这条各自独立，两者都能用。
+         第一项同时充当 CFBundleDevelopmentRegion 的角色。 -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+    </array>
+
     <!-- Swift 的 Observation 与 ContentUnavailableView 需要 macOS 14。
          命令行部分仍然支持 13.3，两者是各自独立的产物。 -->
     <key>LSMinimumSystemVersion</key>

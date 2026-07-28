@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TetherKitIPC
 
 /// TetherKit 的图形界面入口。
 ///
@@ -49,11 +50,7 @@ struct TetherKitApplication: App {
             CommandGroup(replacing: .newItem) {}
             // 「检查更新…」放在 App 菜单「关于」下面的惯例位置。
             // 只查不换 —— 原因见 UpdateChecker.swift 的类型注释。
-            CommandGroup(after: .appInfo) {
-                Button("检查更新…") {
-                    Task { await model.checkForUpdates() }
-                }
-            }
+            CommandGroup(after: .appInfo) { AppMenuItems(model: model) }
         }
 
         // 菜单栏常驻项：图标 + 实时速率。
@@ -66,6 +63,54 @@ struct TetherKitApplication: App {
             MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+/// App 菜单里 TetherKit 自己的那几项。
+///
+/// ★ 为什么要包成一个 View，而不是把 Button 直接摊在 CommandGroup 里 ★
+///
+///   摊开写的话，每个 Button 的标签各自是一个独立的表达式，SwiftUI 只会在
+///   「它依赖的东西变了」时重算。而文案来自全局查表，`L(.menuCheckForUpdates)`
+///   不依赖任何 @Observable 属性 —— 于是切完语言，语言菜单自己变了（它读了
+///   `languagePreference`），旁边的「检查更新…」却还是旧语言。实测确认过。
+///
+///   包成一个 View 并在体里读一次 `languageRevision`，整组就一起重算了。
+private struct AppMenuItems: View {
+    var model: AppModel
+
+    var body: some View {
+        // 读它就是为了建立依赖，值本身用不上。
+        let _ = model.languageRevision
+
+        Button(L(.menuCheckForUpdates)) {
+            Task { await model.checkForUpdates() }
+        }
+        // 语言放在 App 菜单而不是主界面上：切语言是「设置一次就再也不碰」的
+        // 动作，而主界面的高度预算早就见底了（见 ContentView 里管理行那段说明），
+        // 不该为它再挤出一行。
+        LanguageMenu(model: model)
+    }
+}
+
+/// App 菜单里的语言选择。
+///
+/// 每一项都直接写母语名字（「中文」/「English」），不跟随当前界面语言翻译 ——
+/// 语言菜单是给「现在看不懂界面」的人用的，把选项也翻译掉就等于没有出口。
+/// 「跟随系统」是唯一例外：它描述的是行为而非语言，所以随界面走。
+private struct LanguageMenu: View {
+    var model: AppModel
+
+    var body: some View {
+        Menu(L(.languageMenuTitle)) {
+            Picker(L(.languageLabel), selection: Bindable(model).languagePreference) {
+                Text(L(.languageSystem)).tag(LanguagePreference.system)
+                Text(verbatim: "中文").tag(LanguagePreference.chinese)
+                Text(verbatim: "English").tag(LanguagePreference.english)
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        }
     }
 }
 
@@ -94,6 +139,10 @@ private struct MainWindowRoot: View {
     var body: some View {
         ContentView(model: model)
             .frame(minWidth: Design.Window.minWidth, minHeight: Design.Window.minHeight)
+            // 文案来自全局查表，改语言不会让任何 @Observable 属性「看起来」变了，
+            // SwiftUI 因此不会重算视图体。用一个显式的版本号做 identity，
+            // 强制整棵树重建 —— 语言切换是极低频动作，这点代价无所谓。
+            .id(model.languageRevision)
             .task {
                 // 轮询在这里启动（幂等）。窗口关闭后它继续跑 ——
                 // 这正是菜单栏能实时更新的前提。

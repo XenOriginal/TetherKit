@@ -36,7 +36,8 @@ public enum HelperConstants {
     /// 修订历史：
     ///   1 —— 初版
     ///   2 —— 特权方法的应答从 (String?) 改成 (String?, Bool)，区分授权失败
-    public static let protocolRevision = 2
+    ///   3 —— 新增 setLanguage，让 helper 的提示与库日志跟随界面语言
+    public static let protocolRevision = 3
 
     /// 把修订号编进版本串。
     ///

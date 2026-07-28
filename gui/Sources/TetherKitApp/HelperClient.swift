@@ -21,11 +21,11 @@ final class HelperClient {
         var errorDescription: String? {
             switch self {
             case .unreachable(let detail):
-                return "无法连接到特权组件：\(detail)"
+                return L(.helperConnectFailed, detail)
             case .helper(let message), .authorizationRejected(let message):
                 return message
             case .malformedResponse:
-                return "特权组件的应答无法解析，可能是版本不一致"
+                return L(.helperReplyUnparsable)
             }
         }
 
@@ -181,6 +181,15 @@ final class HelperClient {
                 }
                 guarded.resume(returning: feed)
             }
+        }
+    }
+
+    /// 把界面语言告诉 helper。**失败静默吞掉** —— 语言没同步上只是日志卡里
+    /// 混了另一种语言，不该让它把「连不上 helper」的错误弹给用户（正常启动
+    /// 顺序里 helper 可能还没装）。
+    func setLanguage(_ language: Language) async {
+        _ = try? await invoke { proxy, guarded in
+            proxy.setLanguage(language.rawValue) { guarded.resume(returning: ()) }
         }
     }
 

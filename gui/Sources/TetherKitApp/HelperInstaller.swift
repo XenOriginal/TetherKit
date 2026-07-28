@@ -65,15 +65,13 @@ enum HelperInstaller {
         var errorDescription: String? {
             switch self {
             case .payloadMissing:
-                return "这份 TetherKit 不带安装载荷（可能是开发构建）。"
-                    + "请在终端执行：sudo ./gui/Scripts/install-helper.sh"
+                return L(.installerNoPayload)
             case .executorUnavailable:
-                return "当前系统不再提供 App 内安装所需的接口。"
-                    + "请在终端执行：sudo ./gui/Scripts/install-helper.sh"
+                return L(.installerAPIUnavailable)
             case .launchFailed(let status):
-                return "无法启动安装/卸载程序（\(status)）"
+                return L(.installerLaunchFailed, Int(status))
             case .userCancelled:
-                return "已取消授权"
+                return L(.authorizationCancelled)
             }
         }
     }

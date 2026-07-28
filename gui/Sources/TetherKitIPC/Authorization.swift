@@ -71,11 +71,11 @@ public enum AuthorizationBroker {
         public var errorDescription: String? {
             switch self {
             case .userCancelled:
-                return "已取消授权"
+                return L(.authorizationCancelled)
             case .denied(let status):
-                return "授权未通过（\(status)）"
+                return L(.authorizationDenied, Int(status))
             case .internalFailure(let status):
-                return "无法创建授权会话（\(status)）"
+                return L(.authorizationSessionFailed, Int(status))
             }
         }
     }
@@ -194,11 +194,11 @@ public enum AuthorizationVerifier {
         public var errorDescription: String? {
             switch self {
             case .malformedCredential:
-                return "授权凭据格式不正确"
+                return L(.authorizationBlobMalformed)
             case .restoreFailed(let status):
-                return "无法还原授权凭据（\(status)）"
+                return L(.authorizationRestoreFailed, Int(status))
             case .rightNotHeld(let status):
-                return "调用方没有执行该操作所需的授权（\(status)）"
+                return L(.authorizationRightMissing, Int(status))
             }
         }
     }

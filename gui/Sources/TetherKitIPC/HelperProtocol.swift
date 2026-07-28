@@ -57,4 +57,16 @@ import Foundation
 
     /// 取走 helper 侧积压的日志与提示。
     func drainFeed(reply: @escaping (Data?) -> Void)
+
+    /// 告诉 helper 用哪种语言渲染它产生的文字。**不要求授权** —— 它只影响
+    /// 文案，改不了任何行为。
+    ///
+    /// 为什么必须有这一条：helper 以 root 跑在 launchd 下，看不到用户的语言
+    /// 偏好，而它产生的提示（「会话已停止」）与 libtetherkit 的日志都会原样
+    /// 显示在 App 的日志卡里。不同步的话界面是一种语言、日志是另一种。
+    ///
+    /// 参数是 `Language` 的 rawValue（`"chinese"` / `"english"`）。传字符串而
+    /// 不是整数：将来加语言时，旧 helper 收到不认识的值会原样忽略，而不是
+    /// 把它当成某个碰巧存在的枚举值。
+    func setLanguage(_ rawValue: String, reply: @escaping () -> Void)
 }
