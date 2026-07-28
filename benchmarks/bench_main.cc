@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "bench_common.h"
+#include "bench_net.h"
 #include "bench_rndis.h"
 #include "harness.h"
 #include "tetherkit/common/scheduling.h"
@@ -40,6 +41,22 @@ int main() {
     tetherkit::bench::Runner runner;
     tetherkit::bench::RegisterRndisBenchmarks(runner);
     tetherkit::bench::PrintMarkdownReport(runner.RunAll(), "RNDIS 编解码（tk_rndis）");
+  }
+  {
+    // 链路层需要 root。跳过时也要在报告里留痕 —— 否则读者无从判断这份报告
+    // 到底是「测过了没问题」还是「压根没测」。
+    tetherkit::bench::Runner runner;
+    std::string skip_reason;
+    if (tetherkit::bench::RegisterNetBenchmarks(runner, skip_reason)) {
+      tetherkit::bench::PrintMarkdownReport(runner.RunAll(), "feth / BPF 链路层（tk_net，需 root）");
+      // 必须在这里拆，不能留给静态析构 —— 原因见 bench_net.h。
+      tetherkit::bench::ShutdownNetBenchmarks();
+    } else {
+      std::printf("## feth / BPF 链路层（tk_net，需 root）\n\n");
+      std::printf("**本次未测量** —— %s。\n\n", skip_reason.c_str());
+      std::printf("补测方法：`sudo ./build/bin/tetherkit_bench > docs/BENCHMARKS.md`\n\n");
+      std::fprintf(stderr, "  跳过链路层基准：%s\n", skip_reason.c_str());
+    }
   }
 
   std::fprintf(stderr, "测量完成。\n");

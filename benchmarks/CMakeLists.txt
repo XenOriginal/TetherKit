@@ -8,6 +8,7 @@ add_executable(
   tetherkit_bench
   bench_main.cc
   bench_common.cc
+  bench_net.cc
   bench_rndis.cc
   harness.cc)
 
