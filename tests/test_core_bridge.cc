@@ -219,7 +219,11 @@ TEST_CASE("RX 队列满时丢弃并计数，不阻塞生产者") {
   bridge.Stop();
 }
 
-TEST_CASE("TX 背压：传输池占满时丢弃并计入背压事件") {
+TEST_CASE("TX 背压：传输池占满时等待而不丢弃，容量恢复后全部送达") {
+  // 这是真机丢帧根因的回归测试：旧实现在 SendFrames 返回 0 时立即丢弃批次
+  // 剩余帧（bridge.cc 曾有一条「等待会变成不可见的内核丢包」的错误论证），
+  // 高负载下把 30%+ 的 TX 流量丢在了传输池门口。正确行为是等槽位空出来再重
+  // 试 —— 突发由上游的内核 BPF 缓冲吸收。
   MockDataChannel channel;
   LoopbackLink link(LoopbackConfig{.inbound_capacity = 4096, .max_frames_per_batch = 64});
   Bridge bridge(channel, link, TestConfig());
@@ -228,23 +232,125 @@ TEST_CASE("TX 背压：传输池占满时丢弃并计入背压事件") {
   channel.SetAcceptLimit(0);
   REQUIRE(bridge.Start().has_value());
 
+  constexpr std::uint32_t kFrameCount = 200;
+  for (const std::vector<std::byte>& frame : MakeFrames(kFrameCount, 512)) {
+    REQUIRE(link.PushInbound(frame));
+  }
+
+  // 桥接层应转入等待：背压事件在涨、WaitForSendCapacity 被调用，
+  // 但一帧都没有丢、也一帧都没有发出。
+  REQUIRE(WaitFor([&] { return bridge.Snapshot().tx_backpressure_events > 0; }));
+  REQUIRE(WaitFor([&] { return channel.WaitCalls() > 0; }));
+  CHECK(bridge.Snapshot().tx.TotalDropped() == 0);
+  CHECK(channel.SentFrameCount() == 0);
+
+  // 容量恢复（相当于在飞传输完成、槽位归还）：先前顶在门口的帧必须
+  // **一帧不少**地送达，且顺序不变。
+  // 等待条件必须同时覆盖 mock 计数与桥接层计数：mock 在 SendFrames 内部先递增、
+  // 桥接层在返回后才 AddBatch，两者之间没有 happens-before —— 只等 mock 计数就
+  // 断言桥接层计数，会在慢机器上偶发读到差一个分片的旧值。
+  channel.SetAcceptLimit(0xFFFF'FFFFU);
+  REQUIRE(WaitFor([&] {
+    return channel.SentFrameCount() >= kFrameCount &&
+           bridge.Snapshot().tx.frames >= kFrameCount;
+  }));
+
+  const BridgeStats stats = bridge.Snapshot();
+  CHECK(stats.tx.TotalDropped() == 0);
+  CHECK(stats.tx.frames == kFrameCount);
+  CHECK(channel.SentFrameCount() == kFrameCount);
+
+  const auto delivered = channel.DrainSentToDevice();
+  REQUIRE(delivered.size() == kFrameCount);
+  const auto expected = MakeFrames(kFrameCount, 512);
+  for (std::size_t i = 0; i < delivered.size(); ++i) {
+    CHECK(delivered[i] == expected[i]);
+  }
+
+  bridge.Stop();
+}
+
+TEST_CASE("TX 背压：部分接纳时剩余帧重试送达，不丢不乱序") {
+  // 池没满但一次装不下整个分片（SendFrames 部分接纳）：剩余帧必须原地重试。
+  // 每次最多吃 7 帧、分片 32 帧，逼出「多次部分接纳拼完一个分片」的路径。
+  MockDataChannel channel;
+  LoopbackLink link(LoopbackConfig{.inbound_capacity = 4096, .max_frames_per_batch = 64});
+  Bridge bridge(channel, link, TestConfig());
+
+  channel.SetAcceptLimit(7);
+  REQUIRE(bridge.Start().has_value());
+
+  constexpr std::uint32_t kFrameCount = 100;
+  for (const std::vector<std::byte>& frame : MakeFrames(kFrameCount, 512)) {
+    REQUIRE(link.PushInbound(frame));
+  }
+
+  REQUIRE(WaitFor([&] { return channel.SentFrameCount() >= kFrameCount; }));
+  CHECK(bridge.Snapshot().tx.TotalDropped() == 0);
+
+  const auto delivered = channel.DrainSentToDevice();
+  REQUIRE(delivered.size() == kFrameCount);
+  const auto expected = MakeFrames(kFrameCount, 512);
+  for (std::size_t i = 0; i < delivered.size(); ++i) {
+    CHECK(delivered[i] == expected[i]);
+  }
+
+  bridge.Stop();
+}
+
+TEST_CASE("TX 背压：等待期间 Stop() 能及时返回") {
+  // 背压等待引入了新的阻塞点，停机不能被它卡住：TX 线程每次醒来（至多约
+  // 50 ms）都要重查停机标志。
+  MockDataChannel channel;
+  LoopbackLink link(LoopbackConfig{.inbound_capacity = 4096, .max_frames_per_batch = 64});
+  Bridge bridge(channel, link, TestConfig());
+
+  channel.SetAcceptLimit(0);
+  REQUIRE(bridge.Start().has_value());
+
   for (const std::vector<std::byte>& frame : MakeFrames(200, 512)) {
     REQUIRE(link.PushInbound(frame));
   }
-
   REQUIRE(WaitFor([&] { return bridge.Snapshot().tx_backpressure_events > 0; }));
 
-  const BridgeStats stats = bridge.Snapshot();
-  CHECK(stats.tx_backpressure_events > 0);
-  CHECK(stats.tx.TotalDropped() > 0);
-  CHECK(channel.SentFrameCount() == 0);
+  const auto stop_begin = std::chrono::steady_clock::now();
+  bridge.Stop();
+  const auto stop_elapsed = std::chrono::steady_clock::now() - stop_begin;
 
-  // 恢复容量后应能继续搬运。
-  channel.SetAcceptLimit(0xFFFF'FFFFU);
-  for (const std::vector<std::byte>& frame : MakeFrames(50, 512)) {
+  CHECK_FALSE(bridge.Running());
+  // 上界取「等待超时 + BPF 读超时 + 富余」。真实约束是几十毫秒量级，
+  // 这里放宽到 2 秒只为不在慢 CI 上闪断。
+  CHECK(stop_elapsed < std::chrono::seconds(2));
+  // 停机时未送出的帧计入丢弃 —— 账要能对上，不能凭空消失。
+  CHECK(bridge.Snapshot().tx.TotalDropped() > 0);
+}
+
+TEST_CASE("TX 背压：等待期间落下暂停，剩余帧被丢弃且线程存活") {
+  // 暂停（RNDIS 软复位）优先于等待：设备反正会丢弃未完成的包，攒着没有意义。
+  MockDataChannel channel;
+  LoopbackLink link(LoopbackConfig{.inbound_capacity = 4096, .max_frames_per_batch = 64});
+  Bridge bridge(channel, link, TestConfig());
+
+  channel.SetAcceptLimit(0);
+  REQUIRE(bridge.Start().has_value());
+
+  for (const std::vector<std::byte>& frame : MakeFrames(100, 512)) {
     REQUIRE(link.PushInbound(frame));
   }
-  REQUIRE(WaitFor([&] { return channel.SentFrameCount() > 0; }));
+  REQUIRE(WaitFor([&] { return bridge.Snapshot().tx_backpressure_events > 0; }));
+  CHECK(bridge.Snapshot().tx.TotalDropped() == 0);
+
+  bridge.SetPaused(true);
+  REQUIRE(WaitFor([&] { return bridge.Snapshot().tx.TotalDropped() > 0; }));
+  CHECK(channel.SentFrameCount() == 0);
+
+  // 恢复后新的帧照常送达 —— 线程没有卡死在等待里。
+  bridge.SetPaused(false);
+  channel.SetAcceptLimit(0xFFFF'FFFFU);
+  for (const std::vector<std::byte>& frame : MakeFrames(20, 512)) {
+    REQUIRE(link.PushInbound(frame));
+  }
+  REQUIRE(WaitFor([&] { return channel.SentFrameCount() >= 20; }));
 
   bridge.Stop();
 }
