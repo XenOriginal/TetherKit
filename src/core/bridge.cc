@@ -5,6 +5,7 @@
 #include <format>
 #include <thread>
 
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 #include "tetherkit/common/scheduling.h"
 
@@ -48,7 +49,7 @@ Bridge::~Bridge() {
 
 Status Bridge::Start() {
   if (running_.load(std::memory_order_acquire)) {
-    return std::unexpected(Error::Generic("桥接层已在运行"));
+    return std::unexpected(Error::Generic(Tr(Msg::kCoreBridgeAlreadyRunning)));
   }
   stop_requested_.store(false, std::memory_order_release);
 
@@ -61,11 +62,11 @@ Status Bridge::Start() {
   receive_injector_ = std::thread([this] { RunReceiveInjector(); });
   transmit_extractor_ = std::thread([this] { RunTransmitExtractor(); });
 
-  TETHERKIT_INFO(
-      "数据路径已启动：RX 队列 {} 帧（{} KiB），RX 写批 {} 帧，TX 提交批 {} 帧，"
-      "链路批量写 {}",
-      rx_ring_->Capacity(), rx_ring_->StorageBytes() / 1024, config_.rx_write_batch,
-      config_.tx_submit_batch, link_->SupportsBatchWrite() ? "可用" : "不可用（逐帧写）");
+  TETHERKIT_INFO_TR(Msg::kCoreDataPathStarted, rx_ring_->Capacity(),
+                    rx_ring_->StorageBytes() / 1024, config_.rx_write_batch,
+                    config_.tx_submit_batch,
+                    Text(link_->SupportsBatchWrite() ? Msg::kCoreBatchWriteAvailable
+                                                     : Msg::kCoreBatchWriteUnavailable));
   return Ok();
 }
 
@@ -102,7 +103,7 @@ void Bridge::Stop() {
 
   data_channel_->Shutdown();
 
-  TETHERKIT_INFO("数据路径已停止");
+  TETHERKIT_INFO_TR(Msg::kCoreDataPathStopped);
 }
 
 // =============================================================================
@@ -129,7 +130,7 @@ void Bridge::SetPaused(bool paused) noexcept {
 
 void Bridge::RunReceiveInjector() noexcept {
   ConfigureCurrentThread("rx-inject", ThreadRole::kDataPath);
-  TETHERKIT_DEBUG("RX 注入线程已启动");
+  TETHERKIT_DEBUG_TR(Msg::kCoreRxInjectorStarted);
 
   std::uint32_t idle_spins = 0;
 
@@ -176,8 +177,8 @@ void Bridge::RunReceiveInjector() noexcept {
       const auto result = link_->WriteFrames(rx_batch_);
       if (!result) {
         counters_.rx.AddIoError();
-        TETHERKIT_WARN("向链路写入 {} 帧失败：{}", rx_batch_.size(),
-                       result.error().ToString());
+        TETHERKIT_WARN_TR(Msg::kCoreLinkWriteFailed, rx_batch_.size(),
+                          result.error().ToString());
         // 写失败不退出线程 —— 可能只是接口暂时 down。批量会话照常释放槽位
         // （帧已经没法送出去了，留着只会堵住队列）。
       } else {
@@ -196,7 +197,7 @@ void Bridge::RunReceiveInjector() noexcept {
     }  // 批量会话析构 → 一次 PublishRead(n)
   }
 
-  TETHERKIT_DEBUG("RX 注入线程已退出");
+  TETHERKIT_DEBUG_TR(Msg::kCoreRxInjectorExited);
 }
 
 // =============================================================================
@@ -205,7 +206,7 @@ void Bridge::RunReceiveInjector() noexcept {
 
 void Bridge::RunTransmitExtractor() noexcept {
   ConfigureCurrentThread("tx-extract", ThreadRole::kDataPath);
-  TETHERKIT_DEBUG("TX 抽取线程已启动");
+  TETHERKIT_DEBUG_TR(Msg::kCoreTxExtractorStarted);
 
   while (!stop_requested_.load(std::memory_order_acquire)) {
     // 阻塞读。BPF 在 BIOCIMMEDIATE=1 下会自动把期间累积的包整批交付，
@@ -213,7 +214,7 @@ void Bridge::RunTransmitExtractor() noexcept {
     const auto batch = link_->ReadFrames();
     if (!batch) {
       counters_.tx.AddIoError();
-      TETHERKIT_WARN("从链路读取失败：{}", batch.error().ToString());
+      TETHERKIT_WARN_TR(Msg::kCoreLinkReadFailed, batch.error().ToString());
       // 读失败可能是接口被拆了。稍等再试，避免忙循环刷日志。
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
       continue;
@@ -253,7 +254,7 @@ void Bridge::RunTransmitExtractor() noexcept {
         // 放弃的剩余帧必须计入丢弃 —— 曾经这里只 +1 个 io_error 就 break，
         // 剩余帧不进任何计数器，统计上凭空消失。
         counters_.tx.AddDroppedFull(batch->frames.size() - offset);
-        TETHERKIT_WARN("向 USB 提交 {} 帧失败：{}", chunk, sent.error().ToString());
+        TETHERKIT_WARN_TR(Msg::kCoreUsbSubmitFailed, chunk, sent.error().ToString());
         break;
       }
 
@@ -290,7 +291,7 @@ void Bridge::RunTransmitExtractor() noexcept {
     }
   }
 
-  TETHERKIT_DEBUG("TX 抽取线程已退出");
+  TETHERKIT_DEBUG_TR(Msg::kCoreTxExtractorExited);
 }
 
 // =============================================================================
@@ -317,10 +318,8 @@ std::string FormatStatsLine(const BridgeStats& previous, const BridgeStats& curr
   const DirectionSnapshot rx_delta = current.rx - previous.rx;
   const DirectionSnapshot tx_delta = current.tx - previous.tx;
 
-  return std::format(
-      "RX {:>8.0f} pps / {:>8.2f} Mbps（丢 {}）  |  "
-      "TX {:>8.0f} pps / {:>8.2f} Mbps（丢 {}）  |  "
-      "队列深度 {}  内核丢包 {}  背压 {}",
+  return Tr(
+      Msg::kCoreStatsLine,
       ToPacketsPerSecond(rx_delta.frames, seconds),
       ToMegabitsPerSecond(rx_delta.bytes, seconds), rx_delta.TotalDropped(),
       ToPacketsPerSecond(tx_delta.frames, seconds),

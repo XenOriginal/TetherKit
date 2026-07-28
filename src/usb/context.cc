@@ -2,6 +2,7 @@
 
 #include <format>
 
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 #include "tetherkit/common/scheduling.h"
 
@@ -25,11 +26,12 @@ Result<std::unique_ptr<Context>> Context::Create() {
 
   const int rc = ::libusb_init(&context->context_);
   if (rc != LIBUSB_SUCCESS) {
-    return std::unexpected(Error::FromLibUsb(rc, "libusb_init 失败"));
+    return std::unexpected(Error::FromLibUsb(rc, Tr(Msg::kUsbInitFailed)));
   }
 
-  TETHERKIT_INFO("libusb 已初始化：{}（热插拔 {}）", VersionString(),
-                 SupportsHotplug() ? "支持" : "不支持");
+  TETHERKIT_INFO_TR(Msg::kUsbInitialized, VersionString(),
+                    Text(SupportsHotplug() ? Msg::kUsbHotplugSupported
+                                           : Msg::kUsbHotplugUnsupported));
 
   context->running_.store(true, std::memory_order_release);
   context->event_thread_ = std::thread([raw = context.get()] { raw->RunEventLoop(); });
@@ -52,13 +54,13 @@ Context::~Context() {
     ::libusb_exit(context_);
     context_ = nullptr;
   }
-  TETHERKIT_DEBUG("libusb 上下文已释放");
+  TETHERKIT_DEBUG_TR(Msg::kUsbContextReleased);
 }
 
 std::string Context::VersionString() {
   const ::libusb_version* version = ::libusb_get_version();
   if (version == nullptr) {
-    return "未知版本";
+    return std::string{Text(Msg::kUsbUnknownVersion)};
   }
   return std::format("{}.{}.{}.{}", version->major, version->minor, version->micro,
                      version->nano);
@@ -77,7 +79,7 @@ void Context::RequestStop() noexcept {
 
 void Context::RunEventLoop() noexcept {
   ConfigureCurrentThread("usb-event", ThreadRole::kDataPath);
-  TETHERKIT_DEBUG("libusb 事件线程已启动");
+  TETHERKIT_DEBUG_TR(Msg::kUsbEventThreadStarted);
 
   ::timeval timeout{};
   timeout.tv_sec = kEventLoopTimeoutSeconds;
@@ -94,16 +96,15 @@ void Context::RunEventLoop() noexcept {
     }
     if (rc == LIBUSB_ERROR_NO_DEVICE) {
       // 设备拔了。不是事件循环的错，交给上层的重连逻辑处理，这里继续跑。
-      TETHERKIT_DEBUG("libusb 事件循环收到 NO_DEVICE，继续等待");
+      TETHERKIT_DEBUG_TR(Msg::kUsbEventLoopNoDevice);
       continue;
     }
-    TETHERKIT_ERROR("libusb_handle_events 返回 {}（{}），事件线程退出",
-                    ::libusb_error_name(rc), rc);
+    TETHERKIT_ERROR_TR(Msg::kUsbHandleEventsFailed, ::libusb_error_name(rc), rc);
     break;
   }
 
   running_.store(false, std::memory_order_release);
-  TETHERKIT_DEBUG("libusb 事件线程已退出");
+  TETHERKIT_DEBUG_TR(Msg::kUsbEventThreadExited);
 }
 
 }  // namespace tetherkit::usb

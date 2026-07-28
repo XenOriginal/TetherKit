@@ -25,6 +25,7 @@
 
 #include <doctest.h>
 
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/net/bpf_link.h"
 #include "tetherkit/net/darwin_abi.h"
 #include "tetherkit/net/feth_device.h"
@@ -224,8 +225,13 @@ TEST_CASE("feth 创建期 sysctl 清单非空且都有说明") {
   CHECK(std::size(kRequiredFethSysctls) > 0);
   for (const RequiredFethSysctl& entry : kRequiredFethSysctls) {
     CHECK(entry.name != nullptr);
-    CHECK(entry.why != nullptr);
-    CHECK(std::string{entry.why}.size() > 10);  // 说明必须是人话，不能只有一个词
+    // why 存的是文案标识，两种语言都必须真的有译文（漏译会渲染成空串，
+    // 于是 sysctl 报错里那句「原因：」后面什么都没有）。
+    for (const auto language : {tetherkit::Language::kChinese, tetherkit::Language::kEnglish}) {
+      const std::string_view why = tetherkit::TextIn(language, entry.why);
+      // 说明必须是人话，不能只有一个词。
+      CHECK(why.size() > 10);
+    }
   }
 }
 

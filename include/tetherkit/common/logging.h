@@ -15,6 +15,8 @@
 #include <string_view>
 #include <utility>
 
+#include "tetherkit/common/i18n.h"
+
 namespace tetherkit {
 
 enum class LogLevel : std::uint8_t {
@@ -88,7 +90,8 @@ void LogFormatted(LogLevel level, std::string_view file, unsigned line,
   try {
     EmitLogLine(level, file, line, std::format(fmt, std::forward<Args>(args)...));
   } catch (...) {  // NOLINT(bugprone-empty-catch)
-    EmitLogLine(LogLevel::kError, file, line, "<日志格式化失败>");
+    // Text() 只是查表返回 string_view，不分配、不抛 —— 在这个 catch 里是安全的。
+    EmitLogLine(LogLevel::kError, file, line, Text(Msg::kCommonLogFormatFailed));
   }
 }
 
@@ -110,5 +113,24 @@ void LogFormatted(LogLevel level, std::string_view file, unsigned line,
 #define TETHERKIT_INFO(...) TETHERKIT_LOG(::tetherkit::LogLevel::kInfo, __VA_ARGS__)
 #define TETHERKIT_WARN(...) TETHERKIT_LOG(::tetherkit::LogLevel::kWarn, __VA_ARGS__)
 #define TETHERKIT_ERROR(...) TETHERKIT_LOG(::tetherkit::LogLevel::kError, __VA_ARGS__)
+
+/// 打一条**可翻译**的日志。`id` 是 `Msg` 枚举值，其后的参数与 std::format 一致。
+///
+/// 为什么要有这一组而不是直接写 `TETHERKIT_INFO("{}", Tr(id, ...))`：写成宏才能
+/// 让 Tr() 留在级别判断的**内部**，级别没开时连查表带格式化一起省掉 —— 上面那种
+/// 手写法很容易不小心把 Tr() 放到宏外面，每条日志白算一次。
+#define TETHERKIT_LOG_TR(level, id, ...) \
+  TETHERKIT_LOG(level, "{}", ::tetherkit::Tr((id)__VA_OPT__(, ) __VA_ARGS__))
+
+#define TETHERKIT_TRACE_TR(id, ...) \
+  TETHERKIT_LOG_TR(::tetherkit::LogLevel::kTrace, id __VA_OPT__(, ) __VA_ARGS__)
+#define TETHERKIT_DEBUG_TR(id, ...) \
+  TETHERKIT_LOG_TR(::tetherkit::LogLevel::kDebug, id __VA_OPT__(, ) __VA_ARGS__)
+#define TETHERKIT_INFO_TR(id, ...) \
+  TETHERKIT_LOG_TR(::tetherkit::LogLevel::kInfo, id __VA_OPT__(, ) __VA_ARGS__)
+#define TETHERKIT_WARN_TR(id, ...) \
+  TETHERKIT_LOG_TR(::tetherkit::LogLevel::kWarn, id __VA_OPT__(, ) __VA_ARGS__)
+#define TETHERKIT_ERROR_TR(id, ...) \
+  TETHERKIT_LOG_TR(::tetherkit::LogLevel::kError, id __VA_OPT__(, ) __VA_ARGS__)
 
 }  // namespace tetherkit

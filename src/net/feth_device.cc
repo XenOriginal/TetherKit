@@ -15,6 +15,7 @@
 #include <memory>
 #include <utility>
 
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 #include "tetherkit/net/darwin_abi.h"
 
@@ -43,7 +44,7 @@ class IoctlSocket {
   [[nodiscard]] static Result<IoctlSocket> Open() {
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-      return std::unexpected(Error::FromErrno(0, "创建用于接口 ioctl 的套接字失败"));
+      return std::unexpected(Error::FromErrno(0, Tr(Msg::kNetIoctlSocketFailed)));
     }
     return IoctlSocket{fd};
   }
@@ -90,7 +91,7 @@ class IoctlSocket {
 [[nodiscard]] Result<::ifreq> MakeIfreq(std::string_view name) {
   if (name.size() >= kInterfaceNameCapacity) {
     return std::unexpected(Error::Generic(
-        std::format("接口名 \"{}\" 超过 {} 字节上限", name, kInterfaceNameCapacity - 1)));
+        Tr(Msg::kNetInterfaceNameOverLimit, name, kInterfaceNameCapacity - 1)));
   }
   ::ifreq request{};
   std::memcpy(request.ifr_name, name.data(), name.size());
@@ -102,7 +103,7 @@ class IoctlSocket {
   std::int32_t value = 0;
   std::size_t size = sizeof(value);
   if (::sysctlbyname(name, &value, &size, nullptr, 0) != 0) {
-    return std::unexpected(Error::FromErrno(0, std::format("读取 sysctl {} 失败", name)));
+    return std::unexpected(Error::FromErrno(0, Tr(Msg::kNetSysctlReadFailed, name)));
   }
   return value;
 }
@@ -112,7 +113,7 @@ class IoctlSocket {
                                         unsigned long ioctl_request, unsigned long command,
                                         FethRequest& payload, std::string_view what) {
   if (interface_name.size() >= kInterfaceNameCapacity) {
-    return std::unexpected(Error::Generic(std::format("接口名 \"{}\" 过长", interface_name)));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetInterfaceNameTooLong, interface_name)));
   }
 
   IfDrv driver{};
@@ -141,8 +142,7 @@ bool IsRunningAsRoot() noexcept {
 Result<std::uint32_t> QueryFethMaxMtu() {
   TETHERKIT_ASSIGN_OR_RETURN(const std::int32_t value, ReadInt32Sysctl("net.link.fake.max_mtu"));
   if (value <= 0) {
-    return std::unexpected(
-        Error::Generic(std::format("net.link.fake.max_mtu 返回了非法值 {}", value)));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetFethMaxMtuInvalid, value)));
   }
   return static_cast<std::uint32_t>(value);
 }
@@ -152,16 +152,13 @@ Status VerifyFethSysctls() {
     const auto value = ReadInt32Sysctl(entry.name);
     if (!value) {
       // 某些 sysctl 在特定 macOS 版本上可能不存在；缺失不算错误，只记一条。
-      TETHERKIT_DEBUG("sysctl {} 不可读（{}），跳过校验", entry.name, value.error().ToString());
+      TETHERKIT_DEBUG_TR(Msg::kNetSysctlUnreadableSkipped, entry.name,
+                         value.error().ToString());
       continue;
     }
     if (*value != entry.required_value) {
-      return std::unexpected(Error::Generic(std::format(
-          "sysctl {} 当前是 {}，要求 {}。原因：{}。\n"
-          "  这个开关在 feth 创建时被快照进接口，创建后再改无效，因此必须先修正：\n"
-          "    sudo sysctl -w {}={}",
-          entry.name, *value, entry.required_value, entry.why, entry.name,
-          entry.required_value)));
+      return std::unexpected(Error::Generic(Tr(Msg::kNetSysctlMismatch, entry.name, *value,
+                                               entry.required_value, Text(entry.why))));
     }
   }
   return Ok();
@@ -178,10 +175,10 @@ Status DestroyInterfaceByName(std::string_view name) {
   if (const auto status = socket.Call(SIOCIFDESTROY, &request, "ioctl(SIOCIFDESTROY)"); !status) {
     Error error = status.error();
     return std::unexpected(
-        std::move(error).WithContext(std::format("销毁残留的虚拟网卡 {} 失败", name)));
+        std::move(error).WithContext(Tr(Msg::kNetDestroyOrphanFailed, name)));
   }
   NotifyRegistry(name, false);
-  TETHERKIT_INFO("已销毁残留的虚拟网卡 {}", name);
+  TETHERKIT_INFO_TR(Msg::kNetDestroyedOrphan, name);
   return Ok();
 }
 
@@ -212,21 +209,21 @@ void FethInterface::Destroy() noexcept {
 
   const auto socket = IoctlSocket::Open();
   if (!socket) {
-    TETHERKIT_ERROR("销毁 {} 失败：{}", name, socket.error().ToString());
+    TETHERKIT_ERROR_TR(Msg::kNetDestroyFailed, name, socket.error().ToString());
     return;
   }
   auto request = MakeIfreq(name);
   if (!request) {
-    TETHERKIT_ERROR("销毁 {} 失败：{}", name, request.error().ToString());
+    TETHERKIT_ERROR_TR(Msg::kNetDestroyFailed, name, request.error().ToString());
     return;
   }
   // feth_clone_destroy 内部会自动先解绑 peer，无需我们先 Unpeer。
   if (const auto status = socket->Call(SIOCIFDESTROY, &*request, "ioctl(SIOCIFDESTROY)"); !status) {
-    TETHERKIT_ERROR("销毁 {} 失败：{}", name, status.error().ToString());
+    TETHERKIT_ERROR_TR(Msg::kNetDestroyFailed, name, status.error().ToString());
     return;
   }
   NotifyRegistry(name, false);
-  TETHERKIT_INFO("已销毁虚拟网卡 {}", name);
+  TETHERKIT_INFO_TR(Msg::kNetDestroyed, name);
 }
 
 Result<FethInterface> FethInterface::Create(std::string_view requested_name) {
@@ -242,15 +239,15 @@ Result<FethInterface> FethInterface::Create(std::string_view requested_name) {
   if (const auto status = socket.Call(SIOCIFCREATE, &request, "ioctl(SIOCIFCREATE)"); !status) {
     Error error = status.error();
     if (error.Code() == EPERM) {
-      return std::unexpected(std::move(error).WithContext(
-          "创建 feth 虚拟网卡需要 root 权限，请用 sudo 运行"));
+      return std::unexpected(
+          std::move(error).WithContext(Tr(Msg::kNetFethCreateNeedsRoot)));
     }
     if (error.Code() == EEXIST) {
-      return std::unexpected(std::move(error).WithContext(
-          std::format("接口 {} 已存在，请换一个名字或先销毁它", name_to_request)));
+      return std::unexpected(
+          std::move(error).WithContext(Tr(Msg::kNetInterfaceExists, name_to_request)));
     }
-    return std::unexpected(std::move(error).WithContext(
-        std::format("创建 feth 虚拟网卡 {} 失败", name_to_request)));
+    return std::unexpected(
+        std::move(error).WithContext(Tr(Msg::kNetFethCreateFailed, name_to_request)));
   }
 
   // 通配创建时内核把完整名字（含编号）写回 ifr_name。
@@ -259,16 +256,16 @@ Result<FethInterface> FethInterface::Create(std::string_view requested_name) {
   // 先登记再返回：登记的意义就是「万一从这一刻起进程被强杀，下次也能清掉它」，
   // 所以中间不能留任何窗口。
   NotifyRegistry(created_name, true);
-  TETHERKIT_INFO("已创建虚拟网卡 {}", created_name);
+  TETHERKIT_INFO_TR(Msg::kNetCreated, created_name);
   return FethInterface{std::move(created_name)};
 }
 
 Status FethInterface::PeerWith(const FethInterface& peer) {
   if (!Valid() || !peer.Valid()) {
-    return std::unexpected(Error::Generic("配对失败：接口对象无效"));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetPeerInvalidObject)));
   }
   if (peer.Name().size() >= kInterfaceNameCapacity) {
-    return std::unexpected(Error::Generic(std::format("peer 接口名 \"{}\" 过长", peer.Name())));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetPeerNameTooLong, peer.Name())));
   }
 
   TETHERKIT_ASSIGN_OR_RETURN(const auto socket, IoctlSocket::Open());
@@ -284,26 +281,23 @@ Status FethInterface::PeerWith(const FethInterface& peer) {
       !status) {
     Error error = status.error();
     if (error.Code() == EPERM) {
-      return std::unexpected(
-          std::move(error).WithContext("配对 feth 需要 root 权限，请用 sudo 运行"));
+      return std::unexpected(std::move(error).WithContext(Tr(Msg::kNetPeerNeedsRoot)));
     }
     if (error.Code() == EINVAL) {
-      return std::unexpected(std::move(error).WithContext(std::format(
-          "把 {} 与 {} 配对被内核拒绝。可能原因：其中一方已有 peer、"
-          "对端不是 feth 接口、或当前 macOS 版本的 if_fake 私有 ABI 有变动",
-          name_, peer.Name())));
+      return std::unexpected(std::move(error).WithContext(
+          Tr(Msg::kNetPeerRejected, name_, peer.Name())));
     }
     return std::unexpected(
-        std::move(error).WithContext(std::format("把 {} 与 {} 配对失败", name_, peer.Name())));
+        std::move(error).WithContext(Tr(Msg::kNetPeerFailed, name_, peer.Name())));
   }
 
-  TETHERKIT_INFO("已把 {} 与 {} 配对", name_, peer.Name());
+  TETHERKIT_INFO_TR(Msg::kNetPeered, name_, peer.Name());
   return Ok();
 }
 
 Status FethInterface::Unpeer() {
   if (!Valid()) {
-    return std::unexpected(Error::Generic("解绑失败：接口对象无效"));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetUnpeerInvalidObject)));
   }
   TETHERKIT_ASSIGN_OR_RETURN(const auto socket, IoctlSocket::Open());
 
@@ -311,13 +305,13 @@ Status FethInterface::Unpeer() {
   FethRequest payload{};
   TETHERKIT_RETURN_IF_ERROR(CallFethDriverIoctl(
       socket, name_, kSetDriverSpec, static_cast<unsigned long>(FethSetCommand::kSetPeer), payload,
-      "ioctl(SIOCSDRVSPEC, IF_FAKE_S_CMD_SET_PEER) 解绑"));
+      Tr(Msg::kNetUnpeerIoctlWhat)));
   return Ok();
 }
 
 Result<std::string> FethInterface::QueryPeer() const {
   if (!Valid()) {
-    return std::unexpected(Error::Generic("查询 peer 失败：接口对象无效"));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetQueryPeerInvalidObject)));
   }
   TETHERKIT_ASSIGN_OR_RETURN(const auto socket, IoctlSocket::Open());
 
@@ -332,7 +326,7 @@ Result<std::string> FethInterface::QueryPeer() const {
 
 Status FethInterface::SetMtu(std::uint32_t mtu) {
   if (!Valid()) {
-    return std::unexpected(Error::Generic("设置 MTU 失败：接口对象无效"));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetSetMtuInvalidObject)));
   }
   TETHERKIT_ASSIGN_OR_RETURN(const auto socket, IoctlSocket::Open());
   TETHERKIT_ASSIGN_OR_RETURN(::ifreq request, MakeIfreq(name_));
@@ -342,13 +336,12 @@ Status FethInterface::SetMtu(std::uint32_t mtu) {
     Error error = status.error();
     if (error.Code() == EINVAL) {
       const auto limit = QueryFethMaxMtu();
-      return std::unexpected(std::move(error).WithContext(std::format(
-          "把 {} 的 MTU 设为 {} 被拒绝（feth 的 MTU 上限是 {}，由 sysctl "
-          "net.link.fake.max_mtu 决定，且该值在接口创建时已被快照）",
-          name_, mtu, limit ? std::format("{}", *limit) : "未知")));
+      return std::unexpected(std::move(error).WithContext(
+          Tr(Msg::kNetSetMtuRejected, name_, mtu,
+             limit ? std::format("{}", *limit) : std::string{Text(Msg::kNetUnknownValue)})));
     }
     return std::unexpected(
-        std::move(error).WithContext(std::format("把 {} 的 MTU 设为 {} 失败", name_, mtu)));
+        std::move(error).WithContext(Tr(Msg::kNetSetMtuFailed, name_, mtu)));
   }
   return Ok();
 }
@@ -362,7 +355,7 @@ Result<std::uint32_t> FethInterface::QueryMtu() const {
 
 Status FethInterface::SetMacAddress(const MacAddress& mac) {
   if (!Valid()) {
-    return std::unexpected(Error::Generic("设置 MAC 失败：接口对象无效"));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetSetMacInvalidObject)));
   }
   TETHERKIT_ASSIGN_OR_RETURN(const auto socket, IoctlSocket::Open());
   TETHERKIT_ASSIGN_OR_RETURN(::ifreq request, MakeIfreq(name_));
@@ -376,13 +369,12 @@ Status FethInterface::SetMacAddress(const MacAddress& mac) {
   if (const auto status = socket.Call(SIOCSIFLLADDR, &request, "ioctl(SIOCSIFLLADDR)"); !status) {
     Error error = status.error();
     if (error.Code() == EPERM) {
-      return std::unexpected(
-          std::move(error).WithContext("修改接口 MAC 需要 root 权限，请用 sudo 运行"));
+      return std::unexpected(std::move(error).WithContext(Tr(Msg::kNetSetMacNeedsRoot)));
     }
     return std::unexpected(std::move(error).WithContext(
-        std::format("把 {} 的 MAC 设为 {} 失败", name_, FormatMac(mac).data())));
+        Tr(Msg::kNetSetMacFailed, name_, FormatMac(mac).data())));
   }
-  TETHERKIT_INFO("已把 {} 的 MAC 设为 {}", name_, FormatMac(mac).data());
+  TETHERKIT_INFO_TR(Msg::kNetMacSet, name_, FormatMac(mac).data());
   return Ok();
 }
 
@@ -392,7 +384,7 @@ Result<MacAddress> FethInterface::QueryMacAddress() const {
   // 标准做法，且不需要额外权限。
   ::ifaddrs* list = nullptr;
   if (::getifaddrs(&list) != 0) {
-    return std::unexpected(Error::FromErrno(0, "getifaddrs 失败"));
+    return std::unexpected(Error::FromErrno(0, Tr(Msg::kNetGetifaddrsFailed)));
   }
   // 用 RAII 保证任何返回路径都释放链表。
   const std::unique_ptr<::ifaddrs, decltype(&::freeifaddrs)> guard(list, &::freeifaddrs);
@@ -406,20 +398,19 @@ Result<MacAddress> FethInterface::QueryMacAddress() const {
     }
     const auto* link = reinterpret_cast<const ::sockaddr_dl*>(entry->ifa_addr);
     if (link->sdl_alen != sizeof(MacAddress)) {
-      return std::unexpected(Error::Generic(std::format(
-          "{} 的链路地址长度是 {} 字节，不是 6 字节 MAC", name_, link->sdl_alen)));
+      return std::unexpected(
+          Error::Generic(Tr(Msg::kNetLinkAddressWrongLength, name_, link->sdl_alen)));
     }
     MacAddress mac{};
     std::memcpy(mac.data(), LLADDR(link), mac.size());
     return mac;
   }
-  return std::unexpected(
-      Error::Generic(std::format("在 getifaddrs 结果里找不到接口 {} 的链路地址", name_)));
+  return std::unexpected(Error::Generic(Tr(Msg::kNetLinkAddressNotFound, name_)));
 }
 
 Status FethInterface::SetUp(bool up) {
   if (!Valid()) {
-    return std::unexpected(Error::Generic("设置接口状态失败：接口对象无效"));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetSetUpInvalidObject)));
   }
   TETHERKIT_ASSIGN_OR_RETURN(const auto socket, IoctlSocket::Open());
   TETHERKIT_ASSIGN_OR_RETURN(::ifreq request, MakeIfreq(name_));
@@ -440,11 +431,10 @@ Status FethInterface::SetUp(bool up) {
   if (const auto status = socket.Call(SIOCSIFFLAGS, &request, "ioctl(SIOCSIFFLAGS)"); !status) {
     Error error = status.error();
     if (error.Code() == EPERM) {
-      return std::unexpected(
-          std::move(error).WithContext("修改接口 UP/DOWN 需要 root 权限，请用 sudo 运行"));
+      return std::unexpected(std::move(error).WithContext(Tr(Msg::kNetSetUpNeedsRoot)));
     }
-    return std::unexpected(std::move(error).WithContext(
-        std::format("把 {} 置为 {} 失败", name_, up ? "UP" : "DOWN")));
+    return std::unexpected(
+        std::move(error).WithContext(Tr(Msg::kNetSetUpFailed, name_, up ? "UP" : "DOWN")));
   }
   return Ok();
 }
@@ -462,8 +452,7 @@ Result<bool> FethInterface::IsUp() const {
 
 Result<FethPair> FethPair::Create(std::uint32_t mtu, const MacAddress* system_mac) {
   if (!IsRunningAsRoot()) {
-    return std::unexpected(Error::Generic(
-        "创建 feth 虚拟网卡需要 root 权限。请用 sudo 运行 TetherKit。"));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetFethPairNeedsRoot)));
   }
 
   // 1. 校验创建期会被快照的 sysctl —— **必须在创建之前**。
@@ -471,8 +460,7 @@ Result<FethPair> FethPair::Create(std::uint32_t mtu, const MacAddress* system_ma
 
   TETHERKIT_ASSIGN_OR_RETURN(const std::uint32_t max_mtu, QueryFethMaxMtu());
   if (mtu > max_mtu) {
-    return std::unexpected(Error::Generic(std::format(
-        "请求的 MTU {} 超过 feth 上限 {}（sysctl net.link.fake.max_mtu）", mtu, max_mtu)));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetMtuExceedsFethLimit, mtu, max_mtu)));
   }
 
   // 2. 创建两张接口。
@@ -494,8 +482,8 @@ Result<FethPair> FethPair::Create(std::uint32_t mtu, const MacAddress* system_ma
 
     const auto driver_mac = driver_side.QueryMacAddress();
     if (driver_mac && *driver_mac == *system_mac) {
-      return std::unexpected(Error::Generic(std::format(
-          "两侧 MAC 相同（{}），会触发 IPv6 DAD 地址冲突", FormatMac(*system_mac).data())));
+      return std::unexpected(
+          Error::Generic(Tr(Msg::kNetSameMacDadConflict, FormatMac(*system_mac).data())));
     }
   }
 
@@ -504,8 +492,7 @@ Result<FethPair> FethPair::Create(std::uint32_t mtu, const MacAddress* system_ma
   TETHERKIT_RETURN_IF_ERROR(driver_side.SetUp(true));
   TETHERKIT_RETURN_IF_ERROR(system_side.SetUp(true));
 
-  TETHERKIT_INFO("虚拟网卡对就绪：系统侧 {} ←→ 驱动侧 {}（MTU {}）", system_side.Name(),
-                 driver_side.Name(), mtu);
+  TETHERKIT_INFO_TR(Msg::kNetFethPairReady, system_side.Name(), driver_side.Name(), mtu);
   return FethPair{std::move(system_side), std::move(driver_side)};
 }
 

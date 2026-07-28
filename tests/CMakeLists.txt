@@ -12,6 +12,7 @@ add_executable(
   test_common_byte_order.cc
   test_common_error.cc
   test_common_frame_ring.cc
+  test_common_i18n.cc
   test_common_spsc_ring.cc
   test_common_stats.cc
   test_rndis_messages.cc
@@ -58,6 +59,7 @@ set(TETHERKIT_TEST_SUITES
     common.error
     common.frame_ring
     common.frame_ring_batch
+    common.i18n
     common.spsc_ring
     common.stats
     rndis.messages

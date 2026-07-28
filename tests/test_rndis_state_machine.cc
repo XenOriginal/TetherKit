@@ -11,6 +11,8 @@
 
 #include <doctest.h>
 
+#include "language_guard.h"
+
 #include "mock_control_channel.h"
 #include "tetherkit/rndis/state_machine.h"
 
@@ -324,6 +326,8 @@ TEST_CASE("设备主动发 KEEPALIVE_MSG 时主机必须回 KEEPALIVE_CMPLT") {
 }
 
 TEST_CASE("面向连接设备的消息被明确拒绝") {
+  // 下面断言错误消息的中文措辞，先把语言钉死。
+  const tetherkit::testing::ScopedLanguage guard{tetherkit::Language::kChinese};
   MockControlChannel channel;
   channel.SetRequestHandler([](std::span<const std::byte> request, MockControlChannel& mock) {
     if (LoadLe32(request.data() + kMessageTypeOffset) == ToRaw(MessageType::kInitialize)) {
@@ -375,6 +379,8 @@ TEST_CASE("保活到期时发 KEEPALIVE 并在成功后清零失败计数") {
 }
 
 TEST_CASE("连续保活失败达到阈值后通报致命错误") {
+  // 下面断言致命错误里的中文措辞，先把语言钉死。
+  const tetherkit::testing::ScopedLanguage guard{tetherkit::Language::kChinese};
   MockControlChannel channel;
   // 设备只回 INITIALIZE / QUERY / SET，对 KEEPALIVE 一律不回 → 每次都超时。
   channel.SetRequestHandler([](std::span<const std::byte> request, MockControlChannel& mock) {

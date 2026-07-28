@@ -15,6 +15,8 @@
 
 #include <doctest.h>
 
+#include "language_guard.h"
+
 #include "tetherkit/common/byte_order.h"
 #include "tetherkit/rndis/packet_codec.h"
 #include "tetherkit/rndis/protocol.h"
@@ -428,6 +430,8 @@ TEST_CASE("解码：帧视图指向传输缓冲内部，无拷贝") {
 }
 
 TEST_CASE("MalformedReason 名字完整") {
+  // 名字是面向用户的文案，会随语言变化，所以断言前先把语言钉死。
+  const tetherkit::testing::ScopedLanguage guard{tetherkit::Language::kChinese};
   CHECK(MalformedReasonName(MalformedReason::kNone) == "无");
   CHECK_FALSE(MalformedReasonName(MalformedReason::kNotPacketMessage).empty());
   CHECK_FALSE(MalformedReasonName(MalformedReason::kDataOutOfBounds).empty());

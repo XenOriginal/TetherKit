@@ -1,5 +1,7 @@
 #include "tetherkit/net/loopback_link.h"
 
+#include "tetherkit/common/i18n.h"
+
 #include <algorithm>
 #include <format>
 #include <iterator>
@@ -61,7 +63,7 @@ Result<WriteResult> LoopbackLink::WriteFrames(FrameBatch frames) {
   const std::uint32_t fail_after = fail_writes_after_.load(std::memory_order_relaxed);
   if (fail_after != 0 && call_index >= fail_after) {
     return std::unexpected(Error::Generic(
-        std::format("loopback 后端按测试设置在第 {} 次写入时失败", call_index + 1)));
+        Tr(Msg::kNetLoopbackInjectedFailure, call_index + 1)));
   }
 
   WriteResult result;

@@ -6,6 +6,7 @@
 #include <string>
 #include <utility>
 
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 #include "tetherkit/common/scheduling.h"
 #include "tetherkit/common/time.h"
@@ -15,19 +16,19 @@ namespace tetherkit::core {
 std::string_view RunStateName(RunState state) noexcept {
   switch (state) {
     case RunState::kIdle:
-      return "空闲";
+      return Text(Msg::kCoreRunStateIdle);
     case RunState::kStarting:
-      return "启动中";
+      return Text(Msg::kCoreRunStateStarting);
     case RunState::kRunning:
-      return "运行中";
+      return Text(Msg::kCoreRunStateRunning);
     case RunState::kStopping:
-      return "停机中";
+      return Text(Msg::kCoreRunStateStopping);
     case RunState::kStopped:
-      return "已停机";
+      return Text(Msg::kCoreRunStateStopped);
     case RunState::kFailed:
-      return "已失败";
+      return Text(Msg::kCoreRunStateFailed);
   }
-  return "未知";
+  return Text(Msg::kCoreRunStateUnknown);
 }
 
 Result<std::unique_ptr<Runtime>> Runtime::Create(const RuntimeConfig& config) {
@@ -46,7 +47,7 @@ Runtime::~Runtime() {
 
 Status Runtime::Start() {
   if (started_) {
-    return std::unexpected(Error::Generic("运行时已启动"));
+    return std::unexpected(Error::Generic(Tr(Msg::kCoreRuntimeAlreadyStarted)));
   }
 
   // root 检查刻意留在**同步**路径上。
@@ -56,11 +57,7 @@ Status Runtime::Start() {
   // 注意 libusb 声明 RNDIS 接口**不需要** root（macOS 没有 RNDIS 内核驱动），
   // 需要 root 的是 feth 创建与 /dev/bpf* 打开。
   if (!net::IsRunningAsRoot()) {
-    return std::unexpected(Error::Generic(
-        "TetherKit 需要 root 权限才能创建 feth 虚拟网卡并打开 /dev/bpf*。\n"
-        "  请用 sudo 运行：sudo tetherkit\n"
-        "  （USB 侧本身不需要 root —— macOS 没有 RNDIS 内核驱动，"
-        "所以 libusb 能直接声明接口。）"));
+    return std::unexpected(Error::Generic(Tr(Msg::kCoreNeedsRoot)));
   }
 
   started_ = true;
@@ -145,15 +142,10 @@ Status Runtime::RunStartSequence() {
   TETHERKIT_ASSIGN_OR_RETURN(const auto candidates,
                              usb::FindRndisDevices(*usb_context_, config_.device_filter));
   if (candidates.empty()) {
-    return std::unexpected(Error::Generic(
-        "没有找到 RNDIS 设备。请检查：\n"
-        "  1. 设备已用 USB 数据线（不是只供电的线）连接；\n"
-        "  2. 设备上已开启「USB 网络共享 / USB tethering」；\n"
-        "  3. 手机解锁并信任本机（部分设备锁屏时不暴露 RNDIS 接口）。\n"
-        "  可用 `system_profiler SPUSBDataType` 确认设备是否被系统识别。"));
+    return std::unexpected(Error::Generic(Tr(Msg::kCoreNoDeviceFound)));
   }
   if (candidates.size() > 1) {
-    TETHERKIT_INFO("找到 {} 个 RNDIS 设备，使用第一个（可按 VID/PID 指定）", candidates.size());
+    TETHERKIT_INFO_TR(Msg::kCoreMultipleDevices, candidates.size());
   }
   TETHERKIT_ASSIGN_OR_RETURN(device_, usb::Device::Open(*usb_context_, candidates.front()));
   RefreshSnapshot();
@@ -291,23 +283,23 @@ void Runtime::RunControlLoop() {
   }
 
   if (fatal_error_.load(std::memory_order_acquire)) {
-    TETHERKIT_ERROR("因不可恢复的错误退出");
+    TETHERKIT_ERROR_TR(Msg::kCoreExitingOnFatal);
   }
 }
 
 void Runtime::PrintNextSteps() const {
   const std::string_view name = feth_pair_->SystemSide().Name();
   TETHERKIT_INFO("");
-  TETHERKIT_INFO("==== 网卡已就绪：{} ====", name);
-  TETHERKIT_INFO("接下来给它配一个 IP（RNDIS 设备通常自带 DHCP 服务器）：");
+  TETHERKIT_INFO_TR(Msg::kCoreInterfaceReady, name);
+  TETHERKIT_INFO_TR(Msg::kCoreNextStepsAssignIp);
   TETHERKIT_INFO("    sudo ipconfig set {} DHCP", name);
-  TETHERKIT_INFO("验证：");
+  TETHERKIT_INFO_TR(Msg::kCoreNextStepsVerify);
   TETHERKIT_INFO("    ipconfig getifaddr {}", name);
   TETHERKIT_INFO("    ipconfig getsummary {}", name);
-  TETHERKIT_INFO("若要让流量默认走它（会顶掉现有默认路由，请谨慎）：");
+  TETHERKIT_INFO_TR(Msg::kCoreNextStepsDefaultRoute);
   TETHERKIT_INFO("    sudo route -n change default $(ipconfig getoption {} router)", name);
-  TETHERKIT_INFO("注意：ipconfig set 建立的是**临时**服务，只存活到下一次网络");
-  TETHERKIT_INFO("      配置变更，且不会出现在「系统设置 → 网络」里。");
+  TETHERKIT_INFO_TR(Msg::kCoreNextStepsTemporaryNote1);
+  TETHERKIT_INFO_TR(Msg::kCoreNextStepsTemporaryNote2);
   TETHERKIT_INFO("");
 }
 
@@ -316,7 +308,7 @@ void Runtime::PrintNextSteps() const {
 // =============================================================================
 
 void Runtime::Teardown() {
-  TETHERKIT_INFO("正在停机……");
+  TETHERKIT_INFO_TR(Msg::kCoreStopping);
 
   // 严格按启动顺序的**逆序**拆除。
   //
@@ -365,7 +357,7 @@ void Runtime::Teardown() {
     snapshot_.link_up = false;
   }
   RefreshSnapshot();
-  TETHERKIT_INFO("已停机");
+  TETHERKIT_INFO_TR(Msg::kCoreStopped);
 }
 
 // =============================================================================
@@ -452,9 +444,8 @@ void Runtime::OnStateChanged(rndis::State from, rndis::State to) {
 
 void Runtime::OnNegotiated(const rndis::NegotiatedParameters& parameters,
                            const rndis::DeviceInfo& info) {
-  TETHERKIT_INFO("RNDIS 就绪：设备 MAC {}，MTU {}，链路 {:.0f} Mbps",
-                 rndis::FormatMac(info.permanent_address).data(), parameters.mtu,
-                 info.LinkSpeedMbps());
+  TETHERKIT_INFO_TR(Msg::kCoreRndisReady, rndis::FormatMac(info.permanent_address).data(),
+                    parameters.mtu, info.LinkSpeedMbps());
 
   Emit(RuntimeEvent{.kind = RuntimeEvent::Kind::kNegotiated,
                     .a = static_cast<std::int64_t>(parameters.mtu),
@@ -463,7 +454,8 @@ void Runtime::OnNegotiated(const rndis::NegotiatedParameters& parameters,
 }
 
 void Runtime::OnLinkStateChanged(bool connected) {
-  TETHERKIT_INFO("链路状态：{}", connected ? "已连接" : "已断开");
+  TETHERKIT_INFO_TR(Msg::kCoreLinkState,
+                    Text(connected ? Msg::kCoreLinkConnected : Msg::kCoreLinkDisconnected));
 
   {
     const std::lock_guard<std::mutex> guard(snapshot_mutex_);
@@ -480,7 +472,8 @@ void Runtime::OnLinkStateChanged(bool connected) {
 }
 
 void Runtime::OnDeviceReset(bool addressing_lost) {
-  TETHERKIT_WARN("设备已软复位（寻址信息{}）", addressing_lost ? "丢失，已重放" : "保持");
+  TETHERKIT_WARN_TR(Msg::kCoreDeviceReset,
+                    Text(addressing_lost ? Msg::kCoreAddressingLost : Msg::kCoreAddressingKept));
 
   // 复位期间设备丢弃了所有未完成的数据包。短暂暂停让状态机把包过滤重放完，
   // 避免在设备重建内部状态的窗口里继续灌数据。
@@ -495,7 +488,7 @@ void Runtime::OnDeviceReset(bool addressing_lost) {
 void Runtime::OnFatalError(const Error& error) {
   // WithContext 是 &&-限定的，而这里拿到的是 const 引用，必须先拷一份。
   Error annotated = error;
-  RecordFatal(std::move(annotated).WithContext("链路不可恢复"));
+  RecordFatal(std::move(annotated).WithContext(Tr(Msg::kCoreLinkUnrecoverable)));
 }
 
 }  // namespace tetherkit::core

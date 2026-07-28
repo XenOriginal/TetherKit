@@ -1,3 +1,4 @@
+#include "tetherkit/common/i18n.h"
 #include "process_runner.h"
 
 #include <spawn.h>
@@ -51,14 +52,14 @@ Result<ProcessResult> Spawn(std::string_view executable,
   // ---- 建管道收输出 ----
   std::array<int, 2> pipe_fds{-1, -1};
   if (::pipe(pipe_fds.data()) != 0) {
-    return std::unexpected(Error::FromErrno(0, "创建管道失败"));
+    return std::unexpected(Error::FromErrno(0, Tr(Msg::kCapiPipeFailed)));
   }
 
   ::posix_spawn_file_actions_t actions{};
   if (const int rc = ::posix_spawn_file_actions_init(&actions); rc != 0) {
     ::close(pipe_fds[0]);
     ::close(pipe_fds[1]);
-    return std::unexpected(Error::FromErrno(rc, "posix_spawn_file_actions_init 失败"));
+    return std::unexpected(Error::FromErrno(rc, Tr(Msg::kCapiSpawnFileActionsFailed)));
   }
   // 子进程：关掉读端，把写端接到 stdout 与 stderr，然后关掉原始写端。
   ::posix_spawn_file_actions_addclose(&actions, pipe_fds[0]);
@@ -77,7 +78,7 @@ Result<ProcessResult> Spawn(std::string_view executable,
   if (spawn_rc != 0) {
     ::close(pipe_fds[0]);
     return std::unexpected(
-        Error::FromErrno(spawn_rc, std::format("无法执行 {}", executable_path)));
+        Error::FromErrno(spawn_rc, Tr(Msg::kCapiExecFailed, executable_path)));
   }
 
   // 必须**先读空管道再 waitpid**：反过来的话，子进程写满管道缓冲（64 KiB）后
@@ -90,7 +91,7 @@ Result<ProcessResult> Spawn(std::string_view executable,
   while (::waitpid(child, &status, 0) < 0) {
     if (errno != EINTR) {
       return std::unexpected(
-          Error::FromErrno(0, std::format("等待 {} 结束失败", executable_path)));
+          Error::FromErrno(0, Tr(Msg::kCapiWaitFailed, executable_path)));
     }
   }
 

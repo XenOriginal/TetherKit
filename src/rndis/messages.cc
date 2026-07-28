@@ -6,6 +6,7 @@
 #include <format>
 
 #include "tetherkit/common/byte_order.h"
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 
 namespace tetherkit::rndis {
@@ -20,14 +21,14 @@ Error MakeStatusError(std::uint32_t status, std::string_view what) {
   if (name.empty()) {
     return Error::FromRndisStatus(status, std::string{what});
   }
-  return Error::FromRndisStatus(status, std::format("{}：{}", what, name));
+  return Error::FromRndisStatus(status, Tr(Msg::kRndisStatusSuffix, what, name));
 }
 
 /// 校验缓冲区至少有 `needed` 字节。
 Status RequireBytes(std::span<const std::byte> buffer, std::size_t needed, std::string_view what) {
   if (buffer.size() < needed) {
-    return std::unexpected(Error::Generic(
-        std::format("{} 长度不足：需要 {} 字节，实际 {} 字节", what, needed, buffer.size())));
+    return std::unexpected(
+        Error::Generic(Tr(Msg::kRndisBufferTooShort, what, needed, buffer.size())));
   }
   return Ok();
 }
@@ -35,9 +36,8 @@ Status RequireBytes(std::span<const std::byte> buffer, std::size_t needed, std::
 /// 校验待写入缓冲区容量。
 Status RequireCapacity(std::span<std::byte> buffer, std::size_t needed, std::string_view what) {
   if (buffer.size() < needed) {
-    return std::unexpected(Error::Generic(
-        std::format("编码 {} 的缓冲区不足：需要 {} 字节，实际 {} 字节", what, needed,
-                    buffer.size())));
+    return std::unexpected(
+        Error::Generic(Tr(Msg::kRndisEncodeBufferTooSmall, what, needed, buffer.size())));
   }
   return Ok();
 }
@@ -50,16 +50,15 @@ Status ValidateCompletion(std::span<const std::byte> buffer, MessageType expecte
   const std::uint32_t message_type = LoadLe32(buffer.data() + kMessageTypeOffset);
   if (message_type != ToRaw(expected_type)) {
     const std::string_view actual = MessageTypeName(message_type);
-    return std::unexpected(Error::Generic(
-        std::format("期望 {}，实际收到 {}（{:#010x}）", what,
-                    actual.empty() ? std::string_view{"未知消息类型"} : actual, message_type)));
+    return std::unexpected(Error::Generic(Tr(
+        Msg::kRndisUnexpectedMessageType, what,
+        actual.empty() ? Text(Msg::kRndisUnknownMessageType) : actual, message_type)));
   }
 
   const std::uint32_t message_length = LoadLe32(buffer.data() + kMessageLengthOffset);
   if (message_length < minimum_bytes || message_length > buffer.size()) {
-    return std::unexpected(Error::Generic(
-        std::format("{} 的 MessageLength={} 不自洽（缓冲 {} 字节，最小 {} 字节）", what,
-                    message_length, buffer.size(), minimum_bytes)));
+    return std::unexpected(Error::Generic(Tr(Msg::kRndisInconsistentMessageLength, what,
+                                             message_length, buffer.size(), minimum_bytes)));
   }
   return Ok();
 }
@@ -86,9 +85,9 @@ Result<std::span<const std::byte>> ResolveInlineBuffer(std::span<const std::byte
       static_cast<std::uint64_t>(kOffsetFieldBase) + relative_offset;
   const std::uint64_t end = absolute_offset + length;
   if (end > message_length) {
-    return std::unexpected(Error::Generic(
-        std::format("{} 越界：偏移 {}（相对值 {}）+ 长度 {} 超出 MessageLength {}", what,
-                    absolute_offset, relative_offset, length, message_length)));
+    return std::unexpected(Error::Generic(Tr(Msg::kRndisInlineBufferOutOfBounds, what,
+                                             absolute_offset, relative_offset, length,
+                                             message_length)));
   }
   return buffer.subspan(static_cast<std::size_t>(absolute_offset), length);
 }
@@ -107,7 +106,8 @@ std::array<char, 18> FormatMac(const MacAddress& mac) noexcept {
 // =============================================================================
 
 Result<MessageHeader> DecodeMessageHeader(std::span<const std::byte> buffer) {
-  TETHERKIT_RETURN_IF_ERROR(RequireBytes(buffer, kMessageHeaderBytes, "RNDIS 消息头"));
+  TETHERKIT_RETURN_IF_ERROR(
+      RequireBytes(buffer, kMessageHeaderBytes, Text(Msg::kRndisWhatMessageHeader)));
   return MessageHeader{
       .message_type = LoadLe32(buffer.data() + kMessageTypeOffset),
       .message_length = LoadLe32(buffer.data() + kMessageLengthOffset),
@@ -151,7 +151,7 @@ Result<InitializeComplete> DecodeInitializeComplete(std::span<const std::byte> b
   };
 
   if (complete.status != ToRaw(StatusCode::kSuccess)) {
-    return std::unexpected(MakeStatusError(complete.status, "设备拒绝 RNDIS 初始化"));
+    return std::unexpected(MakeStatusError(complete.status, Tr(Msg::kRndisInitRejected)));
   }
   return complete;
 }
@@ -161,8 +161,7 @@ Result<NegotiatedParameters> Negotiate(const InitializeComplete& complete,
                                        std::uint32_t host_transfer_size_limit) {
   // ---- 介质必须是以太网 ----
   if (complete.medium != ToRaw(Medium::kEthernet)) {
-    return std::unexpected(Error::Generic(
-        std::format("设备汇报的介质是 {:#x}，本驱动只支持 802.3 以太网（0）", complete.medium)));
+    return std::unexpected(Error::Generic(Tr(Msg::kRndisUnsupportedMedium, complete.medium)));
   }
 
   // ---- 面向连接设备不支持 ----
@@ -171,19 +170,17 @@ Result<NegotiatedParameters> Negotiate(const InitializeComplete& complete,
   const bool connection_oriented =
       (complete.device_flags & static_cast<std::uint32_t>(DeviceFlags::kConnectionOriented)) != 0;
   if (connection_oriented && !connectionless) {
-    return std::unexpected(Error::Generic(
-        "设备是面向连接（CONDIS）类型，本驱动只支持无连接的 802.3 设备"));
+    return std::unexpected(Error::Generic(Tr(Msg::kRndisConnectionOriented)));
   }
   if (!connectionless) {
     // 有设备两个位都不置。宽容处理：按无连接继续，只告警。
-    TETHERKIT_WARN("设备的 DeviceFlags={:#x} 未置 CONNECTIONLESS 位，按无连接设备继续处理",
-                   complete.device_flags);
+    TETHERKIT_WARN_TR(Msg::kRndisNoConnectionlessFlag, complete.device_flags);
   }
 
   // ---- 版本 ----
   if (complete.major_version != kMajorVersion) {
-    return std::unexpected(Error::Generic(std::format(
-        "设备的 RNDIS 主版本号是 {}，本驱动只实现 {}", complete.major_version, kMajorVersion)));
+    return std::unexpected(Error::Generic(
+        Tr(Msg::kRndisUnsupportedMajorVersion, complete.major_version, kMajorVersion)));
   }
 
   NegotiatedParameters params;
@@ -197,8 +194,8 @@ Result<NegotiatedParameters> Negotiate(const InitializeComplete& complete,
   // 超过 7 属于协议违规。不钳位的话 1u << factor 会溢出或算出荒谬的填充长度。
   std::uint32_t alignment_factor = complete.packet_alignment_factor;
   if (alignment_factor > kMaxPacketAlignmentFactor) {
-    TETHERKIT_WARN("设备汇报的 PacketAlignmentFactor={} 超出合法上界 {}，已钳位",
-                   alignment_factor, kMaxPacketAlignmentFactor);
+    TETHERKIT_WARN_TR(Msg::kRndisAlignmentFactorClamped, alignment_factor,
+                      kMaxPacketAlignmentFactor);
     alignment_factor = kMaxPacketAlignmentFactor;
   }
   params.tx_alignment_bytes = 1U << alignment_factor;
@@ -206,16 +203,15 @@ Result<NegotiatedParameters> Negotiate(const InitializeComplete& complete,
   // ---- MaxTransferSize：双向钳位 ----
   std::uint32_t device_limit = complete.max_transfer_size;
   if (device_limit <= kHardHeaderBytes) {
-    return std::unexpected(Error::Generic(
-        std::format("设备汇报的 MaxTransferSize={} 装不下 {} 字节的 RNDIS+以太头部", device_limit,
-                    kHardHeaderBytes)));
+    return std::unexpected(
+        Error::Generic(Tr(Msg::kRndisMaxTransferTooSmall, device_limit, kHardHeaderBytes)));
   }
 
   // 上钳：某些 WinCE / Windows Mobile 设备宣称 8KB 或 16KB 的巨帧上限，
   // 对这种链路速率毫无意义，只会让我们分配巨大的传输缓冲。不盲从设备。
   if (device_limit > host_transfer_size_limit) {
-    TETHERKIT_INFO("设备汇报 MaxTransferSize={}，超出 host 缓冲上限 {}，按 host 上限使用",
-                   device_limit, host_transfer_size_limit);
+    TETHERKIT_INFO_TR(Msg::kRndisMaxTransferClampedToHost, device_limit,
+                      host_transfer_size_limit);
     device_limit = host_transfer_size_limit;
   }
   params.device_max_transfer_size = device_limit;
@@ -226,8 +222,8 @@ Result<NegotiatedParameters> Negotiate(const InitializeComplete& complete,
   const std::uint32_t hard_mtu = HardMtuFor(requested_mtu);
   if (device_limit < hard_mtu) {
     params.mtu = device_limit - kHardHeaderBytes;
-    TETHERKIT_WARN("设备 MaxTransferSize={} 小于满帧所需 {}，MTU 由 {} 下调为 {}", device_limit,
-                   hard_mtu, requested_mtu, params.mtu);
+    TETHERKIT_WARN_TR(Msg::kRndisMtuLoweredForTransferSize, device_limit, hard_mtu, requested_mtu,
+                      params.mtu);
   }
 
   return params;
@@ -300,7 +296,7 @@ Result<QueryComplete> DecodeQueryComplete(std::span<const std::byte> buffer) {
   TETHERKIT_ASSIGN_OR_RETURN(
       complete.information,
       ResolveInlineBuffer(buffer, message_length, info_offset, info_length,
-                          "QUERY_CMPLT 的 InformationBuffer"));
+                          Text(Msg::kRndisWhatQueryCmpltInfoBuffer)));
   return complete;
 }
 
@@ -405,8 +401,7 @@ Result<IndicateStatus> DecodeIndicateStatus(std::span<const std::byte> buffer) {
   const std::byte* base = buffer.data();
   const std::uint32_t message_type = LoadLe32(base + kMessageTypeOffset);
   if (message_type != ToRaw(MessageType::kIndicateStatus)) {
-    return std::unexpected(Error::Generic(
-        std::format("期望 REMOTE_NDIS_INDICATE_STATUS_MSG，实际 {:#010x}", message_type)));
+    return std::unexpected(Error::Generic(Tr(Msg::kRndisExpectedIndicateStatus, message_type)));
   }
 
   const std::uint32_t message_length =
@@ -443,10 +438,8 @@ Result<IndicateStatus> DecodeIndicateStatus(std::span<const std::byte> buffer) {
     // 两种解释都越界：丢掉可选负载，但**仍然成功返回** —— status 本身有用
     // （比如它可能就是 MEDIA_DISCONNECT），不能因为解析不了一个可选字段
     // 就把链路判死。
-    TETHERKIT_WARN(
-        "INDICATE_STATUS 的 StatusBufferOffset={} / Length={} 两种基准点解释均越界"
-        "（MessageLength={}），已忽略状态缓冲区",
-        relative_offset, buffer_length, message_length);
+    TETHERKIT_WARN_TR(Msg::kRndisIndicateStatusBufferOutOfBounds, relative_offset, buffer_length,
+                      message_length);
     return indication;
   }
 
@@ -467,7 +460,7 @@ Result<IndicateStatus> DecodeIndicateStatus(std::span<const std::byte> buffer) {
 // =============================================================================
 
 Result<std::uint32_t> ParseUint32(std::span<const std::byte> information) {
-  TETHERKIT_RETURN_IF_ERROR(RequireBytes(information, 4, "OID 的 LE32 返回值"));
+  TETHERKIT_RETURN_IF_ERROR(RequireBytes(information, 4, Text(Msg::kRndisWhatOidUint32)));
   return LoadLe32(information.data());
 }
 
@@ -479,12 +472,12 @@ Result<std::uint64_t> ParseCounter(std::span<const std::byte> information) {
   if (information.size() >= 4) {
     return static_cast<std::uint64_t>(LoadLe32(information.data()));
   }
-  return std::unexpected(Error::Generic(
-      std::format("OID 计数器返回值长度 {} 字节，既非 4 也非 8", information.size())));
+  return std::unexpected(Error::Generic(Tr(Msg::kRndisOidCounterBadLength, information.size())));
 }
 
 Result<MacAddress> ParseMac(std::span<const std::byte> information) {
-  TETHERKIT_RETURN_IF_ERROR(RequireBytes(information, sizeof(MacAddress), "OID 的 MAC 返回值"));
+  TETHERKIT_RETURN_IF_ERROR(
+      RequireBytes(information, sizeof(MacAddress), Text(Msg::kRndisWhatOidMac)));
   MacAddress mac{};
   std::memcpy(mac.data(), information.data(), mac.size());
   return mac;

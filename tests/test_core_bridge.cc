@@ -14,6 +14,8 @@
 
 #include <doctest.h>
 
+#include "language_guard.h"
+
 #include "mock_data_channel.h"
 #include "tetherkit/core/bridge.h"
 #include "tetherkit/net/loopback_link.h"
@@ -476,6 +478,8 @@ TEST_CASE("USB 提交失败被记为 I/O 错误，桥接层继续运行") {
 }
 
 TEST_CASE("统计行渲染出速率与丢包") {
+  // 统计行是面向用户的文案，下面按中文断言，先把语言钉死。
+  const tetherkit::testing::ScopedLanguage guard{tetherkit::Language::kChinese};
   MockDataChannel channel;
   LoopbackLink link(LoopbackConfig{.sent_capacity = 4096});
   Bridge bridge(channel, link, TestConfig());

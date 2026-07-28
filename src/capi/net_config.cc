@@ -40,13 +40,17 @@
 #include "core_foundation_support.h"
 #include "process_runner.h"
 #include "tetherkit/capi/tetherkit_c.h"
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 
 namespace {
 
 using tetherkit::Error;
+using tetherkit::Msg;
 using tetherkit::Result;
 using tetherkit::Status;
+using tetherkit::Text;
+using tetherkit::Tr;
 using tetherkit::capi::ClearError;
 using tetherkit::capi::CopyText;
 using tetherkit::capi::CopyToStdString;
@@ -85,13 +89,10 @@ constexpr std::chrono::milliseconds kDhcpPollInterval{250};
 /// 校验接口名并翻译成人话错误。
 [[nodiscard]] Status ValidateInterface(const char* interface_name) {
   if (interface_name == nullptr) {
-    return std::unexpected(Error::Generic("网卡名不能为空"));
+    return std::unexpected(Error::Generic(Tr(Msg::kCapiInterfaceNameNull)));
   }
   if (!IsValidFethName(interface_name)) {
-    return std::unexpected(Error::Generic(std::format(
-        "拒绝操作网卡 \"{}\"：只接受 TetherKit 自己创建的 feth<数字> 接口。\n"
-        "  这条限制是为了防止误操作把真实网卡（en0 等）的配置冲掉。",
-        interface_name)));
+    return std::unexpected(Error::Generic(Tr(Msg::kCapiInterfaceNotOurs, interface_name)));
   }
   return tetherkit::Ok();
 }
@@ -115,8 +116,8 @@ constexpr std::chrono::milliseconds kDhcpPollInterval{250};
       detail.pop_back();
     }
     return std::unexpected(Error::Generic(
-        std::format("{} 失败（退出码 {}）：{}", what, result.exit_code,
-                    detail.empty() ? "命令没有输出任何原因" : detail)));
+        Tr(Msg::kCapiCommandFailed, what, result.exit_code,
+           detail.empty() ? std::string{Text(Msg::kCapiCommandNoOutput)} : detail)));
   }
   return tetherkit::Ok();
 }
@@ -285,7 +286,7 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
   const ScopedCFRef<CFStringRef> key =
       MakeCFString(std::format("State:/Network/Service/{}/DNS", service_id));
   if (::SCDynamicStoreSetValue(store, key.Get(), payload.Get()) == 0) {
-    TETHERKIT_WARN("写入 DNS 键失败（服务 {}），静态模式下 DNS 可能不生效", service_id);
+    TETHERKIT_WARN_TR(Msg::kCapiDnsPublishFailed, service_id);
   }
 }
 
@@ -310,27 +311,30 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
                                                std::string_view router) {
   const std::vector<std::string> add_arguments{
       "-n", "add", "-inet", "-ifscope", std::string{interface_name}, "default", std::string{router}};
-  if (const auto status = RunOrFail(kRoutePath, add_arguments, "添加 scoped 默认路由"); status) {
+  if (const auto status =
+          RunOrFail(kRoutePath, add_arguments, Text(Msg::kCapiWhatAddScopedRoute));
+      status) {
     return tetherkit::Ok();
   }
   // 已经存在同样一条时 add 会失败（EEXIST），改成 change 再试一次。
   const std::vector<std::string> change_arguments{
       "-n",      "change",  "-inet",   "-ifscope",
       std::string{interface_name}, "default", std::string{router}};
-  return RunOrFail(kRoutePath, change_arguments, "更新 scoped 默认路由");
+  return RunOrFail(kRoutePath, change_arguments, Text(Msg::kCapiWhatUpdateScopedRoute));
 }
 
 /// 把**全局**默认路由改到指定网关。
 [[nodiscard]] Status PromoteToGlobalDefaultRoute(std::string_view router) {
   const std::vector<std::string> arguments{"-n", "change", "-inet", "default", std::string{router}};
-  if (const auto status = RunOrFail(kRoutePath, arguments, "切换全局默认路由"); status) {
+  if (const auto status = RunOrFail(kRoutePath, arguments, Text(Msg::kCapiWhatSwitchGlobalRoute));
+      status) {
     return tetherkit::Ok();
   }
   // 系统当前可能压根没有全局默认路由（没连任何网络），此时 change 会失败，
   // 该用 add。这正是 USB 网络共享最典型的场景，必须处理。
   const std::vector<std::string> add_arguments{"-n", "add", "-inet", "default",
                                                std::string{router}};
-  return RunOrFail(kRoutePath, add_arguments, "添加全局默认路由");
+  return RunOrFail(kRoutePath, add_arguments, Text(Msg::kCapiWhatAddGlobalRoute));
 }
 
 /// DHCP 模式下，从租约里取出网关地址。
@@ -348,16 +352,13 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
 
 [[nodiscard]] Status ApplyDhcp(std::string_view interface_name, bool set_default_route) {
   TETHERKIT_RETURN_IF_ERROR(
-      RunOrFail(kIpconfigPath, {"set", std::string{interface_name}, "DHCP"}, "启动 DHCP"));
+      RunOrFail(kIpconfigPath, {"set", std::string{interface_name}, "DHCP"},
+                Text(Msg::kCapiWhatStartDhcp)));
 
   // 等租约。IPConfiguration 会自动完成四件事：拿租约、配 scoped DNS、
   // 装 scoped 默认路由、把服务发布到动态存储 —— 我们什么都不用做。
   if (!WaitForLease(interface_name)) {
-    return std::unexpected(Error::Generic(std::format(
-        "DHCP 在 {} 秒内没有拿到租约。\n"
-        "  常见原因：设备侧没有开启网络共享，或对端没有 DHCP 服务器。\n"
-        "  服务仍在后台重试，稍后刷新可能会看到地址；也可以改用静态 IP。",
-        kDhcpLeaseTimeout.count())));
+    return std::unexpected(Error::Generic(Tr(Msg::kCapiDhcpTimeout, kDhcpLeaseTimeout.count())));
   }
 
   if (!set_default_route) {
@@ -365,8 +366,7 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
   }
   const std::optional<std::string> router = QueryDhcpRouter(interface_name);
   if (!router.has_value()) {
-    return std::unexpected(Error::Generic(
-        "已拿到 DHCP 租约，但租约里没有网关地址，无法把全局默认路由指向它。"));
+    return std::unexpected(Error::Generic(Tr(Msg::kCapiDhcpNoRouter)));
   }
   return PromoteToGlobalDefaultRoute(*router);
 }
@@ -374,19 +374,19 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
 [[nodiscard]] Status ApplyManual(std::string_view interface_name, const tk_ip_config_t& config) {
   if (!IsValidIpv4(config.address)) {
     return std::unexpected(
-        Error::Generic(std::format("IP 地址 \"{}\" 不是合法的 IPv4 地址", config.address)));
+        Error::Generic(Tr(Msg::kCapiInvalidAddress, config.address)));
   }
   if (!IsValidIpv4(config.netmask)) {
     return std::unexpected(
-        Error::Generic(std::format("子网掩码 \"{}\" 不是合法的 IPv4 地址", config.netmask)));
+        Error::Generic(Tr(Msg::kCapiInvalidNetmask, config.netmask)));
   }
   const std::string_view router{config.router};
   if (!router.empty() && !IsValidIpv4(router)) {
     return std::unexpected(
-        Error::Generic(std::format("网关 \"{}\" 不是合法的 IPv4 地址", router)));
+        Error::Generic(Tr(Msg::kCapiInvalidRouter, router)));
   }
   if (config.set_default_route && router.empty()) {
-    return std::unexpected(Error::Generic("勾选了「设为默认路由」就必须填写网关地址"));
+    return std::unexpected(Error::Generic(Tr(Msg::kCapiDefaultRouteNeedsRouter)));
   }
 
   std::vector<std::string> dns_servers;
@@ -397,7 +397,7 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
     }
     if (!IsValidIpv4(server)) {
       return std::unexpected(
-          Error::Generic(std::format("DNS 服务器 \"{}\" 不是合法的 IPv4 地址", server)));
+          Error::Generic(Tr(Msg::kCapiInvalidDns, server)));
     }
     dns_servers.emplace_back(server);
   }
@@ -406,7 +406,7 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
   TETHERKIT_RETURN_IF_ERROR(RunOrFail(
       kIpconfigPath,
       {"set", std::string{interface_name}, "MANUAL", config.address, config.netmask},
-      "配置静态 IP"));
+      Text(Msg::kCapiWhatApplyManual)));
 
   if (!router.empty()) {
     TETHERKIT_RETURN_IF_ERROR(InstallScopedDefaultRoute(interface_name, router));
@@ -422,7 +422,7 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
           service_id.has_value()) {
         TryPublishDns(store, *service_id, dns_servers);
       } else {
-        TETHERKIT_WARN("找不到 {} 对应的网络服务，DNS 无法下发", interface_name);
+        TETHERKIT_WARN_TR(Msg::kCapiNoServiceForDns, interface_name);
       }
     }
   }
@@ -430,7 +430,8 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
 }
 
 [[nodiscard]] Status ApplyNone(std::string_view interface_name) {
-  return RunOrFail(kIpconfigPath, {"set", std::string{interface_name}, "NONE"}, "撤销网卡配置");
+  return RunOrFail(kIpconfigPath, {"set", std::string{interface_name}, "NONE"},
+                   Text(Msg::kCapiWhatClearConfig));
 }
 
 }  // namespace
@@ -451,7 +452,7 @@ tk_result_t tk_net_apply(const char* interface_name, const tk_ip_config_t* confi
                          tk_error_t* out_error) {
   ClearError(out_error);
   if (config == nullptr) {
-    FillGenericError(out_error, "tk_net_apply：config 不能为空");
+    FillGenericError(out_error, Tr(Msg::kCapiApplyConfigNull));
     return TK_ERR_INVALID_ARGUMENT;
   }
   if (const auto status = ValidateInterface(interface_name); !status) {
@@ -459,7 +460,7 @@ tk_result_t tk_net_apply(const char* interface_name, const tk_ip_config_t* confi
     return TK_ERR_INVALID_ARGUMENT;
   }
   if (::geteuid() != 0) {
-    FillGenericError(out_error, "配置网卡 IP 需要 root 权限");
+    FillGenericError(out_error, Tr(Msg::kCapiApplyNeedsRoot));
     return TK_ERR_PERMISSION;
   }
 
@@ -475,7 +476,7 @@ tk_result_t tk_net_apply(const char* interface_name, const tk_ip_config_t* confi
       status = ApplyNone(interface_name);
       break;
     default:
-      FillGenericError(out_error, std::format("未知的上网方式 {}", config->mode));
+      FillGenericError(out_error, Tr(Msg::kCapiUnknownIpMode, config->mode));
       return TK_ERR_INVALID_ARGUMENT;
   }
 
@@ -493,7 +494,7 @@ tk_result_t tk_net_clear(const char* interface_name, tk_error_t* out_error) {
     return TK_ERR_INVALID_ARGUMENT;
   }
   if (::geteuid() != 0) {
-    FillGenericError(out_error, "撤销网卡配置需要 root 权限");
+    FillGenericError(out_error, Tr(Msg::kCapiClearNeedsRoot));
     return TK_ERR_PERMISSION;
   }
 

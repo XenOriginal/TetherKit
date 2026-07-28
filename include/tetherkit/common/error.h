@@ -17,6 +17,16 @@
 
 namespace tetherkit {
 
+namespace detail {
+
+/// 「外层原因 <分隔符> 内层原因」里的那个分隔符，随当前语言变化。
+///
+/// 在这里前置声明（实现在 common/i18n.cc）而不是直接 include i18n.h：
+/// error.h 被全项目包含，让它拖上 <format> 与整张文案表不划算。
+[[nodiscard]] std::string_view ContextSeparator() noexcept;
+
+}  // namespace detail
+
 /// 错误码的来源域。决定 `code` 字段该怎么翻译成文字。
 enum class ErrorDomain : std::uint8_t {
   kGeneric,  ///< 纯逻辑错误，`code` 无意义。
@@ -60,9 +70,11 @@ class Error {
   [[nodiscard]] std::string_view Context() const noexcept { return context_; }
 
   /// 在已有错误上追加一层上下文，形成「外层原因：内层原因」的链条。
-  /// 用法：`return std::unexpected(std::move(e).WithContext("打开 BPF 设备失败"));`
+  /// 用法：`return std::unexpected(std::move(e).WithContext(Tr(Msg::kNetOpenBpfFailed)));`
+  ///
+  /// 分隔符随语言变化（中文是全角冒号、英文是 ": "），所以不能写死在这里。
   [[nodiscard]] Error WithContext(std::string_view outer) && {
-    context_ = std::string{outer} + "：" + context_;
+    context_ = std::string{outer} + std::string{detail::ContextSeparator()} + context_;
     return std::move(*this);
   }
 

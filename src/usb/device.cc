@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "tetherkit/common/byte_order.h"
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 
 namespace tetherkit::usb {
@@ -123,7 +124,7 @@ Result<std::vector<DeviceCandidate>> FindRndisDevices(const Context& context,
   const ssize_t count = ::libusb_get_device_list(context.Raw(), &raw_list);
   if (count < 0) {
     return std::unexpected(
-        Error::FromLibUsb(static_cast<int>(count), "libusb_get_device_list 失败"));
+        Error::FromLibUsb(static_cast<int>(count), Tr(Msg::kUsbGetDeviceListFailed)));
   }
   // RAII 释放设备列表（unref_devices = 1）。
   const std::unique_ptr<::libusb_device*, void (*)(::libusb_device**)> list_guard(
@@ -171,11 +172,8 @@ Result<std::vector<DeviceCandidate>> FindRndisDevices(const Context& context,
             continue;
           }
           if (LooksLikeRealAcmModem(descriptor)) {
-            TETHERKIT_DEBUG(
-                "{:04x}:{:04x} 接口 {} 签名像 RNDIS，但带非零 ACM bmCapabilities，"
-                "判定为真 cdc-acm 调制解调器，跳过",
-                device_descriptor.idVendor, device_descriptor.idProduct,
-                descriptor.bInterfaceNumber);
+            TETHERKIT_DEBUG_TR(Msg::kUsbSkippedAcmModem, device_descriptor.idVendor,
+                               device_descriptor.idProduct, descriptor.bInterfaceNumber);
             continue;
           }
 
@@ -208,21 +206,19 @@ Result<std::vector<DeviceCandidate>> FindRndisDevices(const Context& context,
           }
 
           if (!resolved) {
-            TETHERKIT_DEBUG(
-                "{} 的接口 {} 是 RNDIS 通信接口，但找不到配对的数据接口，跳过",
-                candidate.Describe(), candidate.control_interface);
+            TETHERKIT_DEBUG_TR(Msg::kUsbNoPairedDataInterface, candidate.Describe(),
+                               candidate.control_interface);
             continue;
           }
 
           // DEBUG 而不是 INFO：枚举是被周期性调用的（GUI 每 2 秒扫一次），
           // 这句话在 INFO 级别会把日志刷成一整列重复。「发现了什么」由调用方
           // 决定怎么呈现 —— CLI 自己打印列表，GUI 显示在设备卡里。
-          TETHERKIT_DEBUG(
-              "发现 RNDIS 设备 {}：通信接口 {}、数据接口 {}，签名 {:02x}/{:02x}/{:02x}{}",
-              candidate.Describe(), candidate.control_interface, candidate.data_interface,
-              signature.interface_class, signature.interface_subclass,
+          TETHERKIT_DEBUG_TR(
+              Msg::kUsbDeviceFound, candidate.Describe(), candidate.control_interface,
+              candidate.data_interface, signature.interface_class, signature.interface_subclass,
               signature.interface_protocol,
-              candidate.used_android_quirk ? "（走了 Android quirk 兜底）" : "");
+              candidate.used_android_quirk ? Text(Msg::kUsbViaAndroidQuirk) : std::string_view{});
           candidates.push_back(candidate);
           // 一个设备只取第一个匹配的通信接口。
           goto next_device;
@@ -245,7 +241,7 @@ Result<std::unique_ptr<Device>> Device::Open(const Context& context,
   const ssize_t count = ::libusb_get_device_list(context.Raw(), &raw_list);
   if (count < 0) {
     return std::unexpected(
-        Error::FromLibUsb(static_cast<int>(count), "libusb_get_device_list 失败"));
+        Error::FromLibUsb(static_cast<int>(count), Tr(Msg::kUsbGetDeviceListFailed)));
   }
   const std::unique_ptr<::libusb_device*, void (*)(::libusb_device**)> list_guard(
       raw_list, [](::libusb_device** list) { ::libusb_free_device_list(list, 1); });
@@ -261,7 +257,7 @@ Result<std::unique_ptr<Device>> Device::Open(const Context& context,
   }
   if (target == nullptr) {
     return std::unexpected(
-        Error::Generic(std::format("设备 {} 已不在总线上", candidate.Describe())));
+        Error::Generic(Tr(Msg::kUsbDeviceGone, candidate.Describe())));
   }
 
   auto device = std::unique_ptr<Device>(new Device());
@@ -271,8 +267,8 @@ Result<std::unique_ptr<Device>> Device::Open(const Context& context,
 
   const int open_rc = ::libusb_open(target, &device->handle_);
   if (open_rc != LIBUSB_SUCCESS) {
-    return std::unexpected(Error::FromLibUsb(
-        open_rc, std::format("打开设备 {} 失败", device->description_)));
+    return std::unexpected(
+        Error::FromLibUsb(open_rc, Tr(Msg::kUsbOpenFailed, device->description_)));
   }
 
   // **刻意不调用 libusb_set_auto_detach_kernel_driver** —— 见头文件说明：
@@ -286,44 +282,40 @@ Result<std::unique_ptr<Device>> Device::Open(const Context& context,
       claimed_flag = true;
       return Ok();
     }
-    Error error = Error::FromLibUsb(
-        rc, std::format("声明{}（接口 {}）失败", role, interface_number));
+    Error error = Error::FromLibUsb(rc, Tr(Msg::kUsbClaimFailed, role, interface_number));
     if (rc == LIBUSB_ERROR_ACCESS) {
-      return std::unexpected(std::move(error).WithContext(
-          "接口被内核驱动独占。macOS 本身没有 RNDIS 驱动，出现这种情况通常意味着"
-          "装了 HoRNDIS 之类的第三方 kext，或有别的用户态程序已经声明了该接口"));
+      return std::unexpected(std::move(error).WithContext(Tr(Msg::kUsbClaimBusyHint)));
     }
     if (rc == LIBUSB_ERROR_NOT_FOUND) {
-      return std::unexpected(std::move(error).WithContext(
-          "接口不存在。可能是设备切换了配置，或描述符解析有误"));
+      return std::unexpected(std::move(error).WithContext(Tr(Msg::kUsbClaimNotFoundHint)));
     }
     return std::unexpected(std::move(error));
   };
 
   TETHERKIT_RETURN_IF_ERROR(
-      claim(candidate.control_interface, "RNDIS 通信接口", device->control_interface_claimed_));
+      claim(candidate.control_interface, Text(Msg::kUsbControlInterface),
+            device->control_interface_claimed_));
   TETHERKIT_RETURN_IF_ERROR(
-      claim(candidate.data_interface, "RNDIS 数据接口", device->data_interface_claimed_));
+      claim(candidate.data_interface, Text(Msg::kUsbDataInterface),
+            device->data_interface_claimed_));
 
   // 解析端点。
   ::libusb_config_descriptor* config = nullptr;
   const int config_rc = ::libusb_get_active_config_descriptor(target, &config);
   if (config_rc != LIBUSB_SUCCESS) {
-    return std::unexpected(Error::FromLibUsb(config_rc, "读取活动配置描述符失败"));
+    return std::unexpected(Error::FromLibUsb(config_rc, Tr(Msg::kUsbReadActiveConfigFailed)));
   }
   const std::unique_ptr<::libusb_config_descriptor, void (*)(::libusb_config_descriptor*)>
       config_guard(config, &::libusb_free_config_descriptor);
 
   TETHERKIT_RETURN_IF_ERROR(device->ResolveEndpoints(*config));
 
-  TETHERKIT_INFO(
-      "已声明 {}（{}）：bulk IN 0x{:02x} / OUT 0x{:02x}（wMaxPacketSize {}），"
-      "中断 IN {}",
-      device->description_, device->SpeedName(), device->bulk_in_endpoint_,
-      device->bulk_out_endpoint_, device->bulk_max_packet_size_,
-      device->interrupt_in_endpoint_ == 0
-          ? std::string{"无（将退化为轮询控制端点）"}
-          : std::format("0x{:02x}", device->interrupt_in_endpoint_));
+  TETHERKIT_INFO_TR(Msg::kUsbClaimed, device->description_, device->SpeedName(),
+                    device->bulk_in_endpoint_, device->bulk_out_endpoint_,
+                    device->bulk_max_packet_size_,
+                    device->interrupt_in_endpoint_ == 0
+                        ? std::string{Text(Msg::kUsbNoInterruptEndpointShort)}
+                        : std::format("0x{:02x}", device->interrupt_in_endpoint_));
 
   return device;
 }
@@ -346,7 +338,7 @@ Device::~Device() {
   }
   ::libusb_close(handle_);
   handle_ = nullptr;
-  TETHERKIT_DEBUG("已关闭设备 {}", description_);
+  TETHERKIT_DEBUG_TR(Msg::kUsbClosed, description_);
 }
 
 Status Device::ResolveEndpoints(const ::libusb_config_descriptor& config) {
@@ -387,12 +379,12 @@ Status Device::ResolveEndpoints(const ::libusb_config_descriptor& config) {
   }
 
   if (bulk_in_endpoint_ == 0 || bulk_out_endpoint_ == 0) {
-    return std::unexpected(Error::Generic(std::format(
-        "数据接口 {} 上找不到成对的 bulk 端点（IN=0x{:02x}, OUT=0x{:02x}）",
-        candidate_.data_interface, bulk_in_endpoint_, bulk_out_endpoint_)));
+    return std::unexpected(Error::Generic(Tr(Msg::kUsbBulkEndpointsMissing,
+                                             candidate_.data_interface, bulk_in_endpoint_,
+                                             bulk_out_endpoint_)));
   }
   if (bulk_max_packet_size_ == 0) {
-    return std::unexpected(Error::Generic("bulk 端点的 wMaxPacketSize 为 0"));
+    return std::unexpected(Error::Generic(Tr(Msg::kUsbBulkMaxPacketSizeZero)));
   }
   // 中断端点缺失是合法的：Linux 的 host 驱动干脆完全忽略它，改为轮询控制端点。
   return Ok();
@@ -411,7 +403,7 @@ std::string_view Device::SpeedName() const noexcept {
     case LIBUSB_SPEED_SUPER_PLUS:
       return "SuperSpeed+ 10Gbps";
     default:
-      return "未知速度";
+      return Text(Msg::kUsbUnknownSpeed);
   }
 }
 
@@ -419,7 +411,7 @@ Status Device::ClearHalt(std::uint8_t endpoint) {
   const int rc = ::libusb_clear_halt(handle_, endpoint);
   if (rc != LIBUSB_SUCCESS) {
     return std::unexpected(
-        Error::FromLibUsb(rc, std::format("清除端点 0x{:02x} 的 halt 状态失败", endpoint)));
+        Error::FromLibUsb(rc, Tr(Msg::kUsbClearHaltFailed, endpoint)));
   }
   return Ok();
 }
@@ -453,16 +445,16 @@ UsbControlChannel::~UsbControlChannel() {
 
 Status UsbControlChannel::StartNotificationListener() {
   if (device_->InterruptInEndpoint() == 0) {
-    TETHERKIT_DEBUG("设备没有中断端点，通知监听跳过（将退化为轮询控制端点）");
+    TETHERKIT_DEBUG_TR(Msg::kUsbNoInterruptEndpoint);
     return Ok();
   }
   if (notification_transfer_ != nullptr) {
-    return std::unexpected(Error::Generic("通知监听已启动"));
+    return std::unexpected(Error::Generic(Tr(Msg::kUsbNotificationAlreadyRunning)));
   }
 
   notification_transfer_ = ::libusb_alloc_transfer(0);
   if (notification_transfer_ == nullptr) {
-    return std::unexpected(Error::Generic("为中断通知分配 libusb transfer 失败"));
+    return std::unexpected(Error::Generic(Tr(Msg::kUsbAllocInterruptTransferFailed)));
   }
 
   // timeout 传 0：中断端点上本来就是「有事才来」，无限等待正是我们要的语义。
@@ -477,9 +469,9 @@ Status UsbControlChannel::StartNotificationListener() {
   const int rc = ::libusb_submit_transfer(notification_transfer_);
   if (rc != LIBUSB_SUCCESS) {
     notification_in_flight_.store(false, std::memory_order_release);
-    return std::unexpected(Error::FromLibUsb(rc, "提交中断通知传输失败"));
+    return std::unexpected(Error::FromLibUsb(rc, Tr(Msg::kUsbSubmitInterruptFailed)));
   }
-  TETHERKIT_DEBUG("中断通知监听已启动（端点 0x{:02x}）", device_->InterruptInEndpoint());
+  TETHERKIT_DEBUG_TR(Msg::kUsbNotificationStarted, device_->InterruptInEndpoint());
   return Ok();
 }
 
@@ -492,7 +484,7 @@ void UsbControlChannel::StopNotificationListener() {
   if (notification_in_flight_.load(std::memory_order_acquire)) {
     const int rc = ::libusb_cancel_transfer(notification_transfer_);
     if (rc != LIBUSB_SUCCESS && rc != LIBUSB_ERROR_NOT_FOUND) {
-      TETHERKIT_DEBUG("取消中断通知传输返回 {}", ::libusb_error_name(rc));
+      TETHERKIT_DEBUG_TR(Msg::kUsbCancelInterruptReturned, ::libusb_error_name(rc));
     }
   }
 
@@ -505,7 +497,7 @@ void UsbControlChannel::StopNotificationListener() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   if (notification_in_flight_.load(std::memory_order_acquire)) {
-    TETHERKIT_ERROR("等待中断通知传输回收超时，为避免 use-after-free 不释放它");
+    TETHERKIT_ERROR_TR(Msg::kUsbInterruptReclaimTimeout);
     notification_transfer_ = nullptr;  // 故意泄漏
   }
 }
@@ -527,7 +519,7 @@ void UsbControlChannel::OnNotificationComplete() noexcept {
         if (notification == rndis::kNotificationResponseAvailable) {
           notification_pending_.store(true, std::memory_order_release);
         } else {
-          TETHERKIT_TRACE("中断端点收到未知通知 {:#010x}，忽略", notification);
+          TETHERKIT_TRACE_TR(Msg::kUsbUnknownNotification, notification);
         }
       }
       break;
@@ -541,15 +533,14 @@ void UsbControlChannel::OnNotificationComplete() noexcept {
       // 中断端点 STALL：清掉后继续。清不掉就放弃监听，退化为轮询控制端点
       // （Linux 的 host 驱动本来就完全不用中断端点，所以这不致命）。
       if (const auto status = device_->ClearHalt(device_->InterruptInEndpoint()); !status) {
-        TETHERKIT_WARN("清除中断端点 halt 失败，改为轮询控制端点：{}",
-                       status.error().ToString());
+        TETHERKIT_WARN_TR(Msg::kUsbInterruptHaltClearFailed, status.error().ToString());
         resubmit = false;
       }
       break;
 
     default:
-      TETHERKIT_TRACE("中断通知传输 status={}，继续监听",
-                      static_cast<int>(transfer->status));
+      TETHERKIT_TRACE_TR(Msg::kUsbInterruptTransferStatus,
+                         static_cast<int>(transfer->status));
       break;
   }
 
@@ -565,7 +556,7 @@ void UsbControlChannel::OnNotificationComplete() noexcept {
 Status UsbControlChannel::SendMessage(std::span<const std::byte> message) {
   if (message.empty() || message.size() > 0xFFFF) {
     return std::unexpected(
-        Error::Generic(std::format("控制消息长度 {} 非法", message.size())));
+        Error::Generic(Tr(Msg::kUsbControlMessageLengthInvalid, message.size())));
   }
 
   // SEND_ENCAPSULATED_COMMAND：bmRequestType=0x21（OUT|Class|Interface）,
@@ -578,13 +569,11 @@ Status UsbControlChannel::SendMessage(std::span<const std::byte> message) {
       static_cast<std::uint16_t>(message.size()), timeout_millis_);
 
   if (transferred < 0) {
-    return std::unexpected(Error::FromLibUsb(
-        transferred, "SEND_ENCAPSULATED_COMMAND 失败"));
+    return std::unexpected(Error::FromLibUsb(transferred, Tr(Msg::kUsbSendEncapsulatedFailed)));
   }
   if (static_cast<std::size_t>(transferred) != message.size()) {
-    return std::unexpected(Error::Generic(
-        std::format("SEND_ENCAPSULATED_COMMAND 只发出 {} / {} 字节", transferred,
-                    message.size())));
+    return std::unexpected(
+        Error::Generic(Tr(Msg::kUsbSendEncapsulatedShort, transferred, message.size())));
   }
   return Ok();
 }
@@ -603,7 +592,7 @@ Result<std::span<const std::byte>> UsbControlChannel::ReceiveMessage() {
 
   if (transferred < 0) {
     return std::unexpected(
-        Error::FromLibUsb(transferred, "GET_ENCAPSULATED_RESPONSE 失败"));
+        Error::FromLibUsb(transferred, Tr(Msg::kUsbGetEncapsulatedFailed)));
   }
 
   // 规范：设备尚无有效响应时返回 **1 字节 0x00**，而不是 STALL。

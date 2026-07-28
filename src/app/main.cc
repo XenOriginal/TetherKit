@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 #include "tetherkit/core/runtime.h"
 #include "tetherkit/version.h"
@@ -22,9 +23,13 @@
 namespace {
 
 using tetherkit::Error;
+using tetherkit::Language;
 using tetherkit::LogLevel;
+using tetherkit::Msg;
 using tetherkit::Result;
 using tetherkit::Status;
+using tetherkit::Text;
+using tetherkit::Tr;
 
 /// 全局停机标志。
 ///
@@ -56,7 +61,7 @@ extern "C" void HandleSignal(int /*signal_number*/) {
   for (const int signal_number : {SIGINT, SIGTERM, SIGHUP}) {
     if (::sigaction(signal_number, &action, nullptr) != 0) {
       return std::unexpected(
-          Error::FromErrno(0, std::format("安装信号 {} 的处理器失败", signal_number)));
+          Error::FromErrno(0, Tr(Msg::kCliInstallSignalHandlerFailed, signal_number)));
     }
   }
 
@@ -65,7 +70,7 @@ extern "C" void HandleSignal(int /*signal_number*/) {
   ignore.sa_handler = SIG_IGN;
   sigemptyset(&ignore.sa_mask);
   if (::sigaction(SIGPIPE, &ignore, nullptr) != 0) {
-    return std::unexpected(Error::FromErrno(0, "忽略 SIGPIPE 失败"));
+    return std::unexpected(Error::FromErrno(0, Tr(Msg::kCliIgnoreSigpipeFailed)));
   }
   return tetherkit::Ok();
 }
@@ -74,49 +79,39 @@ extern "C" void HandleSignal(int /*signal_number*/) {
 // 命令行解析
 // =============================================================================
 
+/// 把一条不带参数的文案原样写到 stdout。
+///
+/// 用 fwrite 而不是 fputs：`Text()` 返回的 string_view 指向表里的字面量，
+/// 虽然实际上带 NUL，但 string_view 的契约里没有这一条，别养成坏习惯。
+void PrintText(Msg id) {
+  const std::string_view text = Text(id);
+  std::fwrite(text.data(), 1, text.size(), stdout);
+}
+
 void PrintUsage() {
-  std::fputs(
-      "用法：sudo tetherkit-cli [选项]\n"
-      "\n"
-      "  macOS 用户态 RNDIS 驱动：把 RNDIS 设备（Android USB 网络共享等）\n"
-      "  变成一张系统可见的网卡。\n"
-      "\n"
-      "设备选择：\n"
-      "  --vid <十六进制>      只匹配指定 USB 厂商 ID（如 18d1）\n"
-      "  --pid <十六进制>      只匹配指定 USB 产品 ID（如 4ee4）\n"
-      "  --list               列出识别到的 RNDIS 设备后退出（**不需要 root**）\n"
-      "\n"
-      "网卡：\n"
-      "  --mtu <字节>          期望 MTU，默认 1500（设备装不下时会自动下调；\n"
-      "                       上限受 sysctl net.link.fake.max_mtu 约束）\n"
-      "  --keep-feth-mac      不把系统侧网卡的 MAC 改成设备汇报的地址\n"
-      "\n"
-      "性能调优：\n"
-      "  --rx-transfers <n>    并发在飞的 bulk IN 传输数，默认 16\n"
-      "  --tx-transfers <n>    并发在飞的 bulk OUT 传输数，默认 4。实测 4/8/16\n"
-      "                       无可分辨差异（池占满时会等槽位而不是丢帧），\n"
-      "                       一般不需要动它\n"
-      "  --rx-transfer-kb <n>  每个 bulk IN 缓冲的 KiB 数，默认 16\n"
-      "  --max-transfer-kb <n> 在 INITIALIZE 里宣称的 MaxTransferSize（KiB），\n"
-      "                       默认 16。这是让设备聚合多包的唯一手段，是吞吐的\n"
-      "                       主要杠杆；报大一点通常更快\n"
-      "  --max-tx-packets <n>  host → device 每次传输最多聚合几个 RNDIS 包，\n"
-      "                       0（默认）表示听设备汇报的 MaxPacketsPerMessage。\n"
-      "                       诊断用：怀疑设备汇报了聚合能力却只拆第一个包时，\n"
-      "                       设成 1 对比一下。注意实测过的 Android 设备聚合是\n"
-      "                       有效的，钳到 1 反而更慢，别当成丢帧的默认解法\n"
-      "  --bpf-buffer-kb <n>   BPF 内核抓包缓冲的 KiB 数，默认 4096\n"
-      "\n"
-      "其它：\n"
-      "  --stats <毫秒>        统计报告周期，0 表示关闭，默认 5000\n"
-      "  --log <级别>          trace|debug|info|warn|error|off，默认 info\n"
-      "  --no-color           关闭日志彩色输出\n"
-      "  -h, --help           显示本帮助\n"
-      "  -V, --version        显示版本\n"
-      "\n"
-      "为什么需要 root：创建 feth 虚拟网卡与打开 /dev/bpf* 都需要 root。\n"
-      "USB 侧本身不需要 —— macOS 没有 RNDIS 内核驱动，libusb 能直接声明接口。\n",
-      stdout);
+  PrintText(Msg::kCliUsage);
+}
+
+/// 在正式解析参数**之前**先把 `--lang` 挑出来生效。
+///
+/// 为什么要单独扫一遍：帮助文本、以及解析过程中自己产生的报错，都得用用户要的
+/// 那种语言。等 ParseArguments 顺序走到 `--lang` 时，前面几个选项的错误消息
+/// 已经用旧语言发出去了。
+///
+/// 只认 `--lang <值>` 这一种写法（全项目的选项都不支持 `--opt=值`，不在这里
+/// 破例，否则 ParseArguments 会把 `--lang=en` 当成未知选项，反而更费解）。
+/// 值非法时这里不报错，留给 ParseArguments 去报 —— 那时报错本身已经是
+/// 用户要的语言了。
+void ApplyLanguageOption(int argc, char** argv) {
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string_view{argv[i]} != "--lang") {
+      continue;
+    }
+    if (Language language{}; tetherkit::ParseLanguage(argv[i + 1], &language)) {
+      tetherkit::SetLanguage(language);
+    }
+    return;
+  }
 }
 
 /// 解析一个无符号整数参数。
@@ -126,7 +121,7 @@ void PrintUsage() {
   const char* end = begin + text.size();
   const auto [ptr, error_code] = std::from_chars(begin, end, value, base);
   if (error_code != std::errc{} || ptr != end) {
-    return std::unexpected(Error::Generic(std::format("无法解析数值 \"{}\"", text)));
+    return std::unexpected(Error::Generic(Tr(Msg::kCliParseNumberFailed, text)));
   }
   return value;
 }
@@ -150,7 +145,7 @@ void PrintUsage() {
   if (text == "off") {
     return LogLevel::kOff;
   }
-  return std::unexpected(Error::Generic(std::format("未知日志级别 \"{}\"", text)));
+  return std::unexpected(Error::Generic(Tr(Msg::kCliUnknownLogLevel, text)));
 }
 
 /// 解析结果。
@@ -168,7 +163,7 @@ struct ParsedArguments {
   const auto take_value = [argc, argv](int& index,
                                        std::string_view option) -> Result<std::string_view> {
     if (index + 1 >= argc) {
-      return std::unexpected(Error::Generic(std::format("选项 {} 缺少参数", option)));
+      return std::unexpected(Error::Generic(Tr(Msg::kCliMissingOptionValue, option)));
     }
     ++index;
     return std::string_view{argv[index]};
@@ -259,9 +254,18 @@ struct ParsedArguments {
       tetherkit::SetLogLevel(level);
       continue;
     }
+    if (argument == "--lang") {
+      // 值已经由 ApplyLanguageOption 在解析开始前生效了（那样连本轮的报错
+      // 都是目标语言）。这里只把它消费掉并复核一次拼写。
+      TETHERKIT_ASSIGN_OR_RETURN(const auto text, take_value(i, argument));
+      Language ignored{};
+      if (!tetherkit::ParseLanguage(text, &ignored)) {
+        return std::unexpected(Error::Generic(Tr(Msg::kCliUnknownLanguage, text)));
+      }
+      continue;
+    }
 
-    return std::unexpected(Error::Generic(
-        std::format("未知选项 \"{}\"，用 --help 查看用法", argument)));
+    return std::unexpected(Error::Generic(Tr(Msg::kCliUnknownOption, argument)));
   }
   return parsed;
 }
@@ -273,22 +277,18 @@ struct ParsedArguments {
                              tetherkit::usb::FindRndisDevices(*context, filter));
 
   if (candidates.empty()) {
-    std::fputs("没有找到 RNDIS 设备。\n", stdout);
-    std::fputs(
-        "请检查：① 用的是数据线而非只供电的线；② 设备上已开启 USB 网络共享；\n"
-        "        ③ 手机已解锁并信任本机。\n",
-        stdout);
+    PrintText(Msg::kCliNoDevices);
+    PrintText(Msg::kCliNoDevicesHint);
     return tetherkit::Ok();
   }
 
-  std::fputs("识别到的 RNDIS 设备：\n", stdout);
+  PrintText(Msg::kCliDevicesHeader);
   for (const auto& candidate : candidates) {
-    const std::string line = std::format(
-        "  {}  通信接口 {} / 数据接口 {}  签名 {:02x}/{:02x}/{:02x}{}\n",
-        candidate.Describe(), candidate.control_interface, candidate.data_interface,
-        candidate.signature.interface_class, candidate.signature.interface_subclass,
-        candidate.signature.interface_protocol,
-        candidate.used_android_quirk ? "  （走 Android quirk 兜底）" : "");
+    const std::string line =
+        Tr(Msg::kCliDeviceLine, candidate.Describe(), candidate.control_interface,
+           candidate.data_interface, candidate.signature.interface_class,
+           candidate.signature.interface_subclass, candidate.signature.interface_protocol,
+           candidate.used_android_quirk ? Text(Msg::kCliDeviceAndroidQuirk) : std::string_view{});
     std::fputs(line.c_str(), stdout);
   }
   return tetherkit::Ok();
@@ -297,9 +297,14 @@ struct ParsedArguments {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // 语言要在**任何**输出之前定下来。先按环境推断，再让显式的 --lang 覆盖 ——
+  // 这样连参数解析自己报的错也是用户要的那种语言。
+  tetherkit::SetLanguage(tetherkit::DetectLanguageFromEnvironment());
+  ApplyLanguageOption(argc, argv);
+
   auto parsed = ParseArguments(argc, argv);
   if (!parsed) {
-    const std::string message = std::format("参数错误：{}\n", parsed.error().ToString());
+    const std::string message = Tr(Msg::kCliArgumentError, parsed.error().ToString());
     std::fputs(message.c_str(), stderr);
     return 2;
   }
@@ -317,7 +322,7 @@ int main(int argc, char** argv) {
 
   if (parsed->list_devices) {
     if (const auto status = ListDevices(parsed->config.device_filter); !status) {
-      const std::string message = std::format("枚举设备失败：{}\n", status.error().ToString());
+      const std::string message = Tr(Msg::kCliEnumerateFailed, status.error().ToString());
       std::fputs(message.c_str(), stderr);
       return 1;
     }
@@ -338,7 +343,7 @@ int main(int argc, char** argv) {
   }
 
   if (const auto status = (*runtime)->Start(); !status) {
-    TETHERKIT_ERROR("启动失败：{}", status.error().ToString());
+    TETHERKIT_ERROR_TR(Msg::kCliStartFailed, status.error().ToString());
     return 1;
   }
 
@@ -349,7 +354,7 @@ int main(int argc, char** argv) {
     while (!g_stop_requested.load(std::memory_order_acquire)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    TETHERKIT_INFO("收到停机信号");
+    TETHERKIT_INFO_TR(Msg::kCliStopSignalReceived);
     (*runtime)->RequestStop();
   });
 

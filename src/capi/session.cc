@@ -15,6 +15,7 @@
 
 #include "capi_support.h"
 #include "tetherkit/capi/tetherkit_c.h"
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/time.h"
 #include "tetherkit/core/runtime.h"
 #include "tetherkit/net/feth_device.h"
@@ -171,7 +172,8 @@ void tk_session_config_init(tk_session_config_t* out_config) {
 tk_session_t* tk_session_create(const tk_session_config_t* config, tk_error_t* out_error) {
   ClearError(out_error);
   if (config == nullptr) {
-    tetherkit::capi::FillGenericError(out_error, "tk_session_create：config 不能为空");
+    tetherkit::capi::FillGenericError(out_error,
+                                      tetherkit::Tr(tetherkit::Msg::kCapiSessionConfigNull));
     return nullptr;
   }
 
@@ -181,7 +183,8 @@ tk_session_t* tk_session_create(const tk_session_config_t* config, tk_error_t* o
 
   auto session = std::unique_ptr<tk_session>(new (std::nothrow) tk_session());
   if (session == nullptr) {
-    tetherkit::capi::FillGenericError(out_error, "内存不足，无法创建会话");
+    tetherkit::capi::FillGenericError(out_error,
+                                      tetherkit::Tr(tetherkit::Msg::kCapiSessionOutOfMemory));
     return nullptr;
   }
 

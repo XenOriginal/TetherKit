@@ -10,12 +10,14 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "capi_support.h"
 #include "tetherkit/capi/tetherkit_c.h"
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/net/feth_device.h"
 #include "tetherkit/usb/context.h"
 #include "tetherkit/usb/device.h"
@@ -150,6 +152,41 @@ void FillDeviceInfo(const tetherkit::usb::DeviceCandidate& candidate,
 }
 
 }  // namespace
+
+namespace {
+
+/// tk_language_t → C++ 侧的 Language。越界返回 nullopt，让调用方忽略这次设置。
+[[nodiscard]] std::optional<tetherkit::Language> ToLanguage(std::int32_t value) noexcept {
+  switch (value) {
+    case TK_LANGUAGE_ENGLISH:
+      return tetherkit::Language::kEnglish;
+    case TK_LANGUAGE_CHINESE:
+      return tetherkit::Language::kChinese;
+    default:
+      return std::nullopt;
+  }
+}
+
+[[nodiscard]] std::int32_t FromLanguage(tetherkit::Language language) noexcept {
+  return language == tetherkit::Language::kChinese ? TK_LANGUAGE_CHINESE : TK_LANGUAGE_ENGLISH;
+}
+
+}  // namespace
+
+void tk_set_language(int32_t language) {
+  if (const std::optional<tetherkit::Language> parsed = ToLanguage(language);
+      parsed.has_value()) {
+    tetherkit::SetLanguage(*parsed);
+  }
+}
+
+int32_t tk_get_language(void) {
+  return FromLanguage(tetherkit::GetLanguage());
+}
+
+int32_t tk_detect_system_language(void) {
+  return FromLanguage(tetherkit::DetectLanguageFromEnvironment());
+}
 
 void tk_version(tk_version_info_t* out_version) {
   if (out_version == nullptr) {

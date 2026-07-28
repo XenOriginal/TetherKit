@@ -26,8 +26,7 @@ void ConfigureCurrentThread(std::string_view name, ThreadRole role) noexcept {
   const int rc = ::pthread_set_qos_class_self_np(qos, 0);
   if (rc != 0) {
     // QoS 设置失败不影响功能，只影响性能，因此只告警不返回错误。
-    TETHERKIT_WARN("设置线程 QoS 失败（qos={}, rc={}），将使用默认调度策略",
-                   static_cast<int>(qos), rc);
+    TETHERKIT_WARN_TR(Msg::kCommonThreadQosFailed, static_cast<int>(qos), rc);
   }
 }
 

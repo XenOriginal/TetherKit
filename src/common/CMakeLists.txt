@@ -7,6 +7,7 @@
 add_library(
   tk_common STATIC
   error.cc
+  i18n.cc
   logging.cc
   scheduling.cc)
 

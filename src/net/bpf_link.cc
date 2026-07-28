@@ -12,6 +12,7 @@
 #include <format>
 
 #include "tetherkit/common/byte_order.h"
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 #include "tetherkit/net/darwin_abi.h"
 #include "tetherkit/net/feth_device.h"
@@ -47,7 +48,7 @@ constexpr std::size_t kMaxBatchWriteBytes = std::size_t{256} * 1024;
                                     std::string_view what) {
   if (::ioctl(fd, request, argument) < 0) {
     // ENOTTY / EINVAL 表示当前 macOS 版本不支持这个私有 ioctl，属于预期情况。
-    TETHERKIT_DEBUG("可选 ioctl {} 不可用（errno={}），已跳过", what, errno);
+    TETHERKIT_DEBUG_TR(Msg::kNetOptionalIoctlUnavailable, what, errno);
     return false;
   }
   return true;
@@ -69,12 +70,11 @@ void BpfLink::Interrupt() noexcept {
 Result<std::unique_ptr<BpfLink>> BpfLink::Open(std::string_view interface_name,
                                               const BpfConfig& config) {
   if (interface_name.size() >= kInterfaceNameCapacity) {
-    return std::unexpected(Error::Generic(std::format("接口名 \"{}\" 过长", interface_name)));
+    return std::unexpected(Error::Generic(Tr(Msg::kNetInterfaceNameTooLong, interface_name)));
   }
   if (config.max_frame_bytes < kMinEthernetFrameBytes) {
     return std::unexpected(Error::Generic(
-        std::format("max_frame_bytes={} 小于最小以太帧长 {}", config.max_frame_bytes,
-                    kMinEthernetFrameBytes)));
+        Tr(Msg::kNetFrameLimitBelowMinimum, config.max_frame_bytes, kMinEthernetFrameBytes)));
   }
 
   auto link = std::unique_ptr<BpfLink>(new BpfLink());
@@ -105,18 +105,15 @@ Result<std::unique_ptr<BpfLink>> BpfLink::Open(std::string_view interface_name,
       break;  // 已经到上限，不会再有更大编号的节点
     }
     if (last_errno == EACCES || last_errno == EPERM) {
-      return std::unexpected(Error::FromErrno(
-          last_errno,
-          std::format("打开 {} 被拒绝。/dev/bpf* 的权限是 0600 root:wheel，"
-                      "而 macOS 没有 FreeBSD 的 access_bpf 组可用，因此必须以 root 运行",
-                      path)));
+      return std::unexpected(
+          Error::FromErrno(last_errno, Tr(Msg::kNetBpfOpenDenied, path)));
     }
     // 其它 errno：继续试下一个编号，最后统一报错。
   }
 
   if (link->fd_ < 0) {
-    return std::unexpected(Error::FromErrno(
-        last_errno, "找不到可用的 /dev/bpf* 设备（全部被占用或权限不足）"));
+    return std::unexpected(
+        Error::FromErrno(last_errno, Tr(Msg::kNetBpfNoDeviceAvailable)));
   }
 
   // ---------------------------------------------------------------------------
@@ -131,9 +128,7 @@ Result<std::unique_ptr<BpfLink>> BpfLink::Open(std::string_view interface_name,
       CallIoctl(link->fd_, BIOCSBLEN, &buffer_bytes, "ioctl(BIOCSBLEN)"));
   link->kernel_buffer_bytes_ = buffer_bytes;
   if (buffer_bytes != config.kernel_buffer_bytes) {
-    TETHERKIT_INFO("内核把 BPF 缓冲从请求的 {} 字节调整为 {} 字节（受 sysctl "
-                   "debug.bpf_bufsize_cap 限制）",
-                   config.kernel_buffer_bytes, buffer_bytes);
+    TETHERKIT_INFO_TR(Msg::kNetBpfBufferClamped, config.kernel_buffer_bytes, buffer_bytes);
   }
 
   // ---------------------------------------------------------------------------
@@ -161,10 +156,10 @@ Result<std::unique_ptr<BpfLink>> BpfLink::Open(std::string_view interface_name,
     Error error = status.error();
     if (error.Code() == ENXIO) {
       return std::unexpected(std::move(error).WithContext(
-          std::format("接口 {} 不存在，无法绑定 BPF", interface_name)));
+          Tr(Msg::kNetBpfInterfaceMissing, interface_name)));
     }
     return std::unexpected(
-        std::move(error).WithContext(std::format("把 BPF 绑定到 {} 失败", interface_name)));
+        std::move(error).WithContext(Tr(Msg::kNetBpfBindFailed, interface_name)));
   }
 
   // ---------------------------------------------------------------------------
@@ -177,9 +172,8 @@ Result<std::unique_ptr<BpfLink>> BpfLink::Open(std::string_view interface_name,
   TETHERKIT_RETURN_IF_ERROR(
       CallIoctl(link->fd_, BIOCGDLT, &data_link_type, "ioctl(BIOCGDLT)"));
   if (data_link_type != DLT_EN10MB) {
-    return std::unexpected(Error::Generic(std::format(
-        "接口 {} 的数据链路类型是 {}，本驱动只支持以太网（DLT_EN10MB={}）",
-        interface_name, data_link_type, DLT_EN10MB)));
+    return std::unexpected(Error::Generic(
+        Tr(Msg::kNetBpfWrongDataLinkType, interface_name, data_link_type, DLT_EN10MB)));
   }
 
   // ---------------------------------------------------------------------------
@@ -243,11 +237,12 @@ Result<std::unique_ptr<BpfLink>> BpfLink::Open(std::string_view interface_name,
     link->write_buffer_.resize(kMaxBatchWriteBytes);
   }
 
-  TETHERKIT_INFO(
-      "BPF 就绪：{} → {}（内核缓冲 {} KiB，单帧上限 {} 字节，批量写 {}，时间戳 {}）",
-      link->device_path_, link->interface_name_, link->kernel_buffer_bytes_ / 1024,
-      link->max_frame_bytes_, link->batch_write_enabled_ ? "已启用" : "不可用（逐帧写）",
-      link->timestamp_disabled_ ? "已关闭" : "保持开启");
+  TETHERKIT_INFO_TR(Msg::kNetBpfReady, link->device_path_, link->interface_name_,
+                    link->kernel_buffer_bytes_ / 1024, link->max_frame_bytes_,
+                    Text(link->batch_write_enabled_ ? Msg::kNetBpfBatchWriteEnabled
+                                                    : Msg::kNetBpfBatchWriteUnavailable),
+                    Text(link->timestamp_disabled_ ? Msg::kNetBpfTimestampDisabled
+                                                   : Msg::kNetBpfTimestampEnabled));
 
   return link;
 }
@@ -279,7 +274,7 @@ Result<ReadBatch> BpfLink::ReadFrames() {
       // 被信号打断或超时无数据，交给调用方继续循环
       return ReadBatch{.kernel_drops = last_kernel_drops_};
     }
-    return std::unexpected(Error::FromErrno(0, std::format("从 {} 读取失败", device_path_)));
+    return std::unexpected(Error::FromErrno(0, Tr(Msg::kNetBpfReadFailed, device_path_)));
   }
   if (received == 0) {
     return ReadBatch{.kernel_drops = last_kernel_drops_};  // 读超时到期且期间无包
@@ -308,16 +303,14 @@ Result<ReadBatch> BpfLink::ReadFrames() {
     const std::uint32_t header_length = LoadLe16(record + offsetof(::bpf_hdr, bh_hdrlen));
 
     if (header_length < kBpfHeaderMinBytes) [[unlikely]] {
-      TETHERKIT_WARN("BPF 记录的 bh_hdrlen={} 小于最小值 {}，丢弃本次读取的剩余内容",
-                     header_length, kBpfHeaderMinBytes);
+      TETHERKIT_WARN_TR(Msg::kNetBpfHeaderTooShort, header_length, kBpfHeaderMinBytes);
       break;
     }
 
     const std::size_t record_bytes = static_cast<std::size_t>(header_length) + capture_length;
     if (offset + record_bytes > total) [[unlikely]] {
       // 记录被截断：正常情况下不该发生（内核不会写出跨越缓冲末尾的记录）。
-      TETHERKIT_WARN("BPF 记录越界（偏移 {} + {} > {}），丢弃剩余内容", offset, record_bytes,
-                     total);
+      TETHERKIT_WARN_TR(Msg::kNetBpfRecordOutOfBounds, offset, record_bytes, total);
       break;
     }
 
@@ -327,8 +320,8 @@ Result<ReadBatch> BpfLink::ReadFrames() {
         capture_length <= max_frame_bytes_) [[likely]] {
       read_frames_.push_back(FrameView{.data = record + header_length, .length = capture_length});
     } else [[unlikely]] {
-      TETHERKIT_TRACE("跳过 BPF 记录：caplen={} datalen={}（上限 {}）", capture_length,
-                      original_length, max_frame_bytes_);
+      TETHERKIT_TRACE_TR(Msg::kNetBpfSkipOversizedRecord, capture_length, original_length,
+                         max_frame_bytes_);
     }
 
     offset += BPF_WORDALIGN(record_bytes);
@@ -336,9 +329,7 @@ Result<ReadBatch> BpfLink::ReadFrames() {
     if (read_frames_.size() >= read_frames_.capacity()) {
       // 帧数组满了。剩余记录本次不处理 —— 数据仍在内核缓冲里？不，已经 copyout
       // 了，会丢。因此 max_frames_per_batch 必须配得足够大。这里出警告而非静默。
-      TETHERKIT_WARN("单批帧数达到上限 {}，本次读取剩余 {} 字节被丢弃，请增大 "
-                     "max_frames_per_batch",
-                     read_frames_.capacity(), total - offset);
+      TETHERKIT_WARN_TR(Msg::kNetBpfBatchFrameLimit, read_frames_.capacity(), total - offset);
       break;
     }
   }
@@ -378,8 +369,8 @@ Result<WriteResult> BpfLink::WriteFramesIndividually(FrameBatch frames) {
       if (errno == ENOBUFS || errno == EAGAIN) {
         break;
       }
-      return std::unexpected(Error::FromErrno(
-          0, std::format("向 {} 写入 {} 字节的帧失败", device_path_, frame.length)));
+      return std::unexpected(
+          Error::FromErrno(0, Tr(Msg::kNetBpfWriteFailed, device_path_, frame.length)));
     }
     ++result.frames_written;
     result.bytes_written += static_cast<std::uint64_t>(written);
@@ -418,8 +409,7 @@ Result<WriteResult> BpfLink::WriteFramesBatched(FrameBatch frames) {
         return Ok();
       }
       return std::unexpected(Error::FromErrno(
-          0, std::format("向 {} 批量写入 {} 帧（{} 字节）失败", device_path_, pending_frames,
-                         cursor)));
+          0, Tr(Msg::kNetBpfBatchWriteFailed, device_path_, pending_frames, cursor)));
     }
     result.frames_written += pending_frames;
     result.bytes_written += pending_bytes;

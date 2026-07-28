@@ -23,6 +23,7 @@
 #include <span>
 
 #include "tetherkit/common/byte_order.h"
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/rndis/protocol.h"
 
 namespace tetherkit::rndis {
@@ -142,25 +143,33 @@ class PacketMessageReader {
   MalformedReason reason_ = MalformedReason::kNone;
 };
 
-/// MalformedReason 的可读名字。
-[[nodiscard]] constexpr std::string_view MalformedReasonName(MalformedReason reason) noexcept {
+/// MalformedReason 对应的文案标识。
+///
+/// 返回标识而不是现成的字符串，是为了保住 constexpr —— 真正的文字要按用户当前
+/// 语言渲染，调用方用 `Text(MalformedReasonMessage(r))` 取。
+[[nodiscard]] constexpr Msg MalformedReasonMessage(MalformedReason reason) noexcept {
   switch (reason) {
     case MalformedReason::kNone:
-      return "无";
+      return Msg::kRndisMalformedNone;
     case MalformedReason::kNotPacketMessage:
-      return "MessageType 不是 PACKET_MSG";
+      return Msg::kRndisMalformedNotPacketMessage;
     case MalformedReason::kMessageTooShort:
-      return "MessageLength 小于 44";
+      return Msg::kRndisMalformedMessageTooShort;
     case MalformedReason::kMessageOverruns:
-      return "MessageLength 超出传输长度";
+      return Msg::kRndisMalformedMessageOverruns;
     case MalformedReason::kDataOutOfBounds:
-      return "DataOffset+DataLength 越界";
+      return Msg::kRndisMalformedDataOutOfBounds;
     case MalformedReason::kFrameTooShort:
-      return "DataLength 小于以太头长度";
+      return Msg::kRndisMalformedFrameTooShort;
     case MalformedReason::kFrameTooLong:
-      return "DataLength 超过单帧上限";
+      return Msg::kRndisMalformedFrameTooLong;
   }
-  return "未知";
+  return Msg::kRndisMalformedUnknown;
+}
+
+/// MalformedReason 的可读名字（按当前语言）。
+[[nodiscard]] inline std::string_view MalformedReasonName(MalformedReason reason) noexcept {
+  return Text(MalformedReasonMessage(reason));
 }
 
 // =============================================================================

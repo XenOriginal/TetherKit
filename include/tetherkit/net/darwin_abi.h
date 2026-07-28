@@ -28,6 +28,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "tetherkit/common/i18n.h"
+
 namespace tetherkit::net {
 
 // =============================================================================
@@ -187,23 +189,25 @@ static_assert(sizeof(struct BPF_TIMEVAL) == 8,
 // =============================================================================
 
 /// 一个必须为特定值的 feth sysctl。
+///
+/// `why` 存的是文案标识而不是现成的字符串：这张表是 constexpr 的，而「为什么」
+/// 要按用户当前语言渲染，只能推迟到出错那一刻再查表。
 struct RequiredFethSysctl {
   const char* name;
   std::int32_t required_value;
-  const char* why;
+  Msg why;
 };
 
 /// 创建 feth 前必须校验的 sysctl 清单。
 ///
 /// 这些值如果不对，我们从 BPF 读到的帧就不是「干净的以太帧」：
 inline constexpr RequiredFethSysctl kRequiredFethSysctls[] = {
-    {"net.link.fake.hwcsum", 0,
-     "非 0 时出站帧的 IP/TCP/UDP 校验和是留给硬件计算的占位值，我们读到的帧校验和无效"},
-    {"net.link.fake.fcs", 0, "非 0 时会在帧尾追加 4 字节 CRC，转发到 USB 前需要额外剥离"},
-    {"net.link.fake.tso_support", 0, "非 0 时会收到最大 64KB 的 TSO 巨包，超出 RNDIS 单帧上限"},
-    {"net.link.fake.lro", 0, "非 0 时会收到被合并过的超长接收帧"},
-    {"net.link.fake.trailer_length", 0, "非 0 时帧尾带额外填充"},
-    {"net.link.fake.separate_frame_header", 0, "非 0 时帧头与净荷分离，破坏连续内存假设"},
+    {"net.link.fake.hwcsum", 0, Msg::kNetSysctlWhyHwcsum},
+    {"net.link.fake.fcs", 0, Msg::kNetSysctlWhyFcs},
+    {"net.link.fake.tso_support", 0, Msg::kNetSysctlWhyTso},
+    {"net.link.fake.lro", 0, Msg::kNetSysctlWhyLro},
+    {"net.link.fake.trailer_length", 0, Msg::kNetSysctlWhyTrailer},
+    {"net.link.fake.separate_frame_header", 0, Msg::kNetSysctlWhySeparateHeader},
 };
 
 }  // namespace tetherkit::net

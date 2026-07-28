@@ -23,11 +23,14 @@
 
 #include "capi_support.h"
 #include "tetherkit/capi/tetherkit_c.h"
+#include "tetherkit/common/i18n.h"
 #include "tetherkit/common/logging.h"
 #include "tetherkit/net/feth_device.h"
 
 namespace {
 
+using tetherkit::Msg;
+using tetherkit::Tr;
 using tetherkit::capi::ClearError;
 using tetherkit::capi::FillGenericError;
 using tetherkit::capi::IsValidFethName;
@@ -120,7 +123,7 @@ tk_result_t tk_cleanup_orphan_interfaces(size_t* out_removed, tk_error_t* out_er
     *out_removed = 0;
   }
   if (::geteuid() != 0) {
-    FillGenericError(out_error, "清理残留虚拟网卡需要 root 权限");
+    FillGenericError(out_error, Tr(Msg::kCapiCleanupNeedsRoot));
     return TK_ERR_PERMISSION;
   }
 
@@ -144,7 +147,7 @@ tk_result_t tk_cleanup_orphan_interfaces(size_t* out_removed, tk_error_t* out_er
       ++removed;
       continue;
     }
-    TETHERKIT_DEBUG("残留网卡 {} 已不存在或无法销毁", name);
+    TETHERKIT_DEBUG_TR(Msg::kCapiOrphanAlreadyGone, name);
   }
 
   // 收尾：能销毁的已经由回调逐行删掉了，剩下的是「本来就不在内核里」的条目，
