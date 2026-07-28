@@ -157,8 +157,9 @@ typedef struct tk_device_info {
   /// 是否走了 Android quirk 的兜底路径（CDC Union 描述符不可信时）。
   bool used_android_quirk;
   /// 以下三个字符串描述符是**尽力而为**的：读它们需要 libusb_open，
-  /// 而设备可能已被本机的另一个进程独占。读不到时为空串，此时 GUI 应回落到
-  /// 展示 `description`（VID:PID 形式）。
+  /// 而设备可能已被本机的另一个进程独占。本次读不到时会回填**本进程内**上次
+  /// 成功读到的值（设备没变，名字不该因为被占用就消失）；连上次的值都没有
+  /// 才是空串，此时 GUI 应回落到展示 `description`（VID:PID 形式）。
   char manufacturer[TK_USB_STRING_CAPACITY];
   char product[TK_USB_STRING_CAPACITY];
   char serial[TK_USB_STRING_CAPACITY];
@@ -172,8 +173,10 @@ typedef struct tk_device_info {
 /// @param capacity       数组容量。实际找到的设备多于容量时只填前 capacity 个。
 /// @param out_count      写入实际找到的设备总数（可能大于 capacity）。
 /// @param read_strings   是否尝试读取厂商名 / 产品名 / 序列号。这需要
-///                       libusb_open，在设备已被占用时会失败（不致命，只是
-///                       字符串为空）。会话运行期间刷新列表时建议传 false。
+///                       libusb_open，在设备已被占用时会失败（不致命）。
+///                       会话运行期间刷新列表时建议传 false —— 无论跳过还是
+///                       读失败，都会回填本进程内上次成功读到的值，名字不会
+///                       因此变成空串。
 TK_API tk_result_t tk_list_devices(tk_device_info_t* out_devices, size_t capacity,
                                    size_t* out_count, bool read_strings, tk_error_t* out_error);
 

@@ -12,6 +12,7 @@
 #include <mutex>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "capi_support.h"
 #include "tetherkit/capi/tetherkit_c.h"
@@ -51,8 +52,9 @@ void ReadStringDescriptor(::libusb_device_handle* handle, std::uint8_t index, ch
 ///
 /// 为什么是「尽力而为」：读字符串描述符必须先 libusb_open，而设备可能已被本机
 /// 另一个进程（比如正在跑的 tetherkit-helper）独占，darwin 后端会返回
-/// LIBUSB_ERROR_ACCESS。那不是错误，只是拿不到名字 —— 此时 GUI 回落到展示
-/// VID:PID。绝不能因此让整个枚举失败。
+/// LIBUSB_ERROR_ACCESS。那不是错误，只是拿不到名字 —— 此时由字符串记忆回填
+/// 上次读到的值（见 tk_list_devices 末尾），连记忆都没有才回落到 VID:PID。
+/// 绝不能因此让整个枚举失败。
 void TryReadStrings(::libusb_context* context, tk_device_info_t& info) noexcept {
   ::libusb_device** list = nullptr;
   const ssize_t count = ::libusb_get_device_list(context, &list);
@@ -115,6 +117,20 @@ tetherkit::usb::Context* SharedEnumerationContext(tk_error_t* out_error) {
     context = std::move(*created);
   }
   return context.get();
+}
+
+/// 字符串描述符的进程级记忆（锁 + 条目），与共享枚举上下文同款的函数局部 static。
+///
+/// 放在进程级而不是调用方：helper 是常驻进程，GUI 中途重启后第一次枚举
+/// 就能拿到回填的名字；纯逻辑见 ReconcileDeviceStrings 的说明。
+struct StringMemory {
+  std::mutex mutex;
+  std::vector<tetherkit::capi::RememberedDeviceStrings> entries;
+};
+
+StringMemory& SharedStringMemory() {
+  static StringMemory memory;
+  return memory;
 }
 
 void FillDeviceInfo(const tetherkit::usb::DeviceCandidate& candidate,
@@ -205,6 +221,23 @@ tk_result_t tk_list_devices(tk_device_info_t* out_devices, size_t capacity, size
     if (read_strings) {
       TryReadStrings(context->Raw(), out_devices[i]);
     }
+  }
+
+  // 读到就记住、没读到就回填 —— 会话运行期间（read_strings=false 或设备被占用）
+  // 名字才不会从界面上消失。present 用完整候选集而非 writable 前缀：
+  // 容量不够时后面那些设备仍然在场，它们的记忆不能被当作「已拔掉」清除。
+  {
+    std::vector<tetherkit::capi::DeviceIdentity> present;
+    present.reserve(candidates->size());
+    for (const tetherkit::usb::DeviceCandidate& candidate : *candidates) {
+      present.push_back({.bus_number = candidate.bus_number,
+                         .device_address = candidate.device_address,
+                         .vendor_id = candidate.vendor_id,
+                         .product_id = candidate.product_id});
+    }
+    StringMemory& memory = SharedStringMemory();
+    const std::lock_guard<std::mutex> guard(memory.mutex);
+    tetherkit::capi::ReconcileDeviceStrings(memory.entries, present, {out_devices, writable});
   }
   return TK_OK;
 }
