@@ -284,21 +284,21 @@ bool UsbDataChannel::CanSend() const noexcept {
   return tx_free_slots_ != nullptr && tx_free_slots_->SizeSnapshot() > 0;
 }
 
-Result<std::uint32_t> UsbDataChannel::SendFrames(std::span<const FrameView> frames) {
+Result<SendOutcome> UsbDataChannel::SendFrames(std::span<const FrameView> frames) {
   if (frames.empty()) {
-    return 0U;
+    return SendOutcome{};
   }
   if (shutting_down_.load(std::memory_order_acquire)) {
     return std::unexpected(Error::Generic("数据通道正在停机，拒绝发送"));
   }
 
-  std::uint32_t total_sent = 0;
+  SendOutcome outcome;
 
-  while (total_sent < frames.size()) {
+  while (outcome.consumed < frames.size()) {
     std::uint32_t slot_index = 0;
     if (!tx_free_slots_->TryPop(slot_index)) {
-      // 没有空闲传输槽位 —— 这就是背压。如实返回已发数，让调用方决定
-      // 是等一下还是丢弃。
+      // 没有空闲传输槽位 —— 这就是背压。如实返回已消费数，调用方应
+      // WaitForSendCapacity() 后重试剩余帧，而不是丢弃。
       break;
     }
     Slot& slot = tx_pool_[slot_index];
@@ -313,25 +313,32 @@ Result<std::uint32_t> UsbDataChannel::SendFrames(std::span<const FrameView> fram
         },
         device_->BulkMaxPacketSize());
 
-    std::uint32_t appended = 0;
-    while (total_sent + appended < frames.size()) {
-      const FrameView& frame = frames[total_sent + appended];
+    std::uint32_t scanned = 0;   // 从输入消费掉的帧数（含被跳过的短帧）
+    std::uint32_t appended = 0;  // 真正装进本传输的帧数
+    bool append_failed = false;
+    while (outcome.consumed + scanned < frames.size()) {
+      const FrameView& frame = frames[outcome.consumed + scanned];
       if (frame.length < kMinEthernetFrameBytes) [[unlikely]] {
-        // 非法短帧：跳过。计数由桥接层负责（它才是 TX 计数器的唯一写者）。
-        ++appended;
+        // 非法短帧：跳过并如实计入 skipped —— 它没有被发出。
+        ++scanned;
+        ++outcome.skipped;
         continue;
       }
       if (!writer.TryAppend(frame.Bytes())) {
-        break;  // 本批装满了（受字节数或包数上限）
+        append_failed = true;
+        break;  // 本批装满了（受字节数或包数上限），或单帧超长
       }
+      ++scanned;
       ++appended;
     }
 
     if (writer.Empty()) {
-      // 一帧都没装进去。可能是单帧超过了设备的 MaxTransferSize —— 丢弃它并前进，
-      // 否则会死循环。（丢弃的计数由桥接层从「返回值 < 请求数」推出。）
-      if (total_sent < frames.size()) {
-        ++total_sent;
+      // 一帧都没装进去。要么这一段全是被跳过的短帧，要么第一个合法帧就超过了
+      // 设备的 MaxTransferSize —— 后者必须跳过并前进，否则会死循环。
+      outcome.consumed += scanned;
+      if (append_failed && outcome.consumed < frames.size()) {
+        ++outcome.consumed;
+        ++outcome.skipped;
       }
       if (!tx_free_slots_->TryPush(slot_index)) {
         TETHERKIT_ERROR("归还 TX 槽位 {} 失败（这不应该发生）", slot_index);
@@ -365,10 +372,20 @@ Result<std::uint32_t> UsbDataChannel::SendFrames(std::span<const FrameView> fram
     // 供诊断用的聚合效果。
     TETHERKIT_TRACE("bulk OUT 提交 {} 帧 / {} 字节净荷 / {} 字节传输", message_count,
                     payload_bytes, transfer_bytes);
-    total_sent += appended;
+    outcome.consumed += scanned;
+    outcome.sent_frames += appended;
+    outcome.sent_bytes += payload_bytes;
   }
 
-  return total_sent;
+  return outcome;
+}
+
+bool UsbDataChannel::WaitForSendCapacity(std::uint32_t timeout_millis) {
+  std::unique_lock<std::mutex> lock(send_capacity_mutex_);
+  return send_capacity_cv_.wait_for(lock, std::chrono::milliseconds(timeout_millis), [this] {
+    return shutting_down_.load(std::memory_order_acquire) ||
+           tx_free_slots_->SizeSnapshot() > 0;
+  });
 }
 
 void UsbDataChannel::SendCallbackTrampoline(::libusb_transfer* transfer) {
@@ -405,6 +422,10 @@ void UsbDataChannel::OnSendComplete(Slot& slot) noexcept {
     if (!tx_free_slots_->TryPush(slot.index)) {
       TETHERKIT_ERROR("归还 TX 槽位 {} 失败（这不应该发生）", slot.index);
     }
+    // 唤醒可能在 WaitForSendCapacity 里等槽位的 TX 线程。空临界区惯用法：
+    // 取一下锁保证等待方不会在「查完谓词、还没睡下」的窗口里漏掉这次通知。
+    { const std::lock_guard<std::mutex> guard(send_capacity_mutex_); }
+    send_capacity_cv_.notify_one();
   }
 
   if (outstanding_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -426,7 +447,11 @@ void UsbDataChannel::Shutdown() {
   // 正确的调用者是控制线程或主线程。
 
   // 1. 置停机标志。回调看到它就不再 resubmit，在飞数开始自然收敛。
+  //    同时唤醒可能还在 WaitForSendCapacity 里等槽位的线程（正常拆除顺序下
+  //    TX 线程此时已被 join，这里是防御性兜底 —— 比如测试直接驱动通道时）。
   shutting_down_.store(true, std::memory_order_release);
+  { const std::lock_guard<std::mutex> guard(send_capacity_mutex_); }
+  send_capacity_cv_.notify_all();
 
   // 2. 取消在飞传输。
   //

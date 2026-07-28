@@ -11,6 +11,13 @@
 namespace tetherkit::core {
 namespace {
 
+/// TX 背压时单次等待空闲传输槽位的上限（毫秒）。
+///
+/// 取值只影响两件事的权衡：停机/暂停的响应延迟上界（每次醒来都会重查标志），
+/// 与等待期间的无谓唤醒频率。槽位实际的释放周期是几百微秒（一次 bulk OUT 的
+/// 完成时间），绝大多数等待都由完成回调的 notify 提前唤醒，几乎不会等满。
+constexpr std::uint32_t kTxCapacityWaitMillis = 50;
+
 /// 把字节数换算成 Mbps。
 [[nodiscard]] double ToMegabitsPerSecond(std::uint64_t bytes, double seconds) {
   if (seconds <= 0.0) {
@@ -226,10 +233,12 @@ void Bridge::RunTransmitExtractor() noexcept {
     // 分批提交给 USB。
     std::size_t offset = 0;
     while (offset < batch->frames.size()) {
-      // 每个分片前重新查一次：暂停可能在上面那次检查之后才落下来。
-      // TX 拿不到 RX 那样的强保证（它必须持续把 BPF 读空，没法真的停下），
-      // 但把漏发窗口从「一整批」收窄到「一个分片」是免费的。
-      if (paused_.load(std::memory_order_acquire)) {
+      // 每个分片前重新查一次停机与暂停：下面的背压等待让这个循环可能长时间
+      // 驻留，不能只依赖外层的检查。暂停时丢弃剩余帧是刻意的（RNDIS 复位期间
+      // 设备会丢弃所有未完成的数据包）；TX 拿不到 RX 那样的强保证（它必须持续
+      // 把 BPF 读空，没法真的停下），但把漏发窗口收窄到「一个分片」是免费的。
+      if (stop_requested_.load(std::memory_order_acquire) ||
+          paused_.load(std::memory_order_acquire)) {
         counters_.tx.AddDroppedFull(batch->frames.size() - offset);
         break;
       }
@@ -241,32 +250,43 @@ void Bridge::RunTransmitExtractor() noexcept {
       const auto sent = data_channel_->SendFrames(slice);
       if (!sent) {
         counters_.tx.AddIoError();
+        // 放弃的剩余帧必须计入丢弃 —— 曾经这里只 +1 个 io_error 就 break，
+        // 剩余帧不进任何计数器，统计上凭空消失。
+        counters_.tx.AddDroppedFull(batch->frames.size() - offset);
         TETHERKIT_WARN("向 USB 提交 {} 帧失败：{}", chunk, sent.error().ToString());
-        break;  // 放弃本批剩余部分
+        break;
       }
 
       // 桥接层是 TX 计数器的**唯一写者**（DirectionCounters 用 relaxed
       // load+store，靠单写者才安全）。数据通道那侧只统计异步完成回调里的错误，
-      // 由 Snapshot() 在读取时合并进来。
-      if (*sent != 0) {
-        std::uint64_t submitted_bytes = 0;
-        for (std::uint32_t i = 0; i < *sent; ++i) {
-          submitted_bytes += slice[i].length;
-        }
-        counters_.tx.AddBatch(*sent, submitted_bytes);
+      // 由 Snapshot() 在读取时合并进来。发出帧数与字节数直接取自 SendOutcome，
+      // 被跳过的非法长度帧计入 oversize 丢弃而不是「已发出」。
+      if (sent->sent_frames != 0) {
+        counters_.tx.AddBatch(sent->sent_frames, sent->sent_bytes);
+      }
+      if (sent->skipped != 0) {
+        counters_.tx.AddDroppedOversize(sent->skipped);
       }
 
-      if (*sent == 0) {
-        // 传输池没有空闲槽位 —— 这就是背压。
+      if (sent->consumed == 0) {
+        // 传输池没有空闲槽位 —— 这就是背压。**等待，不丢弃。**
         //
-        // 这里刻意**丢弃**而不是等待：等待会让 BPF 的内核缓冲堆积，最终由内核
-        // 丢包（而且是我们看不见的丢包）。在用户态丢并计数，运维才知道发生了什么。
-        // TCP 会自己重传，UDP 本来就允许丢。
+        // 旧实现在这里立即丢弃剩余帧，理由是「等待会让 BPF 内核缓冲堆积成
+        // 不可见的内核丢包」。这个前提是错的：内核缓冲默认 4 MiB（250 Mbps
+        // 下约 130 ms 的弹性），而且它的溢出计数 bs_drop 每次 ReadFrames 都
+        // 带回来、就显示在统计行的「内核丢包」里 —— 根本不是不可见的。
+        // 真机实测的后果：一个满帧分片需要约 26 个传输槽而池里只有 4 个，
+        // 槽位在几百微秒内就会释放，旧代码却一微秒都不等，高负载下把
+        // 30%+ 的 TX 流量丢在了这里（docs/BENCHMARKS.md「真机端到端实测」）。
+        //
+        // 等待用有限超时：每次醒来回到循环顶部重查停机/暂停标志，停机延迟
+        // 因此有上界。真正的溢出兜底仍然在内核缓冲 —— 它满了才该丢，
+        // 且丢在统计上可见。
         tx_backpressure_events_.fetch_add(1, std::memory_order_relaxed);
-        counters_.tx.AddDroppedFull(batch->frames.size() - offset);
-        break;
+        (void)data_channel_->WaitForSendCapacity(kTxCapacityWaitMillis);
+        continue;
       }
-      offset += *sent;
+      offset += sent->consumed;
     }
   }
 

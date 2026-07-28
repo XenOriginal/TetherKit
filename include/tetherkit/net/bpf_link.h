@@ -158,6 +158,12 @@ class BpfLink final : public LinkBackend {
   std::vector<std::byte> read_buffer_;
   /// 本次批次解出的帧视图，指向 read_buffer_ 内部。
   std::vector<FrameView> read_frames_;
+  /// 最近一次成功读到的内核累计丢包数（bs_drop）。
+  ///
+  /// BIOCGSTATS 偶发失败时**沿用上次的值**而不是报 0：bs_drop 是累计计数，
+  /// 消费方拿它做「当前 − 上次」的差分，报 0 会让差分在无符号数上下溢出，
+  /// 打出一条天文数字的「内核丢包」。只被读线程访问，无需原子。
+  std::uint64_t last_kernel_drops_ = 0;
   /// 批量写的组装缓冲。
   std::vector<std::byte> write_buffer_;
 

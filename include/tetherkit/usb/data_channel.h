@@ -96,6 +96,23 @@ struct DataChannelConfig {
   std::uint32_t tx_timeout_millis = 5'000;
 };
 
+/// 一次 SendFrames 的结果。
+///
+/// 为什么不只返回一个数：曾经就是只返回「发出帧数」，结果两类被跳过的帧
+/// （超过设备 MaxTransferSize 的、短于以太头的）被算进了「发出」里 ——
+/// 注释声称「由调用方从返回值推断丢弃」，而调用方根本推断不出来。
+/// 把「消费了多少」「真发出多少」「跳过多少」分开，账才能对上。
+struct SendOutcome {
+  /// 调用方应把偏移前进这么多帧（含被跳过的）。0 表示传输池满，一帧都没进去。
+  std::uint32_t consumed = 0;
+  /// 真正进入 bulk OUT 传输的帧数。
+  std::uint32_t sent_frames = 0;
+  /// 上述帧的净荷字节合计（不含 RNDIS 头与填充）。
+  std::uint64_t sent_bytes = 0;
+  /// 因长度非法（超长 / 短于以太头）被跳过的帧数。恒等于 consumed - sent_frames。
+  std::uint32_t skipped = 0;
+};
+
 /// 数据通道抽象。
 ///
 /// 抽象的粒度是**批**而不是帧：一次虚调用处理几十上百帧，摊到每帧的开销远小于
@@ -115,11 +132,22 @@ class DataChannel {
   [[nodiscard]] virtual Status StartReceiving(FrameRing& rx_ring,
                                               DirectionCounters& rx_counters) = 0;
 
-  /// 把一批以太帧聚合成 RNDIS 消息发给设备。
+  /// 把一批以太帧聚合成 RNDIS 消息发给设备。**不阻塞。**
   ///
-  /// 返回实际发出的帧数。返回值小于 `frames.size()` 表示传输池暂时没有空闲槽位
-  /// （背压），调用方应把剩余帧留到下次。
-  [[nodiscard]] virtual Result<std::uint32_t> SendFrames(std::span<const FrameView> frames) = 0;
+  /// `consumed < frames.size()` 表示传输池暂时没有空闲槽位（背压）。
+  /// 调用方应保留剩余帧，用 WaitForSendCapacity() 等到有空槽再重试 ——
+  /// **不要丢弃**：上游（内核 BPF 缓冲）才是该吸收突发的弹性队列。
+  [[nodiscard]] virtual Result<SendOutcome> SendFrames(std::span<const FrameView> frames) = 0;
+
+  /// 等待 TX 方向出现空闲传输槽位。
+  ///
+  /// 返回 true 表示「值得再试一次 SendFrames」：有槽位空出来了，或通道已进入
+  /// 停机（此时重试会得到错误，调用方自会退出）。false 表示等满超时仍无容量。
+  ///
+  /// 只能由 SendFrames 的同一调用线程使用（TX 抽取线程）。实现必须保证
+  /// Shutdown() 能唤醒正在等待的线程 —— 但调用方也不应依赖这一点做停机，
+  /// 应该用有限超时并在每次醒来后自查停机标志。
+  [[nodiscard]] virtual bool WaitForSendCapacity(std::uint32_t timeout_millis) = 0;
 
   /// 停止并回收全部在飞传输。
   ///
@@ -162,7 +190,8 @@ class UsbDataChannel final : public DataChannel {
 
   [[nodiscard]] Status StartReceiving(FrameRing& rx_ring,
                                       DirectionCounters& rx_counters) override;
-  [[nodiscard]] Result<std::uint32_t> SendFrames(std::span<const FrameView> frames) override;
+  [[nodiscard]] Result<SendOutcome> SendFrames(std::span<const FrameView> frames) override;
+  [[nodiscard]] bool WaitForSendCapacity(std::uint32_t timeout_millis) override;
   void Shutdown() override;
 
   [[nodiscard]] bool CanSend() const noexcept override;
@@ -245,6 +274,15 @@ class UsbDataChannel final : public DataChannel {
   /// 等待在飞计数归零。
   std::mutex drain_mutex_;
   std::condition_variable drain_condition_;
+
+  /// TX 空槽等待。
+  ///
+  /// 谓词的真值源是 tx_free_slots_（无锁 SPSC 环），这对互斥量+条件变量只是
+  /// 唤醒机制：完成回调归还槽位后取一下锁再 notify（空临界区惯用法），保证
+  /// 等待方要么在谓词检查里看到新槽位、要么已进入 wait 能收到通知，不会漏醒。
+  /// 完成回调在 libusb 事件线程上，这把锁只被瞬间持有，不构成「回调阻塞」。
+  std::mutex send_capacity_mutex_;
+  std::condition_variable send_capacity_cv_;
 };
 
 }  // namespace tetherkit::usb

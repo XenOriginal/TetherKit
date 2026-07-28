@@ -263,8 +263,12 @@ Result<BpfLink::KernelStats> BpfLink::QueryKernelStats() const {
 Result<ReadBatch> BpfLink::ReadFrames() {
   read_frames_.clear();
 
+  // 所有提前返回都必须带上 last_kernel_drops_ 而不是默认的 0：kernel_drops 是
+  // **累计**计数，消费方拿相邻两次做差分。空闲时读超时每 200 ms 就走一次这里，
+  // 报 0 会把已发生的丢包「清零」，下一个有流量的采样又把全量当成新增重报，
+  // 中间那个采样的差分还会在无符号数上下溢。
   if (interrupted_.load(std::memory_order_acquire)) {
-    return ReadBatch{};
+    return ReadBatch{.kernel_drops = last_kernel_drops_};
   }
 
   // read() 的长度**必须精确等于**内核的 bd_bufsize，否则 bpfread 一开头就
@@ -272,12 +276,13 @@ Result<ReadBatch> BpfLink::ReadFrames() {
   const ssize_t received = ::read(fd_, read_buffer_.data(), read_buffer_.size());
   if (received < 0) {
     if (errno == EINTR || errno == EAGAIN) {
-      return ReadBatch{};  // 被信号打断或超时无数据，交给调用方继续循环
+      // 被信号打断或超时无数据，交给调用方继续循环
+      return ReadBatch{.kernel_drops = last_kernel_drops_};
     }
     return std::unexpected(Error::FromErrno(0, std::format("从 {} 读取失败", device_path_)));
   }
   if (received == 0) {
-    return ReadBatch{};  // 读超时到期且期间无包
+    return ReadBatch{.kernel_drops = last_kernel_drops_};  // 读超时到期且期间无包
   }
 
   // ---------------------------------------------------------------------------
@@ -338,10 +343,14 @@ Result<ReadBatch> BpfLink::ReadFrames() {
     }
   }
 
-  const auto stats = QueryKernelStats();
+  // BIOCGSTATS 偶发失败时沿用上次的累计值 —— 报 0 会让消费方的差分下溢，
+  // 见 last_kernel_drops_ 的说明。
+  if (const auto stats = QueryKernelStats()) {
+    last_kernel_drops_ = stats->dropped;
+  }
   return ReadBatch{
       .frames = read_frames_,
-      .kernel_drops = stats ? stats->dropped : 0,
+      .kernel_drops = last_kernel_drops_,
   };
 }
 

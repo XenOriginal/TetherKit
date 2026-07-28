@@ -99,7 +99,12 @@ struct BridgeStats {
   std::size_t rx_queue_depth = 0;
   /// 内核 BPF 侧累计丢包（bs_drop）。
   std::uint64_t link_kernel_drops = 0;
-  /// 因 TX 传输池没有空闲槽位而未能立即发出的帧数（背压次数）。
+  /// TX 因传输池没有空闲槽位而进入等待的次数。
+  ///
+  /// 这是**事件**计数不是帧数：每次 SendFrames 一帧都没能提交、TX 线程转入
+  /// 等待就 +1（持续压力下每约 50 ms 至多再 +1）。它衡量「TX 侧顶到池上限的
+  /// 频繁程度」；出现它不代表丢帧 —— 等待期间帧安然留在批次里，上游突发由
+  /// 内核 BPF 缓冲吸收，真溢出会体现在 link_kernel_drops。
   std::uint64_t tx_backpressure_events = 0;
 };
 
