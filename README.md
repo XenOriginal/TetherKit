@@ -13,11 +13,14 @@ Windows Phone、嵌入式 Linux gadget 等）变成一张 macOS 系统可见的�
 - **网卡侧**：macOS 的 `feth`（`if_fake`）虚拟网卡对 + BPF，直接读写原始以太帧。
 - **无内核代码**：纯用户态 C++23，不需要 kext、不需要 DriverKit、不需要关 SIP。
 
-> ⚠️ **状态**：全部模块已实现，169 个测试用例（6458 条断言）在
-> 普通构建与 ThreadSanitizer 构建下均通过。已在一台真实 RNDIS 设备上跑通
+> ⚠️ **状态**：全部模块已实现，194 个测试用例（6579 条断言）在
+> 普通构建与 ThreadSanitizer 构建下均通过。已在真实 RNDIS 设备上跑通
 > RNDIS 握手、feth 建对、BPF 挂载与优雅停机；`feth` 私有 ABI 与
-> 「BPF 写入能让对侧 IP 栈收到帧」这个核心前提也已实测确认。
-> **端到端吞吐尚未做过任何压测。** 验证清单见 [AGENTS.md](AGENTS.md) 第 6 节。
+> 「BPF 写入能让对侧 IP 栈收到帧」这个核心前提也已实测确认 ——
+> 后者现在由一个 ARP 往返闭环的 root 用例守着，不再只是文档里的一句话。
+> 端到端已用 Android 手机压测：**RX 约 325 Mbps / TX 约 235 Mbps**
+> （USB 2.0 高速，理论上限 426 Mbps）。TX 方向在高负载下仍有丢帧问题，
+> 详见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)。验证清单见 [AGENTS.md](AGENTS.md) 第 6 节。
 
 ---
 

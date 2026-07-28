@@ -217,8 +217,13 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 - **已验证**：USB 侧在真实 RNDIS 设备上跑通（枚举、声明接口、RNDIS 握手），
   且 USB 这一侧**不需要 root**；feth 私有 ABI、两个私有 BPF ioctl、
   以及「BPF 写入能让对侧 IP 栈收到帧」这个核心前提都已实测确认。详见第 6 节
-- **未验证**：端到端吞吐（至今未做过任何压测）；GUI 与真实设备的完整链路
-  （界面各屏已逐屏核对渲染，但没插着设备跑过「连接 → 配 IP → 上网」）
+- **已压测**（2026-07-28，Android 手机 USB 网络共享）：端到端 iperf3 实测
+  **RX 324~327 Mbps / TX 234~241 Mbps**（USB 2.0 高速，理论上限 426 Mbps）；
+  GUI 与真实设备的完整链路走通（插上 → 连接 → DHCP 拿到地址 → 双向 ping）。
+  详见第 6.4 节与 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+- **已知缺陷**：TX 方向在高负载下会因拿不到空闲 bulk OUT 传输而丢帧
+  （`--tx-transfers` 默认 4 偏小）；双向并发时 TX 会因 RX 侧缓冲膨胀塌到约
+  5 Mbps。两者的机理都已查清、根因待查，见第 6.4 节
 
 ### GUI 相关
 
@@ -324,13 +329,50 @@ RNDIS 协商完成（版本 1.0、MTU 1500）→ 查到设备 MAC 与链路速�
 
 ### 6.3 待验证
 
-- [ ] 端到端吞吐（USB 2.0 high-speed 下能达到多少）。尚未做过任何压测 ——
-      至今每次运行 RX/TX 都是 0 pps（没配 IP、没造流量）。
-- [ ] `net.feth` 套件目前**没有**覆盖第 6.2 节 ⑦ 的 ARP 往返闭环 ——
-      现有用例只断言「读不回自己写的帧」，不能证明对侧真的收到了。
-      该闭环值得补成一个 root 用例，否则这条结论只活在本文档里。
-- [ ] Android 各版本的 RNDIS quirk（`MaxTransferSize` / `PacketAlignmentFactor` 异常值）。
-      → 手头没有 Android 设备，暂时无法验证。
+原先的三项**已全部完成**，结论并入 6.4：
+
+- [x] 端到端吞吐 → RX 324~327 Mbps / TX 234~241 Mbps，见 6.4。
+- [x] `net.feth` 套件缺 ARP 往返闭环 → 已补成 root 用例
+      「ARP 往返闭环：BPF 写入的帧确实进了对侧 feth 的 IP 栈」，真机上通过。
+      第 6.2 节 ⑥ 的结论不再只活在文档里。
+- [x] Android 的 RNDIS quirk → 见 6.4「设备汇报的参数」。
+
+仍然待查：
+
+- [ ] TX 丢帧的**根因**。只定位到「拿不到空闲 bulk OUT 传输 → 背压丢弃」，
+      没定位到是 USB 提交速率受限、还是 TX 抽取线程的批量策略不合适。
+      `--tx-transfers 16` 只是缓解手段。
+- [ ] 缩小 RX 排队深度能把双向 TCP 塌陷改善多少（机理已证明，改善幅度未测）。
+- [ ] 静态 IP 模式下 DNS 是否真的被 IPMonitor 采纳（见 docs/GUI-ARCHITECTURE.md）——
+      本轮只验证了 DHCP 路径。
+
+### 6.4 已验证：真机端到端（Android USB 网络共享）
+
+**设备**：vivo iQOO Z10x（V2445A / PD2445M），Android 15（SDK 35），
+USB `2d95:600b`，接口签名 `e0/01/03`（无线类 RNDIS 变体），协商 USB 2.0 高速。
+macOS **没有**为它创建任何网络接口 —— 再次印证「macOS 无 RNDIS 驱动」这个立项前提。
+
+**设备汇报的参数**（这就是原先想验证的 Android quirk）：
+
+```
+RNDIS 协商完成：版本 1.0，MTU 1500，设备聚合上限 15800 字节 / 10 包，TX 对齐 1 字节
+```
+
+即 `MaxPacketsPerMessage=10`、`MaxTransferSize=15800`、`PacketAlignmentFactor=0`。
+**与主线 Linux gadget 的 `1 包 / 1580 字节` 差了 10 倍** —— messages.cc 里
+「打了聚合补丁的 Android 内核报 3 或更多」那条注释得到了真机证实。
+没有出现异常值，现有的钳位逻辑全程没有触发。
+
+⚠️ 顺带一条：**设备每次会话汇报的 MAC 都不同**（Android 随机化 RNDIS MAC），
+所以别把设备 MAC 当作稳定标识来缓存。
+
+**吞吐**：RX 324~327 Mbps（0 重传）/ TX 234~241 Mbps（数千次重传）。
+**两个已知缺陷**（TX 背压丢帧、双向并发时 TX 塌陷）的完整证据链、A/B 数据与
+机理分析都在 [docs/BENCHMARKS.md](docs/BENCHMARKS.md) 的「真机端到端实测」一节。
+
+⚠️ **排查陷阱**：手机侧 `/proc/net/dev` 的 `rndis0` `rx_errs` 计数器**不可信** ——
+它会给每一帧都记一次错误（50 个 ping 全部得到回应，`rx_pkts` 和 `rx_errs` 却同时 +51）。
+排查 TX 问题请以 iperf3 的实际丢包率和 TetherKit 自己的统计为准。
 
 ---
 
