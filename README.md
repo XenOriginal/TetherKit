@@ -116,6 +116,10 @@ sudo ./gui/Scripts/install-helper.sh
 自动替换 .app 会被 Gatekeeper 拦下，所以刻意只查不换。不想要自动检查：
 `defaults write com.tetherkit.app updateCheckDisabled -bool YES`。
 
+**界面语言**：菜单「TetherKit → 语言」可选「跟随系统 / 中文 / English」，
+菜单栏面板里也有同一个开关。切换**立即生效**，不需要重启 App —— 库产生的
+日志行也会跟着换（语言会一并同步给特权组件）。默认跟随系统语言。
+
 **要求**：macOS 14+（命令行部分仍支持 13.3+）。实现细节与设计取舍见
 [docs/GUI-ARCHITECTURE.md](docs/GUI-ARCHITECTURE.md)。
 
@@ -152,6 +156,18 @@ ipconfig getifaddr feth0
 | `--stats 1000` | 每秒打印一行吞吐/丢包统计 |
 | `--log debug` | 打开协议交互细节日志 |
 | `--max-transfer-kb` | 吞吐的主要调优旋钮，见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
+| `--lang zh\|en\|auto` | 界面语言，默认 `auto`（见下） |
+
+**语言**：默认按 `TETHERKIT_LANG` → `LC_ALL` → `LC_MESSAGES` → `LANG` 依次推断，
+取第一个非空值，以 `zh` 开头算中文、其余算英文。
+
+```bash
+tetherkit-cli --lang en --help     # 显式指定
+TETHERKIT_LANG=en tetherkit-cli --list
+```
+
+> ⚠️ `sudo` 是否把 `LANG` 透传给命令取决于 sudoers 的 `env_keep`，因此
+> `sudo tetherkit-cli` 未必跟随你的终端语言 —— 那时显式写 `--lang`。
 
 ### 为什么需要 root
 

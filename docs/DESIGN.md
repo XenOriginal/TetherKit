@@ -218,11 +218,46 @@ TX 方向的零拷贝更是**根本不可行**：`struct bpf_hdr` 只有 20 字�
 
 `Error` 携带来源域（errno / libusb / RNDIS_STATUS / 逻辑），`ToString()` 负责把
 「libusb 返回 -3」翻译成「LIBUSB_ERROR_ACCESS(-3)」。`WithContext` 支持叠加外层
-原因形成「外层：内层」的链条。
+原因形成「外层：内层」的链条 —— 那个分隔符随语言变化（中文全角冒号、英文
+`": "`），所以由 `detail::ContextSeparator()` 提供，不写死在 `error.h` 里。
+
+错误消息本身全部来自文案表（见第 6b 节），不是字面量。
 
 **RNDIS 状态码到名字的映射只存在于 `rndis/protocol.cc` 一处**（单一来源）；
 `tk_common` 不认识 RNDIS，只输出十六进制数值，符号名由 rndis 层拼进上下文串。
 （此前在 `error.cc` 里也放了一份，5 个数值是错的，已删除。）
+
+---
+
+## 6b. 文案与多语言
+
+面向用户的文字（错误、日志、帮助、状态名）**一条都不写字面量**，全部集中在
+`include/tetherkit/common/messages.def`。该文件是一份 X-macro 清单，被展开三次
+分别生成 `Msg` 枚举、中文表与英文表 —— 三者同源，**结构上不可能出现某种语言
+漏了一条**。
+
+| 取用方式 | 用途 | 是否分配 |
+|---|---|---|
+| `Tr(Msg::kFoo, args...)` | 带参数，语义同 `std::format` | 会（返回 `std::string`） |
+| `Text(Msg::kFoo)` | 不带参数，返回 `string_view` | 不会，`noexcept` |
+| `TETHERKIT_INFO_TR(Msg::kFoo, ...)` 等 | 打日志 | 级别没开时不求值 |
+
+**为什么不用 gettext**：要引入 libintl、构建期跑 msgfmt、运行期按路径查目录，
+换来的是「装到别的机器上找不到 `.mo` 于是全变英文」这类运行期故障。两种语言、
+几百条固定文案，编译进二进制的一张表最省事。
+
+**代价与对策**：格式串变成运行期查表，`std::format` 的编译期占位符校验就没了
+（`Tr` 内部走 `vformat`）。这道保障由 `tests/test_common_i18n.cc` 补回来 ——
+它遍历整张表，逐条比对两种语言引用的参数下标与表现类型，并检查下标连续、
+未在同一串里混用自动与手工编号。占位符写错会在 `ctest -R common.i18n` 当场红掉，
+而不是等到某条日志在用户机器上渲染成半句话。
+
+`Tr()` 和 `error.h` 一样**禁止出现在数据热路径上**（它必然分配）。热路径需要
+文字时只能用 `Text()`。
+
+语言由宿主决定：命令行看 `--lang` 与环境变量，GUI 通过 C ABI 的
+`tk_set_language` 推进来。这是**进程级单一状态**，不是每个会话一份 —— 日志与
+错误从多个线程产生，做成线程局部只会让同一次会话的输出出现两种语言。
 
 ---
 
@@ -319,6 +354,7 @@ TX 方向的零拷贝更是**根本不可行**：`struct bpf_hdr` 只有 20 字�
 | 私有成员 | `lower_case_` | `bulk_in_endpoint_` |
 | 常量 / 枚举值 | `k` + `CamelCase` | `kPacketMsgHeaderBytes` |
 | 文件 | `snake_case`，`.h` / `.cc` | `packet_codec.h` |
+| 文案标识 | `k` + 模块前缀 + `CamelCase` | `kNetBpfBindFailed`、`kCliUnknownOption` |
 
 访问器也用 `CamelCase`（而非标准库风格的 `lower_case`），是为了让
 `readability-identifier-naming` 能机械地全量检查，不留「凭记忆遵守」的例外。

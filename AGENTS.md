@@ -110,6 +110,7 @@ TetherKit/
 │   ├── Sanitizers.cmake        ASan/UBSan/TSan 开关
 │   └── Optimizations.cmake     数据路径优化选项与取舍说明
 ├── include/tetherkit/     公开头文件（按模块分子目录）
+│   ├── common/messages.def     **全部面向用户文案**（X-macro，中英两列）
 │   └── capi/                   C ABI —— 全项目唯一的 extern "C" 边界
 ├── src/                   实现
 │   ├── version.cc.in           CMake 注入版本号的模板
@@ -169,6 +170,40 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 - **数据热路径**：**绝不**返回 `expected`、绝不抛异常、绝不分配。用返回计数 + 原子统计计数器表达失败。
 - 全程 `-fno-exceptions`？**不**关异常（doctest 需要），但项目自身代码不 `throw`。
 
+### 文案与多语言（中 / 英）
+
+**面向用户的文字一律不写字面量**，全部走文案表。两套实现，同一个心智模型：
+
+| | C++（库 + 命令行） | Swift（GUI + helper） |
+|---|---|---|
+| 文案表 | `include/tetherkit/common/messages.def`（X-macro，展开成枚举 + 两张表） | `gui/Sources/TetherKitIPC/LocalizedStrings.swift`（穷尽 switch） |
+| 取文案 | `Tr(Msg::kFoo, args...)`，参数与 `std::format` 一致 | `L(.foo, args...)`，`String(format:)` 的 printf 风格 |
+| 打日志 | `TETHERKIT_INFO_TR(Msg::kFoo, ...)` 等一组宏 | —— |
+| 不带参数 | `Text(Msg::kFoo)` 返回 `string_view`，不分配 | `L10n.text(.foo)` |
+| 漏一种语言 | 表长断言 + `common.i18n` 用例 | **编译不过**（switch 穷尽） |
+| 占位符对不上 | `common.i18n` 逐条核对下标与类型 | `LocalizationTests` 逐条核对位置与类型 |
+
+三条硬规矩：
+
+1. **热路径禁用。** `Tr()` / `L()` 都会分配并格式化，和 `error.h` 一样只允许出现在
+   初始化与控制路径上。热路径要文字时用 `Text(Msg::kFoo)`（纯查表，noexcept）。
+2. **两种语言的占位符必须一一对应**（个数、下标、类型）。语序不同就用显式编号
+   重排：C++ 是 `{0}`/`{1}`，Swift 是 `%1$@`/`%2$ld`。
+3. **Swift 侧整数一律 `%ld` 并在调用点转 `Int`。** `%d` 只取 64 位实参的低 32 位。
+
+语言从哪里来：
+
+- 命令行：`--lang zh|en|auto`，缺省按 `TETHERKIT_LANG` → `LC_ALL` → `LC_MESSAGES`
+  → `LANG` 依次推断。**语言在解析参数之前就定下来**，所以帮助文本与参数错误
+  本身也是目标语言。⚠️ sudo 未必透传这些变量，那时要显式写 `--lang`。
+- GUI：App 菜单与菜单栏面板里的语言开关（跟随系统 / 中文 / English），存
+  UserDefaults 的 `TetherKitLanguagePreference`。
+
+**切语言时必须同步三处，缺一处就会出现「界面英文、日志中文」**：Swift 文案表
+（`L10n.apply`）、libtetherkit（`tk_set_language`）、helper（XPC 的 `setLanguage`
+—— 它以 root 跑在 launchd 下，看不到用户偏好）。三处都在 `AppModel.applyLanguage`
+里一起做，别在别处单独调其中一个。
+
 ---
 
 ## 5. 实现进度
@@ -206,15 +241,18 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 | 27 | `build(ci): GUI 构建入 CI；发版附带 .app；tap 同步双 formula` | ✅ | GUI job（macos-14/26）；build-gui.sh 支持 --swift-build-flags=--disable-sandbox（SwiftPM 沙箱嵌不进 brew 沙箱） |
 | 28 | `chore(release): v0.1.2 —— README 图标/截图/双 formula 安装说明` | ✅ | 中英双语；docs/assets |
 | 29 | `chore(release): v0.1.3 —— 设备名不再因会话占用而丢失` | ✅ | capi 字符串记忆回填 + helper 占用判定修正（第 7 节第 17 条） |
+| 30 | `feat(i18n): 全量文案外置，中英双语` | ✅ | C++ 约 390 条 + Swift 220 条；命令行 `--lang`、C ABI `tk_set_language`、GUI 语言菜单；XPC 协议号 2 → 3 |
 
 ### 当前状态
 
-- **测试**：22 个 ctest 用例全部通过（新增 capi.support / capi.basics /
-  capi.log_ring / capi.session / capi.process / capi.net_config 六个 suite）
+- **测试**：23 个 ctest 用例全部通过（新增 common.i18n 核对两种语言的占位符）；
+  GUI 侧 `swift test` 9 个用例通过（含 LocalizationTests）
 - **构建**：`-Werror` 零告警；命令行、共享库、GUI 三套产物均可构建
 - **可运行**：`--version` / `--help` / `--list` 均正常；非 root 启动给出清晰提示
   并返回退出码 1；`TetherKit.app` 与 `tetherkit-helper` 打包后均可启动；
-  特权组件可在 App 内一键安装 / 卸载（安装路径已真机走通）
+  特权组件可在 App 内一键安装 / 卸载（安装路径已真机走通）；
+  中英双语已实测：命令行两种语言的 `--help` / `--list` / 参数错误均正确，
+  GUI 在菜单里切换语言后主窗口与 App 菜单**立即**变（不需重启，截窗口核对过）
 - **已验证**：USB 侧在真实 RNDIS 设备上跑通（枚举、声明接口、RNDIS 握手），
   且 USB 这一侧**不需要 root**；feth 私有 ABI、两个私有 BPF ioctl、
   以及「BPF 写入能让对侧 IP 栈收到帧」这个核心前提都已实测确认。详见第 6 节
@@ -522,6 +560,19 @@ TX 就从 4.8 回到了 87 Mbps。
    session 还没登记（并发枚举会往握手中的控制端点插传输），failed/stopped
    的死会话早已释放设备（拔掉重插后永远读不到名字）。改按「真的持有」判定：
    sessionStarting 标志 + runState ∈ {starting, running, stopping}。
+18. **SwiftUI 不知道「全局查表」变了。** 文案改成运行期查表之后，切语言不会
+   让任何 `@Observable` 属性看起来变过，视图体自然不会重算 —— 界面就那么留在
+   旧语言里。对策是让语言变化本身成为一个可观察的值（`AppModel.languageRevision`
+   每次切换加一），再把它当 identity 用：主窗口与菜单栏面板都挂
+   `.id(model.languageRevision)`，强制整棵树重建。
+   **`.commands { }` 里更隐蔽**：里面每个 `Button` 的标签各自是独立表达式，
+   实测（AppleScript 读菜单项名核对）切完语言只有语言菜单自己变了 —— 它读了
+   `languagePreference` 所以有依赖 —— 旁边的「检查更新…」还是旧语言。
+   修法是把这一组包进**同一个 View**，在它的 body 里读一次 revision，
+   整组就一起重算（见 `AppMenuItems`）。
+   同一类问题还有一个变种：**`static let` 存的文案只求值一次**，切语言后
+   永远不更新。凡是存文案的静态成员一律改成计算属性（`AppModel` 的三条授权
+   提示、`NetworkCard.dnsHint` 都踩过）。
 
 ---
 
@@ -541,4 +592,14 @@ cmake -S . -B build-tsan -DTETHERKIT_ENABLE_TSAN=ON && cmake --build build-tsan 
 # 性能基准（务必用未开消毒器的 Release 构建）
 cmake -S . -B build-rel -DCMAKE_BUILD_TYPE=Release && cmake --build build-rel -j10 \
   && ./build-rel/bin/tetherkit_bench
+
+# GUI：构建、测试、打包
+TETHERKIT_LIB_DIR=$PWD/build/lib swift build --package-path gui
+TETHERKIT_LIB_DIR=$PWD/build/lib swift test  --package-path gui
+./gui/Scripts/build-gui.sh
+
+# 两种语言各看一眼（改过文案就跑一下）
+./build/bin/tetherkit-cli --lang en --help
+./build/bin/tetherkit-cli --lang zh --list
+ctest --test-dir build -R common.i18n --output-on-failure
 ```

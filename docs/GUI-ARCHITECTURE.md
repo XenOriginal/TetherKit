@@ -59,11 +59,11 @@ gui/
 ├── Package.swift                      SwiftPM 工程
 ├── Sources/
 │   ├── CTetherKit/                    C ABI 的模块映射（头是符号链接）
-│   ├── TetherKitIPC/                  App 与 helper 共享：协议、模型、授权
+│   ├── TetherKitIPC/                  App 与 helper 共享：协议、模型、授权、文案表
 │   ├── TetherKitCore/                 C ABI 的 Swift 封装
 │   ├── TetherKitHelper/               特权 helper
 │   └── TetherKitApp/                  SwiftUI 界面
-├── Tests/TetherKitIPCTests/           授权凭据生命周期的回归测试（不弹授权框）
+├── Tests/TetherKitIPCTests/           授权凭据生命周期 + 文案表占位符一致性
 ├── Resources/                         Info.plist、LaunchDaemon plist
 └── Scripts/                           构建 / 安装 / 卸载脚本
 ```
@@ -201,6 +201,7 @@ SecurityAgent 插件装进 /Library/Security/SecurityAgentPlugins」这条路，
 ### 4.6 XPC 接口修订号
 
 `HelperConstants.protocolRevision` 每次改动 `TetherKitHelperProtocol` 都要加一。
+当前是 **3**（1 初版；2 特权方法应答加上「是否授权失败」；3 新增 `setLanguage`）。
 helper 把它编进 `helperVersion` 的应答，App 一连上就比对。
 
 **为什么不新增一个专门的方法来报版本**：新增方法本身就是一次协议变更，旧
@@ -232,6 +233,33 @@ helper 根本没有它 —— 那就又回到了「对不上还查不出来」�
   两个登记点，3 秒时间窗），没登记过的当场 dismiss。见 `MainWindowRoot`。
 - **轮询是自适应的**：会话在跑 / 正在启停 / 窗口开着 → 500 ms；纯后台待机 →
   2 秒。窗口重新打开时立刻补一次刷新，避免第一眼看到陈旧数据。
+
+### 4.7b 界面语言
+
+文案表编译进二进制，不走 `.lproj`。理由写在 `TetherKitIPC/Localization.swift`
+顶部，核心是 **helper 是装在 `/Library/PrivilegedHelperTools` 的裸可执行文件**，
+旁边没有、也不该有资源 bundle，而它同样要产生给用户看的文字。
+
+改语言时必须**同时**更新三处，缺一处就会出现「界面英文、日志中文」：
+
+| 处 | 怎么改 | 不改的后果 |
+|---|---|---|
+| Swift 文案表 | `L10n.apply(_:)` | 界面不变 |
+| libtetherkit | `TetherKitLibrary.setLanguage(_:)` → `tk_set_language` | 日志卡里的库日志还是旧语言 |
+| helper | XPC 的 `setLanguage(_:)` | helper 的提示与它那边的库日志还是旧语言 |
+
+三处都在 `AppModel.applyLanguage` 里一起做，别在别处单独调其中一个。helper
+之所以要单独告知：它以 root 跑在 launchd 下，看不到用户的语言偏好。
+
+两条 SwiftUI 特有的坑（都实测踩过）：
+
+- **切语言不会让任何 `@Observable` 属性看起来变过**，视图体因此不会重算。
+  对策是把语言变化本身变成可观察的值（`AppModel.languageRevision` 每次加一），
+  再当 identity 用：`.id(model.languageRevision)`，强制重建整棵树。
+- **`.commands { }` 里的每个 `Button` 各自是独立表达式**，只有读过可观察值的
+  那个会重算。实测切完语言只有语言菜单自己变了，旁边的「检查更新…」还是旧
+  语言。修法是把这一组包进同一个 View（`AppMenuItems`），在它的 body 里读一次
+  revision。同理，**存文案的 `static let` 只求值一次**，一律改成计算属性。
 
 ### 4.8 打包
 
@@ -323,6 +351,7 @@ helper 缺失或版本不匹配时，界面给一个「安装 / 更新特权组�
 | Finder 别名自动维护（首次启动建立，聚焦可搜可启动；brew postinstall 有沙箱建不了） | `gui/Sources/TetherKitApp/FinderAlias.swift` |
 | SwiftUI 界面（状态、设备、网络、吞吐、日志） | `gui/Sources/TetherKitApp` |
 | 菜单栏实时速率 + 后台运行（仅菜单栏模式） | `gui/Sources/TetherKitApp/Views/MenuBarPanel.swift` |
+| 中英双语（运行期可切，界面 / 库日志 / helper 提示三处同步） | `gui/Sources/TetherKitIPC/Localization.swift`、`tk_set_language` |
 
 ### 未实现 / 已知限制
 
@@ -335,6 +364,7 @@ helper 缺失或版本不匹配时，界面给一个「安装 / 更新特权组�
 | **IPv6** | 网卡配置只覆盖 IPv4 |
 | **多会话** | helper 同一时刻只允许一个会话 |
 | **App 图标** | 尚无 `.icns`，用系统默认图标 |
+| **只有中文与英文** | 文案表是编译进二进制的两列（不是 `.lproj`，理由见 `Localization.swift` 顶部）。加第三种语言要改 `Language` 枚举与两处 switch，不是加一个目录就行 |
 
 ---
 
