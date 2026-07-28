@@ -223,7 +223,8 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
   详见第 6.4 节与 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 - **已修复**：TX 高负载丢帧的根因已查明 —— 桥接层在 bulk OUT 传输池占满时立即
   丢弃批次剩余帧，而槽位只需等几百微秒。改为等待后 TX 丢帧 1889 → 0、
-  TCP TX 重传 3829 → 0、双向并发 TX 4.8 → 87 Mbps。见第 6.4 节
+  TCP TX 重传 3829 → 0、双向并发 TX 4.8 → 87 Mbps；Ctrl-C 优雅停机在修复后
+  也复核过（打出「已停机」、feth 无残留）。见第 6.5 节
 - **仍未查清**：TCP TX 呈双峰（约 240 / 约 300 Mbps，两态都零重传）；
   双向并发时 RTT 仍从 0.4 ms 膨胀到 16.6 ms（已不再造成吞吐塌陷）
 
@@ -340,6 +341,10 @@ RNDIS 协商完成（版本 1.0、MTU 1500）→ 查到设备 MAC 与链路速�
 - [x] Android 的 RNDIS quirk → 见 6.4「设备汇报的参数」。
 
 - [x] TX 丢帧的**根因** —— 已查明并修复，见 6.5。
+- [x] 修复后的优雅停机 —— 在真正的终端里 `sudo build/bin/tetherkit-cli` 再 Ctrl-C
+      （SIGINT，与 SIGTERM / SIGHUP 共用同一个处理器）：打出「已停机」，
+      `ifconfig` 无 feth 残留。**新增的背压等待没有卡住停机路径。**
+      注意这一条只能在真终端里验证，走提权脚本会被吞掉信号，见第 7 节第 15 条。
 
 仍然待查：
 
@@ -348,10 +353,6 @@ RNDIS 协商完成（版本 1.0、MTU 1500）→ 查到设备 MAC 与链路速�
       但缩小 RX 排队深度能改善多少未测。
 - [ ] 静态 IP 模式下 DNS 是否真的被 IPMonitor 采纳（见 docs/GUI-ARCHITECTURE.md）——
       本轮只验证了 DHCP 路径。
-- [ ] 真机 `SIGTERM` 优雅停机 —— **不是没做，是做不了**：提权用的
-      `osascript ... with administrator privileges` 会吞掉进程间的 SIGTERM 投递
-      （见第 7 节新增的那一条）。桥接层侧由单元测试覆盖；端到端确认要在真正的
-      终端里 `sudo build/bin/tetherkit-cli` 然后 Ctrl-C。
 
 ### 6.4 已验证：真机端到端（Android USB 网络共享）
 
@@ -486,8 +487,10 @@ TX 就从 4.8 回到了 87 Mbps。
    用一个 15 行的 C 程序做过对照：普通 shell ✅、普通 `osascript` ✅、
    加 `with administrator privileges` ❌。
    → 后果：**别用这条提权链去验证优雅停机**，会得到「停机卡死」的假故障，
-   而且它跟被测代码毫无关系。要验证端到端 SIGTERM，得在真正的终端里
-   `sudo build/bin/tetherkit-cli` 再 Ctrl-C。
+   而且它跟被测代码毫无关系（修复前后的运行日志里都是清一色的 `Killed: 9`，
+   一度被误当成新引入的回归）。要验证端到端停机，得在真正的终端里
+   `sudo build/bin/tetherkit-cli` 再 Ctrl-C —— 这样验证过，正常打出「已停机」
+   且 feth 无残留。
 
 16. **「刻意这样做」的注释也可能是错的 —— 尤其是当它读起来很有说服力时。**
    TX 丢帧的根因（第 6.5 节）藏了整整一个版本，就因为那段丢弃逻辑配了一条

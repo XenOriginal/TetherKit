@@ -362,6 +362,11 @@ skipped}`；桥接层在 `consumed == 0` 时调 `WaitForSendCapacity(50ms)` 等�
 - [x] TX 丢帧的**根因** —— 已查明并修复：桥接层在传输池占满时立即丢弃而非等待，
       见「TX 丢帧的根因与修复」。TetherKit 自己的 TX 丢帧从 1889 降到 0。
 
+- [x] 修复后的优雅停机 —— 已在真终端确认：`sudo build/bin/tetherkit-cli` 再 Ctrl-C
+      打出「已停机」，`ifconfig` 无 feth 残留。新增的背压等待（`WaitForSendCapacity`）
+      没有卡住停机路径。⚠️ 这一条**只能在真终端里验证** —— 提权脚本会吞掉信号，
+      见下文与 AGENTS.md 第 7 节第 15 条。
+
 仍然空着的：
 
 - [ ] TCP TX 的**双峰行为**（约 240 vs 约 300 Mbps 两个稳定态，都是零重传）。
@@ -371,10 +376,23 @@ skipped}`；桥接层在 `consumed == 0` 时调 `WaitForSendCapacity(50ms)` 等�
 - [ ] 除本机外的 Android 版本 / 厂商内核的 RNDIS 参数分布 ——
       已知本机报 `10 包 / 15800 字节`，主线 Linux gadget 报 `1 包 / 1580 字节`，
       样本只有这两个。
-- [ ] 真机上的 `SIGTERM` 优雅停机**本轮未能验证**：验证脚本走
-      `osascript ... with administrator privileges` 提权，而该执行环境会吞掉
-      进程间的 SIGTERM 投递（用一个 15 行的 C 程序复现过：同样的 `sigaction`
-      在普通 shell 与普通 `osascript` 下都能收到信号，在 admin 提权链下收不到，
-      尽管 handler 确实装上了）。桥接层侧的停机由单元测试
-      「TX 背压：等待期间 Stop() 能及时返回」覆盖；端到端确认需要在真正的终端里
-      `sudo build/bin/tetherkit-cli` 再按 Ctrl-C。
+---
+
+## ⚠️ 压测环境的一个陷阱：提权链会吞掉 SIGTERM
+
+`osascript ... with administrator privileges` 这条提权链**会吞掉进程间的 SIGTERM
+投递**：脚本里 `kill -TERM $pid` 返回 0、目标进程的 `blocked` / `pending` 掩码都是 0、
+`sigaction` 装的 handler 也确实在位（`sample` 能看到 handler 地址不是 `SIG_IGN`），
+但信号永远不会到达，进程只能 `kill -9`。
+
+用一个 15 行的 C 程序做过对照，与 TetherKit 无关：
+
+| 执行环境 | 收到 SIGTERM？ |
+|---|---|
+| 普通 shell | ✅ |
+| 普通 `osascript do shell script` | ✅ |
+| `osascript ... with administrator privileges` | ❌ |
+
+**后果：别用这条链验证优雅停机**，它会造出一个「停机卡死」的假故障，而且跟被测
+代码毫无关系 —— 修复前后的运行日志里都是清一色的 `Killed: 9`。要验证端到端停机，
+在真正的终端里 `sudo build/bin/tetherkit-cli` 再 Ctrl-C（已如此验证，见上）。
