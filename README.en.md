@@ -16,16 +16,20 @@ interface that macOS can see and use.
   writing raw Ethernet frames directly.
 - **No kernel code**: pure user-space C++23. No kext, no DriverKit, no need to disable SIP.
 
-> ⚠️ **Status**: all modules are implemented; 194 test cases (6579 assertions) pass under both
+> ⚠️ **Status**: all modules are implemented; 197 test cases (7268 assertions) pass under both
 > a normal build and a ThreadSanitizer build. RNDIS handshake, `feth` pair creation, BPF
 > attachment and graceful shutdown have all been exercised against a real RNDIS device; the
 > `feth` private ABI and the core premise that *a BPF write reaches the peer's IP stack* have
 > been confirmed by measurement — the latter is now guarded by an ARP round-trip root test
 > rather than living only in the docs.
-> End-to-end throughput has now been measured against an Android phone:
-> **~325 Mbps RX / ~235 Mbps TX** (USB 2.0 high-speed; theoretical payload ceiling 426 Mbps).
-> The TX direction still drops frames under load — see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-> The verification checklist lives in [AGENTS.md](AGENTS.md) §6 (Chinese).
+> End-to-end throughput has been measured against an Android phone:
+> **~326 Mbps RX / ~240–300 Mbps TX, zero retransmits in both directions**
+> (USB 2.0 high-speed; theoretical payload ceiling 426 Mbps). The TX frame loss that
+> stress testing uncovered has been root-caused and fixed (the bridge discarded frames
+> when the bulk OUT pool was momentarily full instead of waiting a few hundred
+> microseconds); concurrent bidirectional TX went from 4.8 Mbps back to 87 Mbps.
+> See [docs/BENCHMARKS.md](docs/BENCHMARKS.md). The verification checklist lives in
+> [AGENTS.md](AGENTS.md) §6 (Chinese).
 
 ---
 
