@@ -8,11 +8,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <format>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/sockio.h>
+#include <unistd.h>
 
 #include <doctest.h>
 
@@ -71,6 +80,116 @@ void ReportSkip(std::string_view what) {
       std::format("跳过 {}：需要 root 且需设置 TETHERKIT_ROOT_TESTS=1（当前 euid={}）", what,
                   IsRunningAsRoot() ? "0" : "非 0");
   MESSAGE(message);
+}
+
+// ---------------------------------------------------------------------------
+// ARP 往返闭环用的小工具
+//
+// 这个闭环要证明的事情，比「读不回自己写的帧」强得多：BPF 的 write() 真的把帧
+// 送进了**对侧 feth 的 IP 栈**，而不只是写进了一个黑洞。判据是对侧 IP 栈**主动
+// 应答** —— 它不理解这一帧就不会回 ARP reply。
+// ---------------------------------------------------------------------------
+
+/// 闭环用的地址。选 10.99.99/24 是因为它几乎不会与真实网络冲突。
+constexpr const char* kArpSystemIp = "10.99.99.1";  ///< 配在系统侧 feth 上。
+constexpr const char* kArpProbeIp = "10.99.99.2";   ///< 我们伪装的提问者。
+
+/// 给接口配一个 IPv4 地址。
+///
+/// 这里直接用 SIOCAIFADDR 而不是走 capi 的 `ipconfig` 路径：测试要的是一个
+/// 立即生效、进程退出即随 feth 一起消失的地址，不需要 IPConfiguration 的
+/// 租约管理，也不该在测试里拉起子进程。
+[[nodiscard]] std::string AssignIpv4(std::string_view interface_name, const char* address,
+                                     const char* netmask) {
+  const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0) {
+    return Error::FromErrno(errno, "socket(AF_INET)").ToString();
+  }
+
+  struct ifaliasreq request {};
+  std::memcpy(request.ifra_name, interface_name.data(),
+              std::min(interface_name.size(), sizeof(request.ifra_name) - 1));
+
+  const auto fill = [](struct sockaddr& slot, const char* text) -> bool {
+    struct sockaddr_in value {};
+    value.sin_len = sizeof(value);
+    value.sin_family = AF_INET;
+    if (::inet_pton(AF_INET, text, &value.sin_addr) != 1) {
+      return false;
+    }
+    std::memcpy(&slot, &value, sizeof(value));
+    return true;
+  };
+
+  if (!fill(request.ifra_addr, address) || !fill(request.ifra_mask, netmask)) {
+    ::close(fd);
+    return "inet_pton 失败";
+  }
+
+  const int result = ::ioctl(fd, SIOCAIFADDR, &request);
+  const int saved_errno = errno;
+  ::close(fd);
+  if (result != 0) {
+    return Error::FromErrno(saved_errno, "ioctl(SIOCAIFADDR)").ToString();
+  }
+  return {};
+}
+
+/// 以太帧内的 ARP 字段偏移（帧首起算）。
+constexpr std::size_t kEtherTypeOffset = 12;
+constexpr std::size_t kArpOperationOffset = 20;
+constexpr std::size_t kArpSenderMacOffset = 22;
+constexpr std::size_t kArpSenderIpOffset = 28;
+constexpr std::size_t kArpFrameBytes = 42;  ///< 14 以太头 + 28 ARP。
+
+/// 造一个「谁是 target_ip？告诉 sender_ip」的 ARP 请求（广播）。
+std::vector<std::byte> MakeArpRequest(const MacAddress& sender_mac, const char* sender_ip,
+                                      const char* target_ip) {
+  std::vector<std::byte> frame(kArpFrameBytes, std::byte{0});
+  const auto put = [&frame](std::size_t offset, std::initializer_list<std::uint8_t> bytes) {
+    std::size_t index = offset;
+    for (const std::uint8_t value : bytes) {
+      frame[index++] = std::byte{value};
+    }
+  };
+
+  put(0, {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});  // 目的 MAC：广播
+  for (std::size_t i = 0; i < sender_mac.size(); ++i) {
+    frame[6 + i] = std::byte{sender_mac[i]};
+  }
+  put(kEtherTypeOffset, {0x08, 0x06});  // EtherType = ARP
+  put(14, {0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01});  // 以太/IPv4，oper = 1（请求）
+
+  for (std::size_t i = 0; i < sender_mac.size(); ++i) {
+    frame[kArpSenderMacOffset + i] = std::byte{sender_mac[i]};
+  }
+  struct in_addr parsed {};
+  ::inet_pton(AF_INET, sender_ip, &parsed);
+  std::memcpy(frame.data() + kArpSenderIpOffset, &parsed, sizeof(parsed));
+  ::inet_pton(AF_INET, target_ip, &parsed);
+  std::memcpy(frame.data() + 38, &parsed, sizeof(parsed));  // 目标 IP，目标 MAC 留 0
+  return frame;
+}
+
+/// 判断一帧是否是「宣称拥有 expected_ip」的 ARP reply。
+[[nodiscard]] bool IsArpReplyFor(const FrameView& view, const char* expected_ip) {
+  if (view.length < kArpFrameBytes) {
+    return false;
+  }
+  if (view.data[kEtherTypeOffset] != std::byte{0x08} ||
+      view.data[kEtherTypeOffset + 1] != std::byte{0x06}) {
+    return false;
+  }
+  // oper == 2 即 reply。
+  if (view.data[kArpOperationOffset] != std::byte{0x00} ||
+      view.data[kArpOperationOffset + 1] != std::byte{0x02}) {
+    return false;
+  }
+  struct in_addr expected {};
+  if (::inet_pton(AF_INET, expected_ip, &expected) != 1) {
+    return false;
+  }
+  return std::memcmp(view.data + kArpSenderIpOffset, &expected, sizeof(expected)) == 0;
 }
 
 }  // namespace
@@ -371,6 +490,64 @@ TEST_CASE("BPF 打开配置全流程，并验证方向语义与回环抑制") {
     // 我们写的帧源 MAC 第 12 字节是 0x5A；读到它就说明回环抑制失效了。
     const bool is_our_frame = view.length == 200 && view.data[11] == std::byte{0x5A};
     CHECK_FALSE(is_our_frame);
+  }
+}
+
+TEST_CASE("ARP 往返闭环：BPF 写入的帧确实进了对侧 feth 的 IP 栈") {
+  if (!RootTestsEnabled()) {
+    ReportSkip("ARP 往返闭环测试");
+    return;
+  }
+
+  auto pair = FethPair::Create(1500);
+  REQUIRE_MESSAGE(pair.has_value(), Why(pair));
+
+  // 系统侧配一个 IP，好让它的 IP 栈有理由应答 ARP。
+  const std::string assign_error =
+      AssignIpv4(pair->SystemSide().Name(), kArpSystemIp, "255.255.255.0");
+  REQUIRE_MESSAGE(assign_error.empty(), assign_error);
+
+  const auto system_mac = pair->SystemSide().QueryMacAddress();
+  REQUIRE_MESSAGE(system_mac.has_value(), Why(system_mac));
+
+  // BPF 挂驱动侧 —— 这一侧扮演「设备」。
+  auto link = BpfLink::Open(pair->DriverSide().Name(), BpfConfig{});
+  REQUIRE_MESSAGE(link.has_value(), Why(link));
+
+  const MacAddress probe_mac{0x02, 0x00, 0x00, 0x99, 0x99, 0x02};
+  const auto request = MakeArpRequest(probe_mac, kArpProbeIp, kArpSystemIp);
+  const std::array<FrameView, 1> batch{
+      FrameView{.data = request.data(), .length = static_cast<std::uint32_t>(request.size())}};
+
+  const auto written = (*link)->WriteFrames(batch);
+  REQUIRE_MESSAGE(written.has_value(), Why(written));
+  REQUIRE(written->frames_written == 1);
+
+  // 读若干轮再判定失败：ReadFrames 一轮只等一个读超时，而 IP 栈的应答虽然快，
+  // 却没有「一定落在第一轮」的保证。
+  bool saw_reply = false;
+  MacAddress reply_mac{};
+  for (int attempt = 0; attempt < 20 && !saw_reply; ++attempt) {
+    const auto received = (*link)->ReadFrames();
+    REQUIRE_MESSAGE(received.has_value(), Why(received));
+    for (const FrameView& view : received->frames) {
+      if (IsArpReplyFor(view, kArpSystemIp)) {
+        saw_reply = true;
+        for (std::size_t i = 0; i < reply_mac.size(); ++i) {
+          reply_mac[i] = static_cast<std::uint8_t>(view.data[kArpSenderMacOffset + i]);
+        }
+        break;
+      }
+    }
+  }
+
+  // 这一条断言就是整个方案的核心前提：对侧 IP 栈**收到并处理了**我们写进去的帧。
+  CHECK_MESSAGE(saw_reply, "没有收到系统侧 feth 的 ARP reply —— BPF write 没能送达对侧 IP 栈");
+  if (saw_reply) {
+    // 应答者必须正是系统侧 feth，而不是别的什么接口串进来的帧。
+    CHECK(reply_mac == *system_mac);
+    MESSAGE(std::format("{} 宣称拥有 {}，MAC {}", pair->SystemSide().Name(), kArpSystemIp,
+                        FormatMac(reply_mac).data()));
   }
 }
 
