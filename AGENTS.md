@@ -205,6 +205,7 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 | 26 | `feat!: 命令行更名 tetherkit-cli；App 自动维护 Finder 别名` | ✅ | OUTPUT_NAME 改产物名（`tetherkit` formula 名让位 GUI）；别名用 bookmark API（软链聚焦不认），首次启动自动建立 —— **brew 连 postinstall 都在沙箱里，写不了 /Applications（实测）**；本机聚焦索引损坏（mdutil unknown state），入索效果待索引重建后复核 |
 | 27 | `build(ci): GUI 构建入 CI；发版附带 .app；tap 同步双 formula` | ✅ | GUI job（macos-14/26）；build-gui.sh 支持 --swift-build-flags=--disable-sandbox（SwiftPM 沙箱嵌不进 brew 沙箱） |
 | 28 | `chore(release): v0.1.2 —— README 图标/截图/双 formula 安装说明` | ✅ | 中英双语；docs/assets |
+| 29 | `chore(release): v0.1.3 —— 设备名不再因会话占用而丢失` | ✅ | capi 字符串记忆回填 + helper 占用判定修正（第 7 节第 17 条） |
 
 ### 当前状态
 
