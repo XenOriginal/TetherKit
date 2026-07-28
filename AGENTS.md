@@ -243,6 +243,7 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 | 28 | `chore(release): v0.1.2 —— README 图标/截图/双 formula 安装说明` | ✅ | 中英双语；docs/assets |
 | 29 | `chore(release): v0.1.3 —— 设备名不再因会话占用而丢失` | ✅ | capi 字符串记忆回填 + helper 占用判定修正（第 7 节第 17 条） |
 | 30 | `feat(i18n): 全量文案外置，中英双语` | ✅ | C++ 约 390 条 + Swift 220 条；命令行 `--lang`、C ABI `tk_set_language`、GUI 语言菜单；XPC 协议号 2 → 3 |
+| 31 | `chore(release): v0.1.4 —— 中英双语` | ✅ | README 英文版转正为默认（HoRNDIS 搜索意图 SEO）；**升级后用户必须在 App 内更新一次特权组件**（协议号变了） |
 
 ### 当前状态
 
