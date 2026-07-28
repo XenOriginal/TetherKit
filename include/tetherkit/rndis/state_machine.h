@@ -121,6 +121,20 @@ struct StateMachineConfig {
   /// 既留足聚合空间，又不超过规范对 USB 1.1 设备的 0x4000 上限。
   std::uint32_t host_max_transfer_size = 16 * 1024;
 
+  /// host → device 方向每次 bulk OUT 最多聚合几个 PACKET_MSG。0 表示不额外限制，
+  /// 完全听设备汇报的 MaxPacketsPerMessage。
+  ///
+  /// 之所以留这个旋钮：设备汇报的聚合能力**未必可信**。主线 Linux gadget 的
+  /// `rndis_rm_hdr()` 每次 bulk OUT 只拆一个 PACKET_MSG，而厂商内核照样可能汇报
+  /// MaxPacketsPerMessage=10。若真遇上这种设备，除第一个以外的帧会被对端悄悄丢掉，
+  /// 钳到 1 即可退回「一帧一传输」。
+  ///
+  /// ⚠️ **但别把它当成丢帧的默认解释。** 在实测过的 Android 设备上
+  /// （汇报 10 包 / 15800 字节）做过 A/B：钳到 1 反而更慢（TCP TX 125 vs 234 Mbps），
+  /// 丢帧率也没改善 —— 那台设备的聚合是**真的有效**的。所以这是一个诊断/兜底
+  /// 旋钮，不是已知缺陷的开关。详见 docs/BENCHMARKS.md「真机端到端实测」。
+  std::uint32_t max_tx_packets_per_message = 0;
+
   /// 要设置的包过滤位掩码。
   std::uint32_t packet_filter = kDefaultPacketFilter;
 

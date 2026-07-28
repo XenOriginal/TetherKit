@@ -100,6 +100,11 @@ void PrintUsage() {
       "  --max-transfer-kb <n> 在 INITIALIZE 里宣称的 MaxTransferSize（KiB），\n"
       "                       默认 16。这是让设备聚合多包的唯一手段，是吞吐的\n"
       "                       主要杠杆；报大一点通常更快\n"
+      "  --max-tx-packets <n>  host → device 每次传输最多聚合几个 RNDIS 包，\n"
+      "                       0（默认）表示听设备汇报的 MaxPacketsPerMessage。\n"
+      "                       诊断用：怀疑设备汇报了聚合能力却只拆第一个包时，\n"
+      "                       设成 1 对比一下。注意实测过的 Android 设备聚合是\n"
+      "                       有效的，钳到 1 反而更慢，别当成丢帧的默认解法\n"
       "  --bpf-buffer-kb <n>   BPF 内核抓包缓冲的 KiB 数，默认 4096\n"
       "\n"
       "其它：\n"
@@ -230,6 +235,11 @@ struct ParsedArguments {
       TETHERKIT_ASSIGN_OR_RETURN(const auto text, take_value(i, argument));
       TETHERKIT_ASSIGN_OR_RETURN(const auto kilobytes, ParseUint(text));
       parsed.config.rndis.host_max_transfer_size = kilobytes * 1024;
+      continue;
+    }
+    if (argument == "--max-tx-packets") {
+      TETHERKIT_ASSIGN_OR_RETURN(const auto text, take_value(i, argument));
+      TETHERKIT_ASSIGN_OR_RETURN(parsed.config.rndis.max_tx_packets_per_message, ParseUint(text));
       continue;
     }
     if (argument == "--bpf-buffer-kb") {

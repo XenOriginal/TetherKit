@@ -440,6 +440,14 @@ Status StateMachine::Start() {
     }
     parameters_ = *negotiated;
 
+    // 设备汇报的聚合包数只是它的**宣称**，调用方可以不信任它（见配置项注释）。
+    if (config_.max_tx_packets_per_message != 0 &&
+        parameters_.max_packets_per_message > config_.max_tx_packets_per_message) {
+      TETHERKIT_INFO("设备汇报 MaxPacketsPerMessage={}，按调用方要求钳到 {}",
+                     parameters_.max_packets_per_message, config_.max_tx_packets_per_message);
+      parameters_.max_packets_per_message = config_.max_tx_packets_per_message;
+    }
+
     TETHERKIT_INFO(
         "RNDIS 协商完成：版本 {}.{}，MTU {}，设备聚合上限 {} 字节 / {} 包，TX 对齐 {} 字节",
         complete->major_version, complete->minor_version, parameters_.mtu,
