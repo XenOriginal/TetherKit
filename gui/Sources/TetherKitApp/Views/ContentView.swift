@@ -72,7 +72,7 @@ struct ContentView: View {
                 Button("前往发布页") { NSWorkspace.shared.open(release.pageURL) }
                 Button("复制 brew 升级命令") {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString("brew upgrade tetherkit-gui", forType: .string)
+                    NSPasteboard.general.setString("brew upgrade tetherkit", forType: .string)
                 }
                 Button("好", role: .cancel) {}
             } else {
@@ -85,15 +85,15 @@ struct ContentView: View {
 
     /// 「检查更新」弹窗的正文。
     ///
-    /// brew 命令名与 tap 里计划的 GUI formula（tetherkit-gui）一致；
-    /// 手动构建的用户按第二句走。
+    /// brew 命令名与 tap 里实际的 GUI formula（tetherkit）一致 —— CLI 更名
+    /// tetherkit-cli 时这个名字让给了 GUI；手动构建的用户按第二句走。
     private var updateCheckDescription: String {
         switch model.updateCheckResult {
         case .upToDate(let current):
             return "当前已是最新版本（v\(current)）。"
         case .updateAvailable(let release):
             return "发现新版本 v\(release.version)。通过 Homebrew 安装的话，"
-                + "在终端执行 brew upgrade tetherkit-gui；"
+                + "在终端执行 brew upgrade tetherkit；"
                 + "从源码构建的话，拉取最新代码重新编译即可。"
         case .failed(let reason):
             return "无法完成检查：\(reason)"
