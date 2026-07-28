@@ -149,7 +149,9 @@ public struct DeviceDescriptor: Codable, Hashable, Identifiable, Sendable {
     public var busNumber: UInt8
     public var deviceAddress: UInt8
     /// 厂商名 / 产品名 / 序列号是尽力而为的：读它们要打开设备，设备被占用时
-    /// 会拿不到。空串时界面回落到显示 `description`。
+    /// 会拿不到 —— 但 helper 会回填上次成功读到的值，所以连接前后名字保持
+    /// 稳定。连回填值都没有（helper 启动后从未读到过）才是空串，界面此时
+    /// 回落到显示 `description`。
     public var manufacturer: String
     public var product: String
     public var serial: String

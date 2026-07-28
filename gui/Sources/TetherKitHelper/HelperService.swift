@@ -21,6 +21,10 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     /// 保护 session 与 notices。持有时间都极短，用普通锁足够。
     private let stateLock = NSLock()
     private var session: TetherKitSession?
+    /// startSession 正在构造 / 握手中。这段窗口里 session 还没登记，但设备
+    /// **已经**被本进程打开了 —— 枚举的占用判定必须把它算进去，否则字符串
+    /// 读取会往握手中的控制端点再插一笔传输。
+    private var sessionStarting = false
     /// 尚未被 App 取走的提示。
     private var pendingNotices: [String] = []
 
@@ -36,11 +40,21 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     }
 
     func listDevices(reply: @escaping (Data?, String?) -> Void) {
-        // 会话跑起来之后设备已被本进程独占，再去读字符串描述符只会失败一遍，
-        // 白白拖慢枚举。所以运行中就不读了。
-        let running = withState { $0 != nil }
+        // 设备被本进程持有期间不读字符串描述符：读要 libusb_open，白白失败一遍，
+        // 还会往正在握手的控制端点插传输。判定用「真的持有」而不是「session
+        // 非 nil」—— failed / stopped 的死会话早就把 USB 拆干净了，把它们也算
+        // 「占用」会让设备拔掉重插后一直读不到名字。
+        // 跳过不会丢名字：C 层会回填上次成功读到的值（见 environment.cc）。
+        let deviceHeld = stateLock.withLock { () -> Bool in
+            if sessionStarting { return true }
+            guard let session else { return false }
+            switch session.status().runState {
+            case .starting, .running, .stopping: return true
+            case .idle, .stopped, .failed: return false
+            }
+        }
         do {
-            let devices = try TetherKitLibrary.listDevices(readStrings: !running)
+            let devices = try TetherKitLibrary.listDevices(readStrings: !deviceHeld)
             respond(with: devices, reply: reply)
         } catch {
             reply(nil, error.localizedDescription)
@@ -100,6 +114,10 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
                 self.stateLock.withLock { self.session = nil }
             }
 
+            // 从构造到 start() 返回的整个握手期间把「设备已被持有」亮出来，
+            // 让并发到来的 listDevices 跳过字符串读取（见那边的说明）。
+            self.stateLock.withLock { self.sessionStarting = true }
+            defer { self.stateLock.withLock { self.sessionStarting = false } }
             do {
                 let session = try TetherKitSession(configuration: configuration)
                 try session.start()
