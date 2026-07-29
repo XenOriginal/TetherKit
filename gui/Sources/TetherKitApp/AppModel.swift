@@ -64,6 +64,25 @@ enum HelperAvailability: Equatable {
     }
 }
 
+/// 装着的特权组件与 App 自带的那份不是同一个版本。
+///
+/// ★ 与 `HelperAvailability.outdated` 的分工 ★
+///   那个说的是**协议对不上**：方法签名都不一致了，再调下去要么卡住要么崩，
+///   所以必须挡在安装引导页上。这个说的是**协议仍兼容、版本却不一样** ——
+///   组件照常能用，只是它里面还是升级前的那份 libtetherkit，新版修的问题在
+///   真正干活的那一侧一个都没修（`brew upgrade` 只换 .app，动不了
+///   /Library/PrivilegedHelperTools）。
+///
+///   所以它不拦路，只在管理行里点亮一个「更新特权组件」。协议号不变的版本
+///   （0.1.4 → 0.1.5 这种）以前完全没有提示，用户唯一能察觉的迹象是
+///   「更新说明里写着修好的毛病还在」。
+struct HelperVersionMismatch: Equatable {
+    /// 装着的那份，只取版本号（如 `"0.1.3"`）。
+    let installed: String
+    /// App 自带的那份 —— 点了按钮之后会装上去的版本。
+    let expected: String
+}
+
 /// 手动「检查更新」的结果，驱动一个弹窗。
 enum UpdateCheckResult: Equatable {
     case upToDate(current: String)
@@ -85,6 +104,8 @@ final class AppModel {
     // MARK: - 对界面公开的状态
 
     private(set) var helperAvailability: HelperAvailability = .unknown
+    /// 装着的组件与 App 版本对不上时的两个版本号；一致（或还没探到）为 nil。
+    private(set) var helperVersionMismatch: HelperVersionMismatch?
     private(set) var environment: EnvironmentReport?
     private(set) var devices: [DeviceDescriptor] = []
     private(set) var status: SessionStatus = .idle
@@ -288,12 +309,17 @@ final class AppModel {
             guard revision == HelperConstants.protocolRevision else {
                 helperAvailability = .outdated(installed: revision,
                                                expected: HelperConstants.protocolRevision)
+                // 协议对不上时不再另报版本不一致：那张卡本来就是要用户去更新组件，
+                // 同一件事说两遍只会让人怀疑是两个问题。
+                helperVersionMismatch = nil
                 // 接口对不上就别继续发请求了 —— 参数与应答的形状都可能不一致。
                 return
             }
             helperAvailability = .available(version: version)
+            helperVersionMismatch = Self.versionMismatch(installed: version)
         } catch {
             helperAvailability = .missing(reason: error.localizedDescription)
+            helperVersionMismatch = nil
             // 连不上就别再发后续请求了 —— 每一个都会重复同样的失败，
             // 只会把日志刷满。
             return
@@ -518,7 +544,28 @@ final class AppModel {
         droppedLogCount = 0
     }
 
-    /// 安装 / 更新特权组件（引导卡上的「一键安装」按钮）。
+    /// App 自带的库版本 —— 「特权组件应该是哪一版」的标准答案。
+    ///
+    /// 用**库**的版本而不是 Info.plist 里的 App 版本号：装到
+    /// /Library/PrivilegedHelperTools 的正是 .app 里那份 libtetherkit 的拷贝
+    /// （见 build-gui.sh 组装载荷那段），两边同源才比得准。而且 `swift run`
+    /// 的裸可执行文件根本没有 bundle，读 Info.plist 那条路上这个判断会整个失效。
+    ///
+    /// 敢用 `static let` 缓存是因为它是编译期烧进 dylib 的常量，进程活着的时候
+    /// 不会变 —— 与上面几个必须跟着语言走的提示语不同。顺手把版本号提取也
+    /// 做掉：这个判断挂在 500 ms 一次的轮询上，没必要每次都重跑一遍正则。
+    private static let bundledVersion =
+        HelperConstants.semanticVersion(of: TetherKitLibrary.versionInfo.version)
+
+    /// 装着的组件和 App 自带的是不是同一版。一致时返回 nil。
+    private static func versionMismatch(installed: String) -> HelperVersionMismatch? {
+        let installedVersion = HelperConstants.semanticVersion(of: installed)
+        guard installedVersion != bundledVersion else { return nil }
+        return HelperVersionMismatch(installed: installedVersion, expected: bundledVersion)
+    }
+
+    /// 安装 / 更新特权组件（引导卡上的「一键安装」按钮，以及版本对不上时
+    /// 管理行里的「更新特权组件」—— 更新就是照着 .app 里的载荷重装一遍）。
     func installHelper() async {
         await maintainHelper(.install, prompt: Self.helperInstallPrompt,
                              expectAvailable: true,

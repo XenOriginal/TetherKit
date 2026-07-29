@@ -25,6 +25,11 @@ struct ContentView: View {
     /// 卸载是破坏性动作（断开连接、删系统文件），必须先确认。
     @State private var confirmingHelperUninstall = false
 
+    /// 更新组件时**正跑着会话**才需要确认 —— 安装脚本会先 bootout 旧组件，
+    /// 那一下会把连接掐掉。空闲时更新什么都不会毁，再拦一道只会给本来就该
+    /// 尽快做的事平添阻力。
+    @State private var confirmingHelperUpdate = false
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -64,6 +69,14 @@ struct ContentView: View {
             Button(L(.cancel), role: .cancel) {}
         } message: {
             Text(uninstallWarning)
+        }
+        .confirmationDialog(L(.confirmHelperUpdateTitle), isPresented: $confirmingHelperUpdate) {
+            Button(L(.updateHelperButton)) {
+                Task { await model.installHelper() }
+            }
+            Button(L(.cancel), role: .cancel) {}
+        } message: {
+            Text(L(.helperUpdateWhileRunningWarning))
         }
         .alert(L(.updateCheckTitle),
                isPresented: Binding(get: { model.updateCheckResult != nil },
@@ -149,20 +162,45 @@ struct ContentView: View {
     private var helperManagementFooter: some View {
         if case .available(let version) = model.helperAvailability {
             HStack(spacing: Design.Spacing.small) {
-                Text(L(.helperComponentVersion, version))
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
-                    .lineLimit(1)
-                // 塞在既有行里而不是另起一行：整页预算 700pt 已经没有余粮
-                // 给新行了（管理行自己就险些顶破过一次）。
-                if let update = model.availableUpdate {
-                    Button(L(.helperUpdateBadge, update.version)) {
-                        model.updateCheckResult = .updateAvailable(update)
+                if let mismatch = model.helperVersionMismatch {
+                    // 版本对不上时这一行从「参考信息」变成「有件事等着你做」：
+                    // 两个版本号一起摆出来，颜色也从 tertiary 提到 orange。
+                    Text(L(.helperVersionMismatch, mismatch.installed, mismatch.expected))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                    // 忙的时候换成「正在安装……」而不是只把按钮置灰：授权框关掉
+                    // 之后要等好几秒（bootout → 拷文件 → bootstrap → 探活），
+                    // 一个灰掉的按钮看起来像是点了没反应。
+                    Button(model.isBusy ? L(.installingProgress) : L(.updateHelperButton)) {
+                        requestHelperUpdate()
                     }
                     .buttonStyle(.borderless)
                     .font(.caption)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.orange)
+                    .disabled(model.isBusy)
+                    .help(L(.helperVersionMismatchTooltip, mismatch.installed, mismatch.expected))
+                } else {
+                    Text(L(.helperComponentVersion, version))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                    // 塞在既有行里而不是另起一行：整页预算 700pt 已经没有余粮
+                    // 给新行了（管理行自己就险些顶破过一次）。
+                    //
+                    // 与版本不一致互斥，也是同一个理由 —— 一行放不下两组提示。
+                    // 让位的是这条：它只是「知道一下」（升级要去终端敲 brew），
+                    // 而版本不一致是当场点一下就能解决的。
+                    if let update = model.availableUpdate {
+                        Button(L(.helperUpdateBadge, update.version)) {
+                            model.updateCheckResult = .updateAvailable(update)
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                    }
                 }
                 Spacer()
                 Button(L(.uninstallHelperMenuItem)) { confirmingHelperUninstall = true }
@@ -172,6 +210,15 @@ struct ContentView: View {
                     .disabled(model.isBusy)
             }
             .padding(.horizontal, Design.Spacing.tight)
+        }
+    }
+
+    /// 「更新特权组件」被点了。跑着会话才先确认 —— 见 `confirmingHelperUpdate`。
+    private func requestHelperUpdate() {
+        if model.status.runState == .running {
+            confirmingHelperUpdate = true
+        } else {
+            Task { await model.installHelper() }
         }
     }
 

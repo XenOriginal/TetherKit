@@ -244,15 +244,19 @@ Swift 的 C++ 互操作吞不下，所以 C ABI 这一层不可省。
 | 29 | `chore(release): v0.1.3 —— 设备名不再因会话占用而丢失` | ✅ | capi 字符串记忆回填 + helper 占用判定修正（第 7 节第 17 条） |
 | 30 | `feat(i18n): 全量文案外置，中英双语` | ✅ | C++ 约 390 条 + Swift 220 条；命令行 `--lang`、C ABI `tk_set_language`、GUI 语言菜单；XPC 协议号 2 → 3 |
 | 31 | `chore(release): v0.1.4 —— 中英双语` | ✅ | README 英文版转正为默认（HoRNDIS 搜索意图 SEO）；**升级后用户必须在 App 内更新一次特权组件**（协议号变了） |
+| 32 | `feat(gui): 特权组件与 App 版本不一致时给出更新入口` | ✅ | 比的是**库**版本而不是 Info.plist（`swift run` 没有 bundle）；只取版本号，构建配置不同不算不一致；协议号没变的版本以前完全没有提示 |
 
 ### 当前状态
 
 - **测试**：23 个 ctest 用例全部通过（新增 common.i18n 核对两种语言的占位符）；
-  GUI 侧 `swift test` 9 个用例通过（含 LocalizationTests）
+  GUI 侧 `swift test` 17 个用例通过（含 LocalizationTests、HelperConstantsTests）
 - **构建**：`-Werror` 零告警；命令行、共享库、GUI 三套产物均可构建
 - **可运行**：`--version` / `--help` / `--list` 均正常；非 root 启动给出清晰提示
   并返回退出码 1；`TetherKit.app` 与 `tetherkit-helper` 打包后均可启动；
   特权组件可在 App 内一键安装 / 卸载（安装路径已真机走通）；
+  组件版本与 App 对不上时管理行点亮「更新特权组件」（`brew upgrade` 只换 .app，
+  装在 /Library 的那份不会跟着变 —— 协议号没变时以前完全没有提示，
+  用户唯一能察觉的迹象是「更新说明里写着修好的毛病还在」；两种语言各截窗口核对过）；
   中英双语已实测：命令行两种语言的 `--help` / `--list` / 参数错误均正确，
   GUI 在菜单里切换语言后主窗口与 App 菜单**立即**变（不需重启，截窗口核对过）
 - **已验证**：USB 侧在真实 RNDIS 设备上跑通（枚举、声明接口、RNDIS 握手），

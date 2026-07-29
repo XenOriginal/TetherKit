@@ -57,6 +57,24 @@ public enum HelperConstants {
         return (revision, String(encoded[encoded.index(after: separator)...]))
     }
 
+    /// 从库的版本串里取出语义化版本号：
+    /// `"TetherKit 0.1.4 (C++23, macOS 13.3+)"` → `"0.1.4"`。
+    ///
+    /// ★ 为什么不直接比整串 ★
+    ///   串里除了版本号还带着 C++ 标准与最低 macOS 版本 —— 那是**构建配置**，
+    ///   不是版本。拿整串当判据的话，换个编译选项重建一次就会冒出一个
+    ///   「组件该更新了」的假警报，而用户点下去什么也不会变。
+    ///
+    /// 取不到（串里没有带点的数字）时退回整串：宁可误报也不要漏报 —— 漏报
+    /// 意味着用户一直在跑升级前的那份库，且毫不知情。
+    public static func semanticVersion(of text: String) -> String {
+        // 至少要有一个点，否则 "C++23" 这种也会被当成版本号。
+        guard let range = text.range(of: "[0-9]+(\\.[0-9]+)+", options: .regularExpression) else {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return String(text[range])
+    }
+
     /// XPC 调用的超时（秒）。
     ///
     /// 取 30 秒是因为最慢的一次调用是 DHCP 配置：库内部最多等 10 秒租约，

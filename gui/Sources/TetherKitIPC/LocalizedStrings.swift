@@ -154,6 +154,10 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case uninstallExplanation
     case uninstallWhileRunningWarning
     case helperComponentVersion
+    case helperVersionMismatch
+    case helperVersionMismatchTooltip
+    case confirmHelperUpdateTitle
+    case helperUpdateWhileRunningWarning
     case helperUpdateBadge
     case uninstallHelperMenuItem
     case checkingHelper
@@ -492,6 +496,22 @@ extension L10nKey {
             return ("当前连接会被断开、虚拟网卡销毁。",
                     "The current connection will be dropped and the virtual interface destroyed.")
         case .helperComponentVersion: return ("特权组件 · %@", "Helper · %@")
+        case .helperVersionMismatch: return ("特权组件 %1$@ · App %2$@", "Helper %1$@ · app %2$@")
+        case .helperVersionMismatchTooltip:
+            return ("装着的特权组件仍是 %1$@，而 App 已经是 %2$@。真正干活的是组件里的那份库，"
+                    + "不更新的话新版修好的问题在连接里依旧存在。"
+                    + "点一下就用 App 自带的组件重装一遍，需要一次管理员授权。",
+                    "The installed helper is still %1$@ while the app is %2$@. The library inside "
+                    + "the helper is what does the actual work, so anything the new version fixes "
+                    + "stays unfixed until the helper is updated too. One click reinstalls the "
+                    + "helper the app ships with; macOS will ask for an administrator password "
+                    + "once.")
+        case .confirmHelperUpdateTitle: return ("更新特权组件？", "Update the privileged helper?")
+        case .helperUpdateWhileRunningWarning:
+            return ("更新要先注销旧组件，当前连接会被断开、虚拟网卡销毁。装好后重新连接即可。",
+                    "Updating unregisters the old helper first, so the current connection will be "
+                    + "dropped and the virtual interface destroyed. Just reconnect once it is "
+                    + "installed.")
         case .helperUpdateBadge: return ("有新版 %@", "%@ available")
         case .uninstallHelperMenuItem: return ("卸载特权组件…", "Uninstall the helper…")
         case .checkingHelper: return ("正在检查特权组件……", "Checking the privileged helper…")
