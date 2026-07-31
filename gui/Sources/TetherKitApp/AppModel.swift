@@ -494,24 +494,41 @@ final class AppModel {
         }
 
         // 网络配置（IP/网关/DNS）走 XPC。接口没变且未到节流间隔时沿用上次结果
-        // —— 这些信息在会话期间基本不变，没必要每 500 ms 查两次。
-        if !status.systemInterface.isEmpty {
+        // —— 这些信息在会话期间基本不变，没必要每周期查两次。
+        //
+        // ★ 抗抖动（修复「connect 后 IP 反复不稳定」）★
+        //   1) 接口名短暂为空（connect 早期 feth 还没起、或 link 抖动）时**不**把
+        //      已有地址清空，只靠下面的「有效地址不被空结果覆盖」规则维持显示，
+        //      避免界面在「有地址 ↔ 没地址」之间反复横跳。
+        //   2) queryNetwork 偶发返回空（SCDynamicStore 还没跟上 / 查询竞态）时，
+        //      若本地已经有一个有效地址，则保留它，不被瞬时空结果覆盖。
+        //   3) 只有会话确实不在运行（idle/stopped/failed）时才清零地址。
+        let sessionLive = status.runState == .running || status.runState == .starting
+        if !sessionLive {
+            networkState = .empty
+            networkStateV6 = .empty
+            lastNetworkInterfaceQueried = ""
+        } else if !status.systemInterface.isEmpty {
             let now = Date()
             let due = now.timeIntervalSince(lastNetworkQueryAt) >= Self.networkQueryIntervalSeconds
             let ifaceChanged = status.systemInterface != lastNetworkInterfaceQueried
             if due || ifaceChanged {
-                networkState = (try? await client.queryNetwork(interface: status.systemInterface))
-                    ?? .empty
-                networkStateV6 = (try? await client.queryNetworkV6(interface: status.systemInterface))
-                    ?? .empty
+                if let fresh = try? await client.queryNetwork(interface: status.systemInterface) {
+                    // 有效地址不被瞬时空结果冲掉；新结果有效、或本地本来就没地址才更新。
+                    if fresh.hasAddress || !networkState.hasAddress {
+                        networkState = fresh
+                    }
+                }
+                if let freshV6 = try? await client.queryNetworkV6(interface: status.systemInterface) {
+                    if freshV6.hasAddress || !networkStateV6.hasAddress {
+                        networkStateV6 = freshV6
+                    }
+                }
                 lastNetworkQueryAt = now
                 lastNetworkInterfaceQueried = status.systemInterface
             }
-        } else {
-            networkState = .empty
-            networkStateV6 = .empty
-            lastNetworkInterfaceQueried = ""
         }
+        // sessionLive 且接口名暂空：什么都不做，networkState 维持上一次的有效值。
     }
 
     /// helper 二进制的预期安装路径。不在就说明没装（或被外部删除），

@@ -144,14 +144,23 @@ struct StatusHeroCard: View {
 
 /// 状态圆环。
 ///
-/// 运行中时外圈缓慢旋转、内圈呼吸 —— 这是界面上唯一的动效，用来表达「它在活着
-/// 干活」。其余状态一律静止，避免把注意力浪费在没有信息量的动画上。
+/// ★ CPU 关键 ★
+///
+/// 旧实现让 `breathing` 用 `.repeatForever` 在**整段会话**里持续脉冲 —— 只要
+/// 会话在跑（isActive = true），SwiftUI 的渲染循环就以 60fps 永远空转，这是
+/// connect 后主进程 CPU 居高不下（实测 ~40%）的真正根因。降轮询频率、砍图表
+/// 重绘都治不到它，因为它们都挂在 1Hz 的轮询上，而这段动画完全独立于轮询。
+///
+/// 新方案：运行中**完全静止**，靠链路指示徽标 + 实时吞吐图表表达「在干活」，
+/// 不再为无信息量的动画烧 CPU；只有「过渡态」（starting/stopping，通常几秒）
+/// 才跑一段旋转弧，且做了幂等处理（已在转就不再 issue），避免状态抖动时叠加
+/// 多个无限动画把渲染循环彻底拖死。
 private struct StatusRing: View {
     let status: SessionStatus
     let accent: Color
 
     @State private var rotation: Double = 0
-    @State private var breathing = false
+    @State private var spinning = false
 
     private var isActive: Bool { status.runState == .running && status.linkUp }
     private var isWorking: Bool { status.runState.isTransitional }
@@ -159,15 +168,14 @@ private struct StatusRing: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(accent.opacity(0.12))
+                .fill(accent.opacity(isActive ? 0.16 : 0.12))
                 .frame(width: 64, height: 64)
-                .scaleEffect(breathing && isActive ? 1.08 : 1.0)
 
             Circle()
                 .stroke(accent.opacity(0.25), lineWidth: 3)
                 .frame(width: 64, height: 64)
 
-            // 过渡态用一段旋转的弧表示「正在进行中，进度不可知」。
+            // 过渡态用一段旋转的弧表示「正在进行中，进度不可知」；运行中显示整圈。
             Circle()
                 .trim(from: 0, to: isWorking ? 0.25 : (isActive ? 1.0 : 0.0))
                 .stroke(accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
@@ -180,21 +188,26 @@ private struct StatusRing: View {
                 .symbolRenderingMode(.hierarchical)
         }
         .frame(width: 72, height: 72)
-        .onAppear { restartAnimations() }
-        .onChange(of: status.runState) { _, _ in restartAnimations() }
-        .onChange(of: status.linkUp) { _, _ in restartAnimations() }
+        .onAppear { updateAnimationState() }
+        .onChange(of: status.runState) { _, _ in updateAnimationState() }
+        .onChange(of: status.linkUp) { _, _ in updateAnimationState() }
     }
 
-    private func restartAnimations() {
+    /// 只在「过渡态」启动旋转，离开过渡态立即停止；运行中保持静止。
+    ///
+    /// 幂等：已在转（`spinning == true`）时即使 onChange 因 linkUp 抖动再次触发，
+    /// 也不再 issue 新的 repeatForever，避免无限动画叠加。
+    private func updateAnimationState() {
         if isWorking {
+            guard !spinning else { return }
+            spinning = true
             withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
                 rotation = 360
             }
         } else {
-            rotation = 0
-        }
-        withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
-            breathing = isActive
+            spinning = false
+            // 一次性动画把 rotation 收回 0，渲染循环得以 idle。
+            withAnimation(.default) { rotation = 0 }
         }
     }
 }
