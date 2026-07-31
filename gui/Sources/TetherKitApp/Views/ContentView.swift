@@ -450,8 +450,12 @@ private struct CredentialPromptSheet: View {
 
     var body: some View {
         VStack(spacing: Design.Spacing.medium) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 36))
+                .foregroundStyle(.blue)
             Text(state.title)
                 .font(.headline)
+                .foregroundStyle(.primary)
             Text(state.message)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -460,9 +464,9 @@ private struct CredentialPromptSheet: View {
             SecureField(L(.credentialPromptPlaceholder), text: $password)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 300)
+                .onSubmit { submitIfPossible() }
             HStack {
                 Button(L(.cancel), role: .cancel) {
-                    guard !submitting, !cancelling else { return }
                     cancelling = true
                     dismiss()
                     onCancel()
@@ -470,16 +474,27 @@ private struct CredentialPromptSheet: View {
                 .keyboardShortcut(.cancelAction)
                 .disabled(submitting || cancelling)
                 Button(L(.ok)) {
-                    guard !submitting, !cancelling else { return }
-                    submitting = true
-                    let value = password
-                    dismiss()
-                    onSubmit(value)
+                    submitIfPossible()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(password.isEmpty || submitting || cancelling)
             }
         }
         .padding(Design.Spacing.large)
+        .frame(width: 400)
+        // 关键修复：必须显式指定背景材质，否则 SwiftUI sheet 在深色模式下
+        // 会渲染为纯黑矩形（无 material = 透明 → 底层 window 背景透出来）。
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Design.Radius.card))
+        .overlay(
+            RoundedRectangle(cornerRadius: Design.Radius.card)
+                .strokeBorder(.separator.opacity(0.6), lineWidth: 0.5))
+    }
+
+    private func submitIfPossible() {
+        guard !submitting, !cancelling, !password.isEmpty else { return }
+        submitting = true
+        let value = password
+        dismiss()
+        onSubmit(value)
     }
 }
