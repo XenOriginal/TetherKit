@@ -36,9 +36,7 @@ struct NetworkCard: View {
         Card(title: L(.ipModeLabel), systemImage: "network", accessory: AnyView(interfaceBadge)) {
             VStack(alignment: .leading, spacing: Design.Spacing.small) {
                 // MARK: - IPv4 配置
-                Text("IPv4")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                protocolHeader("IPv4", tint: .blue)
 
                 modePicker
 
@@ -56,6 +54,8 @@ struct NetworkCard: View {
                 // MARK: - IPv6 配置
                 Divider()
                     .padding(.vertical, Design.Spacing.tight)
+
+                protocolHeader("IPv6", tint: .teal)
 
                 ipv6ModePicker
 
@@ -99,6 +99,19 @@ struct NetworkCard: View {
     private var interfaceBadge: some View {
         if interfaceReady {
             StatusBadge(text: model.status.systemInterface, color: .accentColor)
+        }
+    }
+
+    /// IPv4 / IPv6 区块标题：彩色圆点 + 标签，两个协议共用同款样式，仅靠
+    /// 文字与颜色（IPv4=蓝、IPv6=青）区分，保证视觉一致又不会混。
+    private func protocolHeader(_ title: String, tint: Color) -> some View {
+        HStack(spacing: Design.Spacing.tight) {
+            Circle()
+                .fill(tint)
+                .frame(width: 9, height: 9)
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -422,9 +435,9 @@ private struct EffectiveStateView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Design.Spacing.tight) {
             // MARK: - IPv4 状态
+            effectiveHeader(L(.currentlyEffective), tint: .blue)
+
             HStack(spacing: Design.Spacing.small) {
-                Text(L(.currentlyEffective))
-                    .font(.subheadline.weight(.medium))
                 if !state.method.isEmpty {
                     StatusBadge(text: state.method, color: .accentColor)
                 }
@@ -462,9 +475,9 @@ private struct EffectiveStateView: View {
 
             // MARK: - IPv6 状态
             Divider()
+            effectiveHeader(L(.ipv6CurrentlyEffective), tint: .teal)
+
             HStack(spacing: Design.Spacing.small) {
-                Text(L(.ipv6CurrentlyEffective))
-                    .font(.subheadline.weight(.medium))
                 if !stateV6.method.isEmpty {
                     StatusBadge(text: stateV6.method, color: .blue)
                 }
@@ -494,6 +507,18 @@ private struct EffectiveStateView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// 回读区区块标题：与配置区 protocolHeader 同款彩色圆点，IPv4=蓝 / IPv6=青，
+    /// 上下两块风格统一。
+    private func effectiveHeader(_ title: String, tint: Color) -> some View {
+        HStack(spacing: Design.Spacing.tight) {
+            Circle()
+                .fill(tint)
+                .frame(width: 9, height: 9)
+            Text(title)
+                .font(.subheadline.weight(.medium))
         }
     }
 
