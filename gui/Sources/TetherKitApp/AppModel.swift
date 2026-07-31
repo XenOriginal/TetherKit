@@ -168,6 +168,9 @@ final class AppModel {
     /// 当前会话是否已执行过自动应用（防止每次轮询都重复触发）。
     private var autoAppliedForCurrentSession = false
 
+    /// 本次启动是否已尝试过 helper 自动升级（防止每次轮询都重复触发）。
+    private var helperAutoUpgradeAttempted = false
+
     /// 是否已对「运行中会话的设备列表」做过首次填充尝试。
     ///
     /// 场景：App 启动即发现会话已在跑、而设备列表还空着（手机早就连上了）。
@@ -194,6 +197,8 @@ final class AppModel {
 
     /// 正在等待某个特权操作完成 —— 界面据此禁用按钮并显示进度。
     private(set) var isBusy: Bool = false
+    /// 正在自动升级 helper（启动时检测到版本不一致，无需用户手动点更新）。
+    private(set) var isAutoUpgradingHelper: Bool = false
     /// 需要弹给用户看的错误。
     var alertMessage: String?
 
@@ -445,6 +450,18 @@ final class AppModel {
             }
             helperAvailability = .available(version: version)
             helperVersionMismatch = Self.versionMismatch(installed: version)
+
+            // 自动升级：启动时检测到 helper 版本落后于 App 自带的版本，
+            // 且当前没有活跃会话 → 静默卸载旧版 + 安装新版，无需用户手动点「更新」。
+            //
+            // 条件：
+            //   1) 本次启动尚未尝试过（防重复）
+            //   2) 没有正在跑的会话（升级会断连）
+            //   3) 当前不在忙其他操作
+            if !helperAutoUpgradeAttempted && status.runState != .running && !isBusy {
+                helperAutoUpgradeAttempted = true
+                Task { await autoUpgradeHelper() }
+            }
         } catch {
             helperAvailability = .missing(reason: error.localizedDescription)
             helperVersionMismatch = nil
@@ -840,6 +857,20 @@ final class AppModel {
         await maintainHelper(.uninstall, prompt: Self.helperUninstallPrompt,
                              expectAvailable: false,
                              failureNotice: L(.uninstallScriptRanButStillAlive))
+    }
+
+    /// 启动时自动升级 helper：检测到版本不一致时，静默卸载旧版 + 安装新版。
+    ///
+    /// 只在「无活跃会话 + 不忙」时触发（见 refresh() 里的守卫条件）。
+    /// install-helper.sh 内部已包含「先 bootout 旧服务再覆盖文件」的逻辑，
+    /// 所以这里只需调 installHelper() 即可完成完整的卸载→安装流程。
+    private func autoUpgradeHelper() async {
+        isAutoUpgradingHelper = true
+        defer { isAutoUpgradingHelper = false }
+        await installHelper()
+        // installHelper 成功后，下一轮 refresh() 会重新探测版本，
+        // helperVersionMismatch 应该变为 nil（版本一致了）。
+        // 如果仍然不一致（安装失败），用户仍可手动点更新按钮。
     }
 
     /// 安装与卸载共用的执行壳：授权（复用缓存令牌）→ AEWP 执行 → XPC 探测

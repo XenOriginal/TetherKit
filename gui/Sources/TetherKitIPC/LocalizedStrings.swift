@@ -164,6 +164,7 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case uninstallExplanation
     case uninstallWhileRunningWarning
     case helperComponentVersion
+    case autoUpgradingHelper
     case helperVersionMismatch
     case helperVersionMismatchTooltip
     case confirmHelperUpdateTitle
@@ -552,6 +553,7 @@ extension L10nKey {
             return ("当前连接会被断开、虚拟网卡销毁。",
                     "The current connection will be dropped and the virtual interface destroyed.")
         case .helperComponentVersion: return ("特权组件 · %@", "Helper · %@")
+        case .autoUpgradingHelper: return ("正在自动升级特权组件…", "Upgrading helper…")
         case .helperVersionMismatch: return ("特权组件 %1$@ · App %2$@", "Helper %1$@ · app %2$@")
         case .helperVersionMismatchTooltip:
             return ("装着的特权组件仍是 %1$@，而 App 已经是 %2$@。真正干活的是组件里的那份库，"

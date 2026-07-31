@@ -171,7 +171,14 @@ struct ContentView: View {
     private var helperManagementFooter: some View {
         if case .available(let version) = model.helperAvailability {
             HStack(spacing: Design.Spacing.small) {
-                if let mismatch = model.helperVersionMismatch {
+                if model.isAutoUpgradingHelper {
+                    // 自动升级中：显示进度提示，禁用所有操作按钮。
+                    ProgressView()
+                        .scaleEffect(0.6)
+                    Text(L(.autoUpgradingHelper))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let mismatch = model.helperVersionMismatch {
                     // 版本对不上时这一行从「参考信息」变成「有件事等着你做」：
                     // 两个版本号一起摆出来，颜色也从 tertiary 提到 orange。
                     Text(L(.helperVersionMismatch, mismatch.installed, mismatch.expected))
