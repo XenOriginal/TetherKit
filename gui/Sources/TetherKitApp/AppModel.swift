@@ -240,6 +240,20 @@ final class AppModel {
     /// 设备列表未变、网络状态未变 —— 即整个 refresh() 对 UI 零影响。
     private var consecutiveNoChangeCycles = 0
 
+    /// 轮询周期计数器：用于区分快/慢周期。
+    private var pollCycleCount = 0
+
+    /// 慢周期频率：每 N 个快周期执行一次慢周期（drainFeed + 网络查询）。
+    /// 活跃转发时快周期只做 sessionStatus（1 次 XPC），慢周期才做 drainFeed
+    /// + queryNetwork（2~3 次 XPC）。N=3 时平均 XPC 从 2~4 次/秒降到 ~1.7 次/秒。
+    private static let slowPollEveryNthCycle = 3
+
+    /// 图表采样追加频率：每 N 个周期向 throughputHistory 追加一个新数据点。
+    /// throughput（当前速率）仍每秒更新供菜单栏和速率格使用；
+    /// throughputHistory（图表数据）每 3 秒追加一点，Chart 重建频率降 67%。
+    private var chartAppendCounter = 0
+    private static let chartAppendEveryNthCycle = 3
+
     /// 自适应退避的最大轮询间隔（秒）。即使一直没变化也不超过这个值，
     /// 因为心跳（3s）和菜单栏速率仍需较及时的更新。
     private static let maxBackoffSeconds: Double = 5
@@ -301,8 +315,8 @@ final class AppModel {
     /// 网络配置（IP/网关/DNS）的轮询间隔（秒）。
     ///
     /// 这些信息在会话运行期间基本不变，没必要跟着状态轮询一起每周期查两次 XPC。
-    /// 降到 2 秒就足够「看起来实时」，并把 helper 上这两类查询的频次砍到约四分之一。
-    private static let networkQueryIntervalSeconds: TimeInterval = 2
+    /// 10 秒就足够「看起来实时」，并把 helper 上这两类查询的频次大幅降低。
+    private static let networkQueryIntervalSeconds: TimeInterval = 10
 
     /// 设备枚举的最小间隔。
     ///
@@ -474,6 +488,8 @@ final class AppModel {
     @discardableResult
     private func refresh() async -> Bool {
         var changed = false
+        pollCycleCount += 1
+        let isSlowCycle = pollCycleCount % Self.slowPollEveryNthCycle == 0
 
         // 快路径：helper 二进制不在预期位置（多半是被系统清理工具删掉了，
         // 本机装了 CleanMyMac 一类软件就可能这么干）。直接判缺失并给出安装引导，
@@ -530,8 +546,28 @@ final class AppModel {
         if let fresh = try? await client.sessionStatus() {
             apply(status: fresh)
         }
-        if let feed = try? await client.drainFeed() {
-            apply(feed: feed)
+
+        // 图表采样：基于时间的节流（每 N 个周期追加一点），而非基于值变化。
+        // throughput（当前速率）每周期更新供菜单栏使用；
+        // throughputHistory（图表数据）每 3 秒追加一点，Chart 重建频率降 67%。
+        if status.runState == .running {
+            chartAppendCounter += 1
+            if chartAppendCounter >= Self.chartAppendEveryNthCycle {
+                chartAppendCounter = 0
+                throughputHistory.append(throughput)
+                if throughputHistory.count > Self.historyCapacity {
+                    throughputHistory.removeFirst(throughputHistory.count - Self.historyCapacity)
+                }
+            }
+        }
+
+        // 慢周期：日志与网络查询每 3 个快周期执行一次。
+        // 活跃转发时日志面板和网络状态不是每秒都需要刷新 —— 日志在 helper
+        // 侧有缓冲，网络配置在会话期间几乎不变。
+        if isSlowCycle {
+            if let feed = try? await client.drainFeed() {
+                apply(feed: feed)
+            }
         }
 
         // 设备列表：未运行会话时照常枚举（设备不被独占，列表随插拔更新），
@@ -562,9 +598,9 @@ final class AppModel {
             }
         }
 
-        // 网络配置（IP/网关/DNS）走 XPC。接口没变且未到节流间隔时沿用上次结果
-        // —— 这些信息在会话期间基本不变，没必要每 500 ms 查两次。
-        if !status.systemInterface.isEmpty {
+        // 网络配置（IP/网关/DNS）走 XPC。只在慢周期且接口没变、又没到节流间隔时
+        // 沿用上次结果 —— 这些信息在会话期间基本不变，10 秒查一次足够。
+        if isSlowCycle && !status.systemInterface.isEmpty {
             let now = Date()
             let due = now.timeIntervalSince(lastNetworkQueryAt) >= Self.networkQueryIntervalSeconds
             let ifaceChanged = status.systemInterface != lastNetworkInterfaceQueried
@@ -673,32 +709,9 @@ final class AppModel {
             transmitPacketsPerSecond: Double(fresh.txFrames &- previous.txFrames) / seconds)
 
         throughput = sample
-
-        // ★ 稳态节流：速率变化 < 1% 时不追加新采样点，只更新最后一个点的
-        // 时间戳。这样图表仍会「滚动」（x 轴推进），但 SwiftUI 不需要为
-        // 新数据点重新布局 ForEach + monotone 插值 —— 这是活跃转发时
-        // GUI CPU 的主要贡献者之一（60 点 × 3 Mark × 每秒 1 次全量重绘）。
-        //
-        // 变化 ≥ 1% 或方向反转（比如从有流量到零）时照常追加，确保曲线形状准确。
-        if let last = throughputHistory.last {
-            let rxChanged = abs(sample.receiveBitsPerSecond - last.receiveBitsPerSecond)
-                             / max(last.receiveBitsPerSecond, 1.0)
-            let txChanged = abs(sample.transmitBitsPerSecond - last.transmitBitsPerSecond)
-                             / max(last.transmitBitsPerSecond, 1.0)
-            let isNearZero = sample.receiveBitsPerSecond < 1000 && sample.transmitBitsPerSecond < 1000
-                              && last.receiveBitsPerSecond < 1000 && last.transmitBitsPerSecond < 1000
-
-            if rxChanged < 0.01 && txChanged < 0.01 && !isNearZero {
-                // 稳态：复用最后一个点，只更新时间戳让曲线滚动。
-                throughputHistory[throughputHistory.count - 1] = sample
-                return
-            }
-        }
-
-        throughputHistory.append(sample)
-        if throughputHistory.count > Self.historyCapacity {
-            throughputHistory.removeFirst(throughputHistory.count - Self.historyCapacity)
-        }
+        // 图表数据（throughputHistory）的追加已移至 refresh() 中基于时间节流，
+        // 不再在此处基于值变化判定 —— 活跃转发时速率自然波动 >1%，
+        // 值基节流几乎不触发；时间基节流（每 3 秒追加一点）更可靠。
     }
 
     private func apply(feed: HelperFeed) {

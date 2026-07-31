@@ -64,13 +64,6 @@ struct ThroughputCard: View {
         if hasData {
             Chart {
                 ForEach(model.throughputHistory) { sample in
-                    AreaMark(x: .value(L(.chartTime), sample.timestamp),
-                             y: .value(L(.chartRate), sample.receiveBitsPerSecond))
-                        .foregroundStyle(
-                            .linearGradient(colors: [.blue.opacity(0.35), .blue.opacity(0.02)],
-                                            startPoint: .top, endPoint: .bottom))
-                        .interpolationMethod(.monotone)
-
                     LineMark(x: .value(L(.chartTime), sample.timestamp),
                              y: .value(L(.chartRate), sample.receiveBitsPerSecond),
                              series: .value(L(.chartDirection), L(.downstreamShort)))
