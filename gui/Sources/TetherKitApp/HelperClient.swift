@@ -171,6 +171,14 @@ final class HelperClient {
         }
     }
 
+    func queryNetworkV6(interface: String) async throws -> NetworkStateV6 {
+        try await invoke { proxy, guarded in
+            proxy.queryNetworkV6(interface: interface) { data, message in
+                self.decode(NetworkStateV6.self, data: data, message: message, into: guarded)
+            }
+        }
+    }
+
     func drainFeed() async throws -> HelperFeed {
         try await invoke { proxy, guarded in
             proxy.drainFeed { data in
@@ -219,6 +227,17 @@ final class HelperClient {
         try await invokeVoid { proxy, guarded in
             proxy.applyNetwork(authorization: authorization, interface: interface,
                                configuration: payload) { message, authorizationFailed in
+                Self.finish(message, authorizationFailed, guarded)
+            }
+        }
+    }
+
+    func applyNetworkV6(authorization: Data, interface: String,
+                        configuration: NetworkConfigurationV6) async throws {
+        let payload = try JSONEncoder().encode(configuration)
+        try await invokeVoid { proxy, guarded in
+            proxy.applyNetworkV6(authorization: authorization, interface: interface,
+                                 configuration: payload) { message, authorizationFailed in
                 Self.finish(message, authorizationFailed, guarded)
             }
         }

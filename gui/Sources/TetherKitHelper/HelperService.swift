@@ -79,6 +79,36 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         }
     }
 
+    func applyNetworkV6(authorization: Data, interface: String, configuration: Data,
+                       reply: @escaping (String?, Bool) -> Void) {
+        guard let configuration = decode(NetworkConfigurationV6.self, from: configuration, reply: reply),
+              authorize(authorization, reply: reply) else {
+            return
+        }
+        if let message = NetworkValidator.validationMessageV6(for: configuration) {
+            reply(message, false)
+            return
+        }
+
+        networkQueue.async { [weak self] in
+            do {
+                try NetworkConfigurator.applyV6(configuration, to: interface)
+                self?.appendNotices([L(.helperNetworkApplied, configuration.mode.displayName)])
+                reply(nil, false)
+            } catch {
+                reply(error.localizedDescription, false)
+            }
+        }
+    }
+
+    func queryNetworkV6(interface: String, reply: @escaping (Data?, String?) -> Void) {
+        do {
+            respond(with: try NetworkConfigurator.queryV6(interface: interface), reply: reply)
+        } catch {
+            reply(nil, error.localizedDescription)
+        }
+    }
+
     func drainFeed(reply: @escaping (Data?) -> Void) {
         let drained = TetherKitLibrary.drainLogs()
         let notices = takeNotices()

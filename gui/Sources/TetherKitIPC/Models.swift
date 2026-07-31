@@ -203,6 +203,24 @@ public enum IPMode: Int32, Codable, CaseIterable, Sendable {
     }
 }
 
+/// IPv6 上网方式。原始值与 C 的 tk_ip_mode_v6_t 对齐。
+public enum IPV6Mode: Int32, Codable, CaseIterable, Sendable {
+    /// 自动：交给系统的 IPConfiguration，按对端 RA 走 SLAAC 或 DHCPv6。
+    case automatic = 0
+    /// 静态 IPv6 地址。
+    case manual = 1
+    /// 撤销 IPv6 配置。
+    case none = 2
+
+    public var displayName: String {
+        switch self {
+        case .automatic: return L(.ipModeV6Automatic)
+        case .manual: return L(.ipModeManual)
+        case .none: return L(.ipModeNone)
+        }
+    }
+}
+
 /// 网卡的上网方式配置。
 public struct NetworkConfiguration: Codable, Hashable, Sendable {
     public var mode: IPMode
@@ -229,6 +247,34 @@ public struct NetworkConfiguration: Codable, Hashable, Sendable {
         self.mode = mode
         self.address = address
         self.netmask = netmask
+        self.router = router
+        self.dnsServers = dnsServers
+        self.setDefaultRoute = setDefaultRoute
+    }
+}
+
+/// 网卡的 IPv6 上网方式配置。
+public struct NetworkConfigurationV6: Codable, Hashable, Sendable {
+    public var mode: IPV6Mode
+    /// 以下字段仅在 mode == .manual 时使用。
+    public var address: String          ///< 如 "2001:db8::1"
+    public var prefixLength: Int32      ///< 前缀长度，通常 64
+    public var router: String           ///< 网关地址
+    public var dnsServers: [String]     ///< DNS 服务器（支持混用 IPv4/IPv6）
+    /// 是否把全局 IPv6 默认路由指向本网卡。
+    public var setDefaultRoute: Bool
+
+    public static let automatic = NetworkConfigurationV6(mode: .automatic)
+
+    public init(mode: IPV6Mode = .automatic,
+                address: String = "",
+                prefixLength: Int32 = 64,
+                router: String = "",
+                dnsServers: [String] = [],
+                setDefaultRoute: Bool = false) {
+        self.mode = mode
+        self.address = address
+        self.prefixLength = prefixLength
         self.router = router
         self.dnsServers = dnsServers
         self.setDefaultRoute = setDefaultRoute
@@ -263,6 +309,37 @@ public struct NetworkState: Codable, Hashable, Sendable {
         self.hasAddress = hasAddress
         self.address = address
         self.netmask = netmask
+        self.router = router
+        self.dnsServers = dnsServers
+        self.method = method
+        self.serviceState = serviceState
+        self.hasDefaultRoute = hasDefaultRoute
+        self.isPrimaryDefaultRoute = isPrimaryDefaultRoute
+    }
+}
+
+/// 网卡当前**真实生效**的 IPv6 状态。
+public struct NetworkStateV6: Codable, Hashable, Sendable {
+    public var hasAddress: Bool
+    public var address: String
+    public var prefixLength: Int32
+    public var router: String
+    public var dnsServers: [String]
+    public var method: String           ///< "AUTOMATIC-V6" / "MANUAL-V6" / ""
+    public var serviceState: String
+    public var hasDefaultRoute: Bool
+    public var isPrimaryDefaultRoute: Bool
+
+    public static let empty = NetworkStateV6(
+        hasAddress: false, address: "", prefixLength: 0, router: "", dnsServers: [],
+        method: "", serviceState: "", hasDefaultRoute: false, isPrimaryDefaultRoute: false)
+
+    public init(hasAddress: Bool, address: String, prefixLength: Int32, router: String,
+                dnsServers: [String], method: String, serviceState: String,
+                hasDefaultRoute: Bool, isPrimaryDefaultRoute: Bool) {
+        self.hasAddress = hasAddress
+        self.address = address
+        self.prefixLength = prefixLength
         self.router = router
         self.dnsServers = dnsServers
         self.method = method

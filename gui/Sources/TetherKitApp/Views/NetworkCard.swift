@@ -2,7 +2,7 @@ import SwiftUI
 import TetherKitCore
 import TetherKitIPC
 
-/// 上网方式配置：DHCP 或静态 IP。
+/// 上网方式配置：DHCP / 静态 IP / IPv6。
 ///
 /// ★ 「当前生效」一栏为什么单独存在 ★
 ///   它显示的是**从系统回读**的状态，不是我们下发的值。两者可能不同 ——
@@ -23,6 +23,10 @@ struct NetworkCard: View {
         model.networkConfiguration.dnsServers.count < 4
     }
 
+    private var canAddDNSV6: Bool {
+        model.networkConfigurationV6.dnsServers.count < 4
+    }
+
     /// 静态 DNS 的悬停说明。它属于「什么时候需要在意」级别的信息，
     /// 不值得常驻一行。
     /// 计算属性而非 `static let`：后者只求值一次，切换语言后就不再更新了。
@@ -31,6 +35,11 @@ struct NetworkCard: View {
     var body: some View {
         Card(title: L(.ipModeLabel), systemImage: "network", accessory: AnyView(interfaceBadge)) {
             VStack(alignment: .leading, spacing: Design.Spacing.small) {
+                // MARK: - IPv4 配置
+                Text("IPv4")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
                 modePicker
 
                 switch model.networkConfiguration.mode {
@@ -43,11 +52,32 @@ struct NetworkCard: View {
                 }
 
                 defaultRouteToggle
+
+                // MARK: - IPv6 配置
+                Divider()
+                    .padding(.vertical, Design.Spacing.tight)
+
+                ipv6ModePicker
+
+                switch model.networkConfigurationV6.mode {
+                case .automatic:
+                    automaticV6Explanation
+                case .manual:
+                    manualFormV6
+                case .none:
+                    EmptyView()
+                }
+
+                defaultRouteToggleV6
+
+                // MARK: - 操作按钮
                 actionRow
 
+                // MARK: - 当前生效状态
                 if interfaceReady {
                     Divider()
                     EffectiveStateView(state: model.networkState,
+                                       stateV6: model.networkStateV6,
                                        interface: model.status.systemInterface)
                 }
             }
@@ -219,6 +249,129 @@ struct NetworkCard: View {
             Spacer()
         }
     }
+
+    // MARK: - IPv6 组件
+
+    private var ipv6ModePicker: some View {
+        Picker(L(.ipv6ModeLabel), selection: $model.networkConfigurationV6.mode) {
+            Text(IPV6Mode.automatic.displayName).tag(IPV6Mode.automatic)
+            Text(IPV6Mode.manual.displayName).tag(IPV6Mode.manual)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    private var automaticV6Explanation: some View {
+        VStack(alignment: .leading, spacing: Design.Spacing.tight) {
+            Label(L(.automaticV6Help), systemImage: "antenna.radiowaves.left.and.right")
+                .font(.callout)
+            Text(L(.automaticV6Tooltip))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// IPv6 静态表单。
+    private var manualFormV6: some View {
+        Grid(alignment: .leading,
+             horizontalSpacing: Design.Spacing.medium,
+             verticalSpacing: Design.Spacing.small) {
+            GridRow {
+                AddressField(label: L(.ipv6Address),
+                             placeholder: "2001:db8::100",
+                             text: $model.networkConfigurationV6.address,
+                             isValid: NetworkValidator.isValidIPv6(model.networkConfigurationV6.address))
+                AddressField(label: L(.prefixLength),
+                             placeholder: "64",
+                             text: Binding(
+                                 get: { String(model.networkConfigurationV6.prefixLength) },
+                                 set: { model.networkConfigurationV6.prefixLength = Int32($0) ?? 64 }
+                             ),
+                             isValid: NetworkValidator.isValidPrefixLength(model.networkConfigurationV6.prefixLength))
+            }
+            GridRow {
+                AddressField(label: L(.router),
+                             placeholder: L(.routerOptional),
+                             text: $model.networkConfigurationV6.router,
+                             isValid: model.networkConfigurationV6.router.isEmpty
+                                 || NetworkValidator.isValidIPv6(model.networkConfigurationV6.router))
+                if model.networkConfigurationV6.dnsServers.isEmpty {
+                    emptyDNSCellV6
+                } else {
+                    dnsFieldV6(at: 0)
+                }
+            }
+            ForEach(Array(model.networkConfigurationV6.dnsServers.indices.dropFirst()),
+                    id: \.self) { index in
+                GridRow {
+                    Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    dnsFieldV6(at: index)
+                }
+            }
+        }
+    }
+
+    /// 一条 IPv6 DNS：输入格 + 删除，最后一条再带一个「添加」。
+    private func dnsFieldV6(at index: Int) -> some View {
+        HStack(spacing: Design.Spacing.tight) {
+            AddressField(label: index == 0 ? "DNS" : "",
+                         placeholder: "2001:4860:4860::8888",
+                         text: $model.networkConfigurationV6.dnsServers[index],
+                         isValid: model.networkConfigurationV6.dnsServers[index].isEmpty
+                             || NetworkValidator.isValidIP(model.networkConfigurationV6.dnsServers[index]))
+
+            Button {
+                model.networkConfigurationV6.dnsServers.remove(at: index)
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help(L(.deleteThisEntry))
+
+            if index == model.networkConfigurationV6.dnsServers.count - 1, canAddDNSV6 {
+                Button {
+                    model.networkConfigurationV6.dnsServers.append("")
+                } label: {
+                    Image(systemName: "plus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help(L(.addDNSServer))
+            }
+        }
+        .help(Self.dnsHint)
+    }
+
+    /// 一条 DNS 都没有时占住格子的「添加」（IPv6）。
+    private var emptyDNSCellV6: some View {
+        HStack(spacing: Design.Spacing.tight) {
+            Text("DNS")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(width: AddressField.labelWidth, alignment: .leading)
+            Button {
+                model.networkConfigurationV6.dnsServers.append("")
+            } label: {
+                Label(L(.add), systemImage: "plus.circle")
+            }
+            .buttonStyle(.borderless)
+            .font(.callout)
+            Spacer(minLength: 0)
+        }
+        .help(Self.dnsHint)
+    }
+
+    private var defaultRouteToggleV6: some View {
+        Toggle(isOn: $model.networkConfigurationV6.setDefaultRoute) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(L(.setDefaultRoute))
+                Text(L(.setDefaultRouteHelp))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .help(L(.setDefaultRouteTooltip))
+    }
 }
 
 /// 一个带即时校验反馈的紧凑地址输入框：标签在左，校验图标叠在输入框内侧
@@ -260,13 +413,15 @@ private struct AddressField: View {
     }
 }
 
-/// 从系统回读的真实生效状态。
+/// 从系统回读的真实生效状态（IPv4 + IPv6）。
 private struct EffectiveStateView: View {
     let state: NetworkState
+    let stateV6: NetworkStateV6
     let interface: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: Design.Spacing.tight) {
+            // MARK: - IPv4 状态
             HStack(spacing: Design.Spacing.small) {
                 Text(L(.currentlyEffective))
                     .font(.subheadline.weight(.medium))
@@ -301,6 +456,41 @@ private struct EffectiveStateView: View {
                 }
             } else {
                 Text(L(.noAddressYet, interface))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            // MARK: - IPv6 状态
+            Divider()
+            HStack(spacing: Design.Spacing.small) {
+                Text(L(.ipv6CurrentlyEffective))
+                    .font(.subheadline.weight(.medium))
+                if !stateV6.method.isEmpty {
+                    StatusBadge(text: stateV6.method, color: .blue)
+                }
+                if stateV6.isPrimaryDefaultRoute {
+                    StatusBadge(text: L(.primaryDefaultRoute), color: .green)
+                }
+            }
+
+            if stateV6.hasAddress {
+                Grid(alignment: .leading,
+                     horizontalSpacing: Design.Spacing.medium,
+                     verticalSpacing: Design.Spacing.tight) {
+                    GridRow {
+                        readbackCell(L(.ipv6Address),
+                                   "\(stateV6.address)/\(stateV6.prefixLength)")
+                        readbackCell(L(.router), stateV6.router.isEmpty ? "—" : stateV6.router)
+                    }
+                    GridRow {
+                        readbackCell("DNS", stateV6.dnsServers.isEmpty
+                                     ? L(.notEffective)
+                                     : stateV6.dnsServers.joined(separator: L(.listSeparator)))
+                        readbackCell("", "")
+                    }
+                }
+            } else {
+                Text(L(.ipv6NoAddressYet, interface))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

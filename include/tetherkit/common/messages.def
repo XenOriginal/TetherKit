@@ -711,6 +711,38 @@ TETHERKIT_MESSAGE(kCapiUnknownIpMode, "未知的上网方式 {}", "unknown IP mo
 TETHERKIT_MESSAGE(kCapiClearNeedsRoot, "撤销网卡配置需要 root 权限",
                   "clearing an interface configuration requires root")
 
+// --- 网卡 IPv6 配置 ---
+TETHERKIT_MESSAGE(kCapiInvalidAddress6, "IPv6 地址 \"{}\" 不是合法的 IPv6 地址",
+                  "\"{}\" is not a valid IPv6 address")
+TETHERKIT_MESSAGE(kCapiInvalidPrefixLength, "前缀长度 {} 不合法（必须是 0-128）",
+                  "prefix length {} is invalid (must be 0-128)")
+TETHERKIT_MESSAGE(kCapiInvalidRouter6, "IPv6 网关 \"{}\" 不是合法的 IPv6 地址",
+                  "IPv6 router \"{}\" is not a valid IPv6 address")
+TETHERKIT_MESSAGE(kCapiInvalidDns6, "DNS 服务器 \"{}\" 不是合法的 IP 地址（IPv4 或 IPv6）",
+                  "DNS server \"{}\" is not a valid IP address (IPv4 or IPv6)")
+TETHERKIT_MESSAGE(kCapiWhatStartAutomaticV6, "启动 IPv6 自动配置", "starting IPv6 autoconfiguration")
+TETHERKIT_MESSAGE(kCapiAutomaticV6Timeout,
+                  "IPv6 自动配置在 {} 秒内没有拿到全局地址。\n"
+                  "  常见原因：对端不发送路由器通告（RA），或 IPv6 未在对端启用。\n"
+                  "  部分设备的 USB 网络共享需要单独开启 IPv6 支持。",
+                  "IPv6 autoconfiguration did not obtain a global address within {} seconds.\n"
+                  "  Common causes: the peer does not send Router Advertisements (RA), or "
+                  "IPv6 is not enabled on the device.\n"
+                  "  Some devices require IPv6 to be enabled separately for USB tethering.")
+TETHERKIT_MESSAGE(kCapiWhatApplyManual6, "配置静态 IPv6 地址", "applying a static IPv6 address")
+TETHERKIT_MESSAGE(kCapiWhatClearConfig6, "撤销 IPv6 配置", "clearing the IPv6 configuration")
+TETHERKIT_MESSAGE(kCapiUnknownIpModeV6, "未知的 IPv6 上网方式 {}", "unknown IPv6 mode {}")
+TETHERKIT_MESSAGE(kCapiNoServiceForDns6, "找不到 {} 对应的 IPv6 网络服务，DNS 无法下发",
+                  "no IPv6 network service found for {}; DNS cannot be published")
+TETHERKIT_MESSAGE(kCapiWhatAddScopedRoute6, "添加 scoped IPv6 默认路由",
+                  "adding a scoped IPv6 default route")
+TETHERKIT_MESSAGE(kCapiWhatUpdateScopedRoute6, "更新 scoped IPv6 默认路由",
+                  "updating the scoped IPv6 default route")
+TETHERKIT_MESSAGE(kCapiWhatSwitchGlobalRoute6, "切换全局 IPv6 默认路由",
+                  "switching the global IPv6 default route")
+TETHERKIT_MESSAGE(kCapiWhatAddGlobalRoute6, "添加全局 IPv6 默认路由",
+                  "adding a global IPv6 default route")
+
 // =============================================================================
 // cli —— 命令行 tetherkit-cli
 // =============================================================================

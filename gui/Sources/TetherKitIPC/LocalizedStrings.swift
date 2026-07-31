@@ -51,6 +51,7 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case ipModeDhcp
     case ipModeManual
     case ipModeNone
+    case ipModeV6Automatic
 
     // MARK: - 授权（Authorization.swift）
 
@@ -245,6 +246,18 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case notEffective
     case noAddressYet
 
+    // MARK: - IPv6 网络配置
+
+    case ipv6ModeLabel
+    case ipv6Address
+    case prefixLength
+    case automaticV6Help
+    case automaticV6Tooltip
+    case invalidPrefixLength
+    case enableIPv6
+    case ipv6CurrentlyEffective
+    case ipv6NoAddressYet
+
     // MARK: - 状态卡（StatusHeroCard.swift）
 
     case linkUp
@@ -317,6 +330,7 @@ extension L10nKey {
         case .ipModeDhcp: return ("自动（DHCP）", "Automatic (DHCP)")
         case .ipModeManual: return ("静态 IP", "Static IP")
         case .ipModeNone: return ("不配置", "None")
+        case .ipModeV6Automatic: return ("自动（SLAAC / DHCPv6）", "Automatic (SLAAC / DHCPv6)")
 
         // MARK: 授权
 
@@ -683,6 +697,28 @@ extension L10nKey {
         case .noAddressYet:
             return ("%@ 目前没有 IP 地址。选择上网方式后点「应用」。",
                     "%@ has no IP address yet. Pick a configuration and press Apply.")
+
+        // MARK: IPv6 网络配置
+
+        case .ipv6ModeLabel: return ("配置 IPv6", "Configure IPv6")
+        case .ipv6Address: return ("IPv6 地址", "IPv6 address")
+        case .prefixLength: return ("前缀长度", "Prefix length")
+        case .automaticV6Help:
+            return ("由系统自动获取 IPv6 地址、默认路由与 DNS",
+                    "The system automatically obtains an IPv6 address, default route and DNS")
+        case .automaticV6Tooltip:
+            return ("按对端路由器通告（RA）自动选择：只带前缀就用 SLAAC，"
+                    + "带 Managed 标志就转 DHCPv6 取址并获取 DNS。",
+                    "Follows the peer's Router Advertisement: SLAAC when it only carries a prefix, "
+                    + "or stateful DHCPv6 for the address and DNS when the Managed flag is set.")
+        case .invalidPrefixLength:
+            return ("前缀长度不正确（必须是 0-128）",
+                    "The prefix length is not valid (must be 0-128)")
+        case .enableIPv6: return ("启用 IPv6", "Enable IPv6")
+        case .ipv6CurrentlyEffective: return ("IPv6 当前生效", "IPv6 Currently effective")
+        case .ipv6NoAddressYet:
+            return ("%@ 目前没有 IPv6 地址。选择 IPv6 上网方式后点「应用」。",
+                    "%@ has no IPv6 address yet. Pick an IPv6 configuration and press Apply.")
 
         // MARK: 状态卡
 

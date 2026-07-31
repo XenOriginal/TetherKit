@@ -55,6 +55,13 @@ import Foundation
     /// 回读网卡真实生效的 IP 状态。
     func queryNetwork(interface: String, reply: @escaping (Data?, String?) -> Void)
 
+    /// 给网卡下发 IPv6 配置（自动 / 静态 / 撤销）。**需要授权。**
+    func applyNetworkV6(authorization: Data, interface: String, configuration: Data,
+                       reply: @escaping (String?, Bool) -> Void)
+
+    /// 回读网卡真实生效的 IPv6 状态。
+    func queryNetworkV6(interface: String, reply: @escaping (Data?, String?) -> Void)
+
     /// 取走 helper 侧积压的日志与提示。
     func drainFeed(reply: @escaping (Data?) -> Void)
 

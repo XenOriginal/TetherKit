@@ -425,6 +425,22 @@ typedef enum tk_ip_mode {
   TK_IP_MODE_NONE = 2,
 } tk_ip_mode_t;
 
+/// IPv6 上网方式。
+typedef enum tk_ip_mode_v6 {
+  /// 自动获取 IPv6 地址（`ipconfig set <if> AUTOMATIC-V6`）。
+  ///
+  /// 交给系统的 IPConfiguration，具体走哪条路由由对端的路由器通告（RA）决定：
+  ///   * RA 只带前缀信息        → SLAAC 无状态自动配置
+  ///   * RA 置 M（Managed）标志 → DHCPv6 有状态取址，DNS 也一并从 DHCPv6 拿
+  /// 这是 USB 网络共享场景下最常用的方式，也免去了自己实现 DHCPv6 客户端。
+  TK_IP_MODE_V6_AUTOMATIC = 0,
+  /// 静态 IPv6 地址（`ipconfig set <if> MANUAL-V6 <地址> <前缀长度>`）。
+  TK_IP_MODE_V6_MANUAL = 1,
+  /// 撤销 IPv6 配置（`ipconfig set <if> NONE-V6`）。
+  /// 链路本地地址由内核管理，不受影响。
+  TK_IP_MODE_V6_NONE = 2,
+} tk_ip_mode_v6_t;
+
 typedef struct tk_ip_config {
   int32_t mode; ///< tk_ip_mode_t
 
@@ -444,6 +460,33 @@ typedef struct tk_ip_config {
   /// 那时本网卡自然就是主服务，这个开关不用动。
   bool set_default_route;
 } tk_ip_config_t;
+
+/// IPv6 网卡配置。
+///
+/// 设计原则：与 tk_ip_config_t 保持平行的结构，但适配 IPv6 语义差异：
+/// - 用 prefix_length（前缀长度，0-128）代替 netmask
+/// - DNS 服务器同时支持 IPv4 与 IPv6 地址（某些环境混用）
+/// - 自动模式下只有 set_default_route 有意义（地址由系统自动取得）
+typedef struct tk_ip_config_v6 {
+  int32_t mode; ///< tk_ip_mode_v6_t
+
+  /// 以下字段仅在 mode == TK_IP_MODE_V6_MANUAL 时使用。
+  char address[TK_ADDRESS_CAPACITY];   ///< 如 "2001:db8::1"
+  int32_t prefix_length;               ///< 前缀长度，通常 64
+  char router[TK_ADDRESS_CAPACITY];    ///< 网关地址，留空表示不配默认路由
+  char dns[TK_DNS_MAX][TK_ADDRESS_CAPACITY];
+  int32_t dns_count;
+
+  /// 是否把**全局**默认路由也指向本网卡（IPv6）。
+  ///
+  /// 自动模式下 IPConfiguration 通常已装好一条 scoped 默认路由，
+  /// 这里控制的是要不要进一步抢占**全局**默认路由。
+  /// 开启此项会将其提升为全局默认路由，影响所有未绑定的 IPv6 流量。
+  bool set_default_route;
+} tk_ip_config_v6_t;
+
+/// 用默认值（自动）填充 IPv6 配置。
+TK_API void tk_ip_config_v6_init(tk_ip_config_v6_t* out_config);
 
 /// 用默认值（DHCP）填充配置。
 TK_API void tk_ip_config_init(tk_ip_config_t* out_config);
@@ -469,6 +512,28 @@ typedef struct tk_net_state {
   bool is_primary_default_route;
 } tk_net_state_t;
 
+/// 网卡当前**真实生效**的 IPv6 状态。
+///
+/// 与 tk_net_state_t 一样，刻意回读系统状态而非复述下发值。
+/// IPv6 的特殊性：一个接口可能有多个地址（link-local + global），
+/// 这里只汇报第一个找到的全局单播地址。
+typedef struct tk_net_state_v6 {
+  bool has_address;
+  char address[TK_ADDRESS_CAPACITY];     ///< 第一个全局单播地址
+  int32_t prefix_length;                 ///< 前缀长度
+  char router[TK_ADDRESS_CAPACITY];      ///< 默认路由的下一跳
+  char dns[TK_DNS_MAX][TK_ADDRESS_CAPACITY];
+  int32_t dns_count;
+  /// 配置方式（"AUTOMATIC-V6" / "MANUAL-V6" / "NONE-V6" / ""）。
+  char method[16];
+  /// 服务状态（自动模式下通常为 "BOUND" 或空）。
+  char service_state[24];
+  /// 本接口上是否存在一条 IPv6 默认路由。
+  bool has_default_route;
+  /// IPv6 全局默认路由当前是否指向本接口。
+  bool is_primary_default_route;
+} tk_net_state_v6_t;
+
 /// 按配置给网卡配 IP。需要 root。
 TK_API tk_result_t tk_net_apply(const char* interface_name, const tk_ip_config_t* config,
                                 tk_error_t* out_error);
@@ -479,6 +544,24 @@ TK_API tk_result_t tk_net_clear(const char* interface_name, tk_error_t* out_erro
 /// 回读网卡真实生效的 IP 状态。**不需要 root**。
 TK_API tk_result_t tk_net_query(const char* interface_name, tk_net_state_t* out_state,
                                 tk_error_t* out_error);
+
+// =============================================================================
+// 网卡 IPv6 配置（需要 root）
+// =============================================================================
+
+/// 按配置给网卡配 IPv6 地址。需要 root。
+///
+/// 自动模式：调用 IPConfiguration 的 AUTOMATIC-V6，等待取得全局地址。
+/// 静态模式：通过 ifconfig inet6 下发地址。
+TK_API tk_result_t tk_net_apply_v6(const char* interface_name, const tk_ip_config_v6_t* config,
+                                   tk_error_t* out_error);
+
+/// 撤销网卡上的 IPv6 配置（移除所有 inet6 地址）。需要 root。
+TK_API tk_result_t tk_net_clear_v6(const char* interface_name, tk_error_t* out_error);
+
+/// 回读网卡真实生效的 IPv6 状态。**不需要 root**。
+TK_API tk_result_t tk_net_query_v6(const char* interface_name, tk_net_state_v6_t* out_state,
+                                   tk_error_t* out_error);
 
 // =============================================================================
 // 孤儿网卡清理（需要 root）

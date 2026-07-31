@@ -37,7 +37,8 @@ public enum HelperConstants {
     ///   1 —— 初版
     ///   2 —— 特权方法的应答从 (String?) 改成 (String?, Bool)，区分授权失败
     ///   3 —— 新增 setLanguage，让 helper 的提示与库日志跟随界面语言
-    public static let protocolRevision = 3
+    ///   4 —— 新增 applyNetworkV6 / queryNetworkV6，支持 IPv6 取址与 DNS
+    public static let protocolRevision = 4
 
     /// 把修订号编进版本串。
     ///

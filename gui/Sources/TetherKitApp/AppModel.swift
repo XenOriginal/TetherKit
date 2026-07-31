@@ -110,6 +110,7 @@ final class AppModel {
     private(set) var devices: [DeviceDescriptor] = []
     private(set) var status: SessionStatus = .idle
     private(set) var networkState: NetworkState = .empty
+    private(set) var networkStateV6: NetworkStateV6 = .empty
     private(set) var throughput: ThroughputSample = .zero
     private(set) var throughputHistory: [ThroughputSample] = []
     private(set) var logs: [LogEntry] = []
@@ -120,8 +121,10 @@ final class AppModel {
     /// 会话配置里用户可调的部分。
     var requestedMTU: UInt32 = 1500
     var adoptDeviceMAC: Bool = true
-    /// 网络配置表单。
+    /// 网络配置表单（IPv4）。
     var networkConfiguration: NetworkConfiguration = .dhcp
+    /// 网络配置表单（IPv6）。
+    var networkConfigurationV6: NetworkConfigurationV6 = .automatic
 
     /// 界面语言偏好。改它会**同时**做三件事：切 Swift 侧的文案表、把语言推给
     /// libtetherkit（否则日志卡里会混进另一种语言）、再推给 helper（它以 root
@@ -357,8 +360,11 @@ final class AppModel {
         if !status.systemInterface.isEmpty {
             networkState = (try? await client.queryNetwork(interface: status.systemInterface))
                 ?? .empty
+            networkStateV6 = (try? await client.queryNetworkV6(interface: status.systemInterface))
+                ?? .empty
         } else {
             networkState = .empty
+            networkStateV6 = .empty
         }
     }
 
@@ -478,7 +484,7 @@ final class AppModel {
         }
     }
 
-    /// 下发网络配置。
+    /// 下发网络配置（IPv4 + IPv6 一并下发）。
     func applyNetworkConfiguration() async {
         guard !isBusy else { return }
         let interface = status.systemInterface
@@ -490,19 +496,43 @@ final class AppModel {
             alertMessage = message
             return
         }
+        if let message = NetworkValidator.validationMessageV6(for: networkConfigurationV6) {
+            alertMessage = message
+            return
+        }
 
         isBusy = true
         defer { isBusy = false }
 
         await authorized { [self] authorization in
+            // IPv4 先走既有路径（DHCP 会阻塞到拿租约，库内上限 10 秒）。
             try await client.applyNetwork(authorization: authorization, interface: interface,
                                           configuration: networkConfiguration)
+
+            // IPv6 随后。两者在 helper 侧共用同一条串行队列，顺序等待即可。
+            //
+            // 关键：自动配置是「尽力而为」的 —— 对端手机很可能压根不发 RA
+            // （运营商没下发 IPv6、或 USB 网络共享只做了 IPv4）。这种情况下等超时是
+            // 正常结果，不能让它把已经成功的 IPv4 一起判成失败、弹一个错误框出来。
+            // 所以自动配置失败只是「这次没拿到 IPv6 地址」，由回读区如实呈现。
+            //
+            // 手动配置则相反：用户明确指定了地址，配不上就是真出错，必须报出来。
+            do {
+                try await client.applyNetworkV6(authorization: authorization, interface: interface,
+                                                configuration: networkConfigurationV6)
+            } catch {
+                if networkConfigurationV6.mode != .automatic {
+                    throw error
+                }
+            }
+
             // 立刻回读一次，让界面马上反映真实生效的地址，而不用等下一个轮询周期。
             networkState = (try? await client.queryNetwork(interface: interface)) ?? .empty
+            networkStateV6 = (try? await client.queryNetworkV6(interface: interface)) ?? .empty
         }
     }
 
-    /// 撤销网卡上的 IP 配置。
+    /// 撤销网卡上的 IP 配置（IPv4 + IPv6 一并撤销）。
     ///
     /// 单独一个动作而不是「上网方式选『不配置』再点应用」：撤销是一次性操作，
     /// 混进模式选择器里会让人以为选中它就已经生效了。
@@ -517,7 +547,10 @@ final class AppModel {
         await authorized { [self] authorization in
             try await client.applyNetwork(authorization: authorization, interface: interface,
                                           configuration: NetworkConfiguration(mode: .none))
+            try await client.applyNetworkV6(authorization: authorization, interface: interface,
+                                            configuration: NetworkConfigurationV6(mode: .none))
             networkState = (try? await client.queryNetwork(interface: interface)) ?? .empty
+            networkStateV6 = (try? await client.queryNetworkV6(interface: interface)) ?? .empty
         }
     }
 

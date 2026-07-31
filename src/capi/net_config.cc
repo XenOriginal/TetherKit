@@ -20,9 +20,12 @@
 //   系统里真实生效的解析器，GUI 显示的是回读结果而不是我们下发的值。
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <net/if.h>
+#include <net/if_dl.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -73,6 +76,11 @@ constexpr std::string_view kRoutePath = "/sbin/route";
 constexpr std::chrono::seconds kDhcpLeaseTimeout{10};
 constexpr std::chrono::milliseconds kDhcpPollInterval{250};
 
+/// IPv6 自动配置（SLAAC/DHCPv6）取址等待上限。RA 通常在接口 up 后 1-2 秒内到达，
+/// 但某些设备可能延迟更久。取与 DHCP 相同的超时比较合理。
+constexpr std::chrono::seconds kAutomaticV6Timeout{10};
+constexpr std::chrono::milliseconds kAutomaticV6PollInterval{500};
+
 // ---------------------------------------------------------------------------
 // 参数校验
 // ---------------------------------------------------------------------------
@@ -84,6 +92,20 @@ constexpr std::chrono::milliseconds kDhcpPollInterval{250};
   const std::string owned{text};
   ::in_addr parsed{};
   return ::inet_pton(AF_INET, owned.c_str(), &parsed) == 1;
+}
+
+[[nodiscard]] bool IsValidIpv6(std::string_view text) noexcept {
+  if (text.empty() || text.size() >= TK_ADDRESS_CAPACITY) {
+    return false;
+  }
+  const std::string owned{text};
+  ::in6_addr parsed{};
+  return ::inet_pton(AF_INET6, owned.c_str(), &parsed) == 1;
+}
+
+/// 校验 IPv6 前缀长度（0-128）。
+[[nodiscard]] bool IsValidPrefixLength(int32_t length) noexcept {
+  return length >= 0 && length <= 128;
 }
 
 /// 校验接口名并翻译成人话错误。
@@ -148,6 +170,60 @@ constexpr std::chrono::milliseconds kDhcpPollInterval{250};
     }
   }
   ::close(fd);
+  return result;
+}
+
+/// 读接口当前的第一个全局单播 IPv6 地址；没有时返回 std::nullopt。
+///
+/// 用 getifaddrs 而不是 ioctl：一个接口可能有多个 IPv6 地址
+/// （link-local + global），且 macOS 的 SIOCGIFALIASADDR 已被废弃。
+/// 返回值 pair = {地址, 前缀长度}。
+[[nodiscard]] std::optional<std::pair<std::string, int>> QueryAddressV6(
+    std::string_view interface_name) noexcept {
+  ::ifaddrs* ifa_list = nullptr;
+  if (::getifaddrs(&ifa_list) != 0 || ifa_list == nullptr) {
+    return std::nullopt;
+  }
+
+  std::optional<std::pair<std::string, int>> result;
+  const std::string target{interface_name};
+
+  for (const ::ifaddrs* ifa = ifa_list; ifa != nullptr; ifa = ifa->ifa_next) {
+    // 跳过非目标接口、非 IPv6、未激活的地址
+    if (ifa->ifa_addr == nullptr ||
+        ifa->ifa_addr->sa_family != AF_INET6 ||
+        target != ifa->ifa_name ||
+        (ifa->ifa_flags & IFF_UP) == 0) {
+      continue;
+    }
+
+    const auto* sin6 = reinterpret_cast<const ::sockaddr_in6*>(ifa->ifa_addr);
+    // 跳过 link-local 地址（fe80::/10）
+    const auto& bytes = sin6->sin6_addr.s6_addr;
+    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) {
+      continue;
+    }
+
+    std::array<char, INET6_ADDRSTRLEN> text{};
+    if (::inet_ntop(AF_INET6, &sin6->sin6_addr, text.data(), text.size()) != nullptr) {
+      // 从 netmask 推算前缀长度
+      int prefix_len = 128;
+      if (ifa->ifa_netmask != nullptr && ifa->ifa_netmask->sa_family == AF_INET6) {
+        const auto* nm6 = reinterpret_cast<const ::sockaddr_in6*>(ifa->ifa_netmask);
+        prefix_len = 0;
+        for (int i = 0; i < 16; ++i) {
+          uint8_t byte = nm6->sin6_addr.s6_addr[i];
+          while (byte != 0) {
+            prefix_len += (byte & 1);
+            byte >>= 1;
+          }
+        }
+      }
+      result = std::make_pair(std::string{text.data()}, prefix_len);
+      break;  // 取第一个全局地址即可
+    }
+  }
+  ::freeifaddrs(ifa_list);
   return result;
 }
 
@@ -238,9 +314,54 @@ constexpr std::chrono::milliseconds kDhcpPollInterval{250};
   return values;
 }
 
-/// 全局默认路由当前指向哪个接口。
+/// 全局默认路由当前指向哪个接口（IPv4）。
 [[nodiscard]] std::string PrimaryInterface(SCDynamicStoreRef store) {
   const ScopedCFRef<CFStringRef> key = MakeCFString("State:/Network/Global/IPv4");
+  const ScopedCFRef<CFDictionaryRef> global{
+      static_cast<CFDictionaryRef>(::SCDynamicStoreCopyValue(store, key.Get()))};
+  return StringField(global.Get(), CFSTR("PrimaryInterface"));
+}
+
+/// 找到 IPConfiguration 为该接口建立的 IPv6 服务 ID。
+///
+/// 与 FindServiceId 逻辑相同，但匹配 /IPv6 叶子。
+[[nodiscard]] std::optional<std::string> FindServiceIdV6(SCDynamicStoreRef store,
+                                                         std::string_view interface_name) {
+  const ScopedCFRef<CFStringRef> pattern = MakeCFString("State:/Network/Service/[^/]+/IPv6");
+  const ScopedCFRef<CFArrayRef> keys{
+      ::SCDynamicStoreCopyKeyList(store, pattern.Get())};
+  if (!keys) {
+    return std::nullopt;
+  }
+
+  const CFIndex count = ::CFArrayGetCount(keys.Get());
+  for (CFIndex i = 0; i < count; ++i) {
+    const auto* const key = static_cast<CFStringRef>(::CFArrayGetValueAtIndex(keys.Get(), i));
+    const ScopedCFRef<CFDictionaryRef> entry{
+        static_cast<CFDictionaryRef>(::SCDynamicStoreCopyValue(store, key))};
+    if (!entry) {
+      continue;
+    }
+    const auto* const name = static_cast<CFStringRef>(
+        ::CFDictionaryGetValue(entry.Get(), CFSTR("InterfaceName")));
+    if (name == nullptr || CopyToStdString(name) != interface_name) {
+      continue;
+    }
+
+    const std::string full = CopyToStdString(key);
+    constexpr std::string_view kPrefix = "State:/Network/Service/";
+    constexpr std::string_view kSuffix = "/IPv6";
+    if (full.size() <= kPrefix.size() + kSuffix.size()) {
+      continue;
+    }
+    return full.substr(kPrefix.size(), full.size() - kPrefix.size() - kSuffix.size());
+  }
+  return std::nullopt;
+}
+
+/// 全局 IPv6 默认路由当前指向哪个接口。
+[[nodiscard]] std::string PrimaryInterfaceV6(SCDynamicStoreRef store) {
+  const ScopedCFRef<CFStringRef> key = MakeCFString("State:/Network/Global/IPv6");
   const ScopedCFRef<CFDictionaryRef> global{
       static_cast<CFDictionaryRef>(::SCDynamicStoreCopyValue(store, key.Get()))};
   return StringField(global.Get(), CFSTR("PrimaryInterface"));
@@ -337,6 +458,38 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
   return RunOrFail(kRoutePath, add_arguments, Text(Msg::kCapiWhatAddGlobalRoute));
 }
 
+// ---------------------------------------------------------------------------
+// IPv6 下发
+// ---------------------------------------------------------------------------
+
+/// 装一条绑定到本接口的 IPv6 默认路由（scoped）。
+[[nodiscard]] Status InstallScopedDefaultRouteV6(std::string_view interface_name,
+                                                 std::string_view router) {
+  const std::vector<std::string> add_arguments{
+      "-n", "add", "-inet6", "-ifscope", std::string{interface_name}, "default", std::string{router}};
+  if (const auto status =
+          RunOrFail(kRoutePath, add_arguments, Text(Msg::kCapiWhatAddScopedRoute6));
+      status) {
+    return tetherkit::Ok();
+  }
+  const std::vector<std::string> change_arguments{
+      "-n", "change", "-inet6", "-ifscope",
+      std::string{interface_name}, "default", std::string{router}};
+  return RunOrFail(kRoutePath, change_arguments, Text(Msg::kCapiWhatUpdateScopedRoute6));
+}
+
+/// 把全局 IPv6 默认路由改到指定网关。
+[[nodiscard]] Status PromoteToGlobalDefaultRouteV6(std::string_view router) {
+  const std::vector<std::string> arguments{"-n", "change", "-inet6", "default", std::string{router}};
+  if (const auto status = RunOrFail(kRoutePath, arguments, Text(Msg::kCapiWhatSwitchGlobalRoute6));
+      status) {
+    return tetherkit::Ok();
+  }
+  const std::vector<std::string> add_arguments{"-n", "add", "-inet6", "default",
+                                               std::string{router}};
+  return RunOrFail(kRoutePath, add_arguments, Text(Msg::kCapiWhatAddGlobalRoute6));
+}
+
 /// DHCP 模式下，从租约里取出网关地址。
 [[nodiscard]] std::optional<std::string> QueryDhcpRouter(std::string_view interface_name) {
   const auto result = RunTool(kIpconfigPath, {"getoption", interface_name, "router"});
@@ -348,6 +501,33 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
     router.pop_back();
   }
   return IsValidIpv4(router) ? std::optional{router} : std::nullopt;
+}
+
+/// 从内核路由表读出当前 IPv6 默认路由的网关。拿不到时返回 std::nullopt。
+///
+/// SLAAC 的网关由内核从 RA 自动装进路由表，并不经过 SCDynamicStore 服务，
+/// 所以只能读路由表、读不了动态存储。返回的字符串可能带链路本地作用域后缀
+/// （如 "fe80::1%feth0"）——那个后缀在 `route` 命令里反而是必需的，原样保留。
+[[nodiscard]] std::optional<std::string> QueryDefaultRouteGatewayV6() {
+  const auto result = RunTool(kRoutePath, {"-n", "get", "-inet6", "default"});
+  if (!result || !result->Succeeded()) {
+    return std::nullopt;
+  }
+  std::string_view output{result->output};
+  constexpr std::string_view kGatewayPrefix = "gateway: ";
+  const std::size_t pos = output.find(kGatewayPrefix);
+  if (pos == std::string_view::npos) {
+    return std::nullopt;
+  }
+  std::string_view gateway = output.substr(pos + kGatewayPrefix.size());
+  const std::size_t end = gateway.find_first_of("\n\r");
+  if (end != std::string_view::npos) {
+    gateway = gateway.substr(0, end);
+  }
+  while (!gateway.empty() && (gateway.front() == ' ' || gateway.front() == '\t')) {
+    gateway.remove_prefix(1);
+  }
+  return gateway.empty() ? std::nullopt : std::optional{std::string{gateway}};
 }
 
 [[nodiscard]] Status ApplyDhcp(std::string_view interface_name, bool set_default_route) {
@@ -432,6 +612,151 @@ void TryPublishDns(SCDynamicStoreRef store, std::string_view service_id,
 [[nodiscard]] Status ApplyNone(std::string_view interface_name) {
   return RunOrFail(kIpconfigPath, {"set", std::string{interface_name}, "NONE"},
                    Text(Msg::kCapiWhatClearConfig));
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 应用函数
+// ---------------------------------------------------------------------------
+
+/// 等自动配置分配到全局 IPv6 地址。超时返回 false。
+///
+/// 地址来源可能是 SLAAC（RA 的前缀信息）也可能是 DHCPv6（RA 带 M 标志时），
+/// 两者都由 IPConfiguration 处理，这里只关心「有没有拿到全局地址」。
+/// RA 通常在接口 up 后 1-2 秒内到达，但部分 Android 的 rndis 服务端会拖，
+/// 所以给一个较长的超时。
+[[nodiscard]] bool WaitForV6Address(std::string_view interface_name) {
+  const auto deadline = std::chrono::steady_clock::now() + kAutomaticV6Timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (QueryAddressV6(interface_name).has_value()) {
+      return true;
+    }
+    std::this_thread::sleep_for(kAutomaticV6PollInterval);
+  }
+  return QueryAddressV6(interface_name).has_value();
+}
+
+/// 取 IPv6 服务的网关。先问动态存储，再退回读路由表。
+///
+/// AUTOMATIC-V6 下 IPConfiguration 会把 Router 发布到服务字典里（与 IPv4 同构）；
+/// 万一没发布（例如 RA 只给了前缀没给默认路由），再去内核路由表兜底。
+[[nodiscard]] std::optional<std::string> QueryRouterV6(std::string_view interface_name) {
+  if (SCDynamicStoreRef store = SharedDynamicStore(); store != nullptr) {
+    if (const std::optional<std::string> service_id = FindServiceIdV6(store, interface_name);
+        service_id.has_value()) {
+      const ScopedCFRef<CFDictionaryRef> ipv6 = CopyServiceEntry(store, *service_id, "IPv6");
+      if (std::string router = StringField(ipv6.Get(), CFSTR("Router")); !router.empty()) {
+        return router;
+      }
+    }
+  }
+  return QueryDefaultRouteGatewayV6();
+}
+
+/// 自动模式：交给 IPConfiguration 的 AUTOMATIC-V6，等它拿到地址。
+///
+/// 走 `ipconfig set` 而不是 `ifconfig inet6 ...`，理由和 IPv4 走 DHCP 完全一样：
+/// 这是 IPConfiguration 的注册路径，configd/IPMonitor 会把它当成一个正式服务接管，
+/// 于是 scoped DNS、scoped 默认路由、服务状态发布全都自动到位 —— 我们一件都不用做。
+/// 手搓 ifconfig 只会在内核里插一个地址，配置系统完全不知情。
+///
+/// AUTOMATIC-V6 同时覆盖两种取址方式，具体用哪种由对端 RA 决定：
+///   * RA 只带前缀信息 → SLAAC 无状态自动配置
+///   * RA 置 M（Managed）标志 → 转 DHCPv6 有状态取址，DNS 也从 DHCPv6 拿
+/// 这正是「DHCP 获取 IPv6 地址及 DNS」所需要的行为，不用自己实现 DHCPv6 客户端。
+[[nodiscard]] Status ApplyAutomaticV6(std::string_view interface_name, bool set_default_route) {
+  TETHERKIT_RETURN_IF_ERROR(
+      RunOrFail(kIpconfigPath, {"set", std::string{interface_name}, "AUTOMATIC-V6"},
+                Text(Msg::kCapiWhatStartAutomaticV6)));
+
+  if (!WaitForV6Address(interface_name)) {
+    return std::unexpected(Error::Generic(Tr(Msg::kCapiAutomaticV6Timeout, kAutomaticV6Timeout.count())));
+  }
+
+  if (!set_default_route) {
+    return tetherkit::Ok();
+  }
+  // 抢全局默认路由（典型场景：用户同时连着 Wi-Fi，想让 IPv6 走手机）。
+  // 拿不到网关不算失败 —— 地址已经配好了，只是没有默认路由可抢。
+  if (const std::optional<std::string> router = QueryRouterV6(interface_name);
+      router.has_value()) {
+    return PromoteToGlobalDefaultRouteV6(*router);
+  }
+  return tetherkit::Ok();
+}
+
+/// 静态 IPv6 配置：通过 ifconfig inet6 下发地址。
+[[nodiscard]] Status ApplyManualV6(std::string_view interface_name,
+                                     const tk_ip_config_v6_t& config) {
+  if (!IsValidIpv6(config.address)) {
+    return std::unexpected(
+        Error::Generic(Tr(Msg::kCapiInvalidAddress6, config.address)));
+  }
+  if (!IsValidPrefixLength(config.prefix_length)) {
+    return std::unexpected(
+        Error::Generic(Tr(Msg::kCapiInvalidPrefixLength, config.prefix_length)));
+  }
+  const std::string_view router{config.router};
+  if (!router.empty() && !IsValidIpv6(router)) {
+    return std::unexpected(
+        Error::Generic(Tr(Msg::kCapiInvalidRouter6, router)));
+  }
+  if (config.set_default_route && router.empty()) {
+    return std::unexpected(Error::Generic(Tr(Msg::kCapiDefaultRouteNeedsRouter)));
+  }
+
+  // 收集 DNS 服务器（IPv6 DNS 允许混用 IPv4/IPv6 地址）
+  std::vector<std::string> dns_servers;
+  for (std::int32_t i = 0; i < config.dns_count && i < TK_DNS_MAX; ++i) {
+    const std::string_view server{config.dns[i]};
+    if (server.empty()) {
+      continue;
+    }
+    // 同时接受 IPv4 和 IPv6 格式的 DNS
+    if (!IsValidIpv4(server) && !IsValidIpv6(server)) {
+      return std::unexpected(
+          Error::Generic(Tr(Msg::kCapiInvalidDns6, server)));
+    }
+    dns_servers.emplace_back(server);
+  }
+
+  // 同样走 IPConfiguration 而不是 ifconfig，理由见 ApplyAutomaticV6。
+  // 用法：ipconfig set <if> MANUAL-V6 <ipv6-address> <prefix-length>
+  TETHERKIT_RETURN_IF_ERROR(RunOrFail(
+      kIpconfigPath,
+      {"set", std::string{interface_name}, "MANUAL-V6", std::string{config.address},
+       std::to_string(config.prefix_length)},
+      Text(Msg::kCapiWhatApplyManual6)));
+
+  if (!router.empty()) {
+    TETHERKIT_RETURN_IF_ERROR(InstallScopedDefaultRouteV6(interface_name, router));
+    if (config.set_default_route) {
+      TETHERKIT_RETURN_IF_ERROR(PromoteToGlobalDefaultRouteV6(router));
+    }
+  }
+
+  // 尝试发布 DNS（尽力而为，与 IPv4 静态模式相同策略）
+  if (!dns_servers.empty()) {
+    SCDynamicStoreRef store = SharedDynamicStore();
+    if (store != nullptr) {
+      if (const std::optional<std::string> service_id = FindServiceIdV6(store, interface_name);
+          service_id.has_value()) {
+        TryPublishDns(store, *service_id, dns_servers);
+      } else {
+        TETHERKIT_WARN_TR(Msg::kCapiNoServiceForDns6, interface_name);
+      }
+    }
+  }
+  return tetherkit::Ok();
+}
+
+/// 撤销 IPv6 配置。
+///
+/// `ipconfig set <if> NONE-V6` 会让 IPConfiguration 收掉自己配的全局地址、
+/// 路由和 DNS。链路本地地址（fe80::/10）由内核管理、不受影响，这是对的 ——
+/// 没有它接口就没法收发 ND 报文了。
+[[nodiscard]] Status ApplyNoneV6(std::string_view interface_name) {
+  return RunOrFail(kIpconfigPath, {"set", std::string{interface_name}, "NONE-V6"},
+                   Text(Msg::kCapiWhatClearConfig6));
 }
 
 }  // namespace
@@ -574,5 +899,145 @@ tk_result_t tk_net_query(const char* interface_name, tk_net_state_t* out_state,
   }
 
   out_state->is_primary_default_route = PrimaryInterface(store) == interface_name;
+  return TK_OK;
+}
+
+// =============================================================================
+// IPv6 公开 API
+// =============================================================================
+
+void tk_ip_config_v6_init(tk_ip_config_v6_t* out_config) {
+  if (out_config == nullptr) {
+    return;
+  }
+  *out_config = tk_ip_config_v6_t{};
+  // 默认自动：由对端 RA 决定走 SLAAC 还是 DHCPv6，覆盖面最广也最省心。
+  out_config->mode = TK_IP_MODE_V6_AUTOMATIC;
+  out_config->set_default_route = false;
+}
+
+tk_result_t tk_net_apply_v6(const char* interface_name, const tk_ip_config_v6_t* config,
+                            tk_error_t* out_error) {
+  ClearError(out_error);
+  if (config == nullptr) {
+    FillGenericError(out_error, Tr(Msg::kCapiApplyConfigNull));
+    return TK_ERR_INVALID_ARGUMENT;
+  }
+  if (const auto status = ValidateInterface(interface_name); !status) {
+    FillError(out_error, status.error());
+    return TK_ERR_INVALID_ARGUMENT;
+  }
+  if (::geteuid() != 0) {
+    FillGenericError(out_error, Tr(Msg::kCapiApplyNeedsRoot));
+    return TK_ERR_PERMISSION;
+  }
+
+  Status status = tetherkit::Ok();
+  switch (config->mode) {
+    case TK_IP_MODE_V6_AUTOMATIC:
+      status = ApplyAutomaticV6(interface_name, config->set_default_route);
+      break;
+    case TK_IP_MODE_V6_MANUAL:
+      status = ApplyManualV6(interface_name, *config);
+      break;
+    case TK_IP_MODE_V6_NONE:
+      status = ApplyNoneV6(interface_name);
+      break;
+    default:
+      FillGenericError(out_error, Tr(Msg::kCapiUnknownIpModeV6, config->mode));
+      return TK_ERR_INVALID_ARGUMENT;
+  }
+
+  if (!status) {
+    FillError(out_error, status.error());
+    return TK_ERR_FAILED;
+  }
+  return TK_OK;
+}
+
+tk_result_t tk_net_clear_v6(const char* interface_name, tk_error_t* out_error) {
+  ClearError(out_error);
+  if (const auto status = ValidateInterface(interface_name); !status) {
+    FillError(out_error, status.error());
+    return TK_ERR_INVALID_ARGUMENT;
+  }
+  if (::geteuid() != 0) {
+    FillGenericError(out_error, Tr(Msg::kCapiClearNeedsRoot));
+    return TK_ERR_PERMISSION;
+  }
+
+  // 先撤掉 IPv6 DNS 键（如果有）
+  if (SCDynamicStoreRef store = SharedDynamicStore(); store != nullptr) {
+    if (const std::optional<std::string> service_id = FindServiceIdV6(store, interface_name);
+        service_id.has_value()) {
+      const ScopedCFRef<CFStringRef> key =
+          MakeCFString(std::format("State:/Network/Service/{}/DNS", *service_id));
+      ::SCDynamicStoreRemoveValue(store, key.Get());
+    }
+  }
+
+  if (const auto status = ApplyNoneV6(interface_name); !status) {
+    FillError(out_error, status.error());
+    return TK_ERR_FAILED;
+  }
+  return TK_OK;
+}
+
+tk_result_t tk_net_query_v6(const char* interface_name, tk_net_state_v6_t* out_state,
+                            tk_error_t* out_error) {
+  ClearError(out_error);
+  if (out_state == nullptr) {
+    return TK_ERR_INVALID_ARGUMENT;
+  }
+  if (const auto status = ValidateInterface(interface_name); !status) {
+    FillError(out_error, status.error());
+    return TK_ERR_INVALID_ARGUMENT;
+  }
+  *out_state = tk_net_state_v6_t{};
+
+  // ---- 地址与前缀长度：内核里的真实状态 ----
+  if (const std::optional<std::pair<std::string, int>> v6 = QueryAddressV6(interface_name);
+      v6.has_value()) {
+    out_state->has_address = true;
+    CopyText(out_state->address, v6->first);
+    out_state->prefix_length = v6->second;
+  }
+
+  // ---- 服务级信息：网关、DNS、配置方式 ----
+  SCDynamicStoreRef store = SharedDynamicStore();
+  if (store == nullptr) {
+    return TK_OK;
+  }
+
+  const std::optional<std::string> service_id = FindServiceIdV6(store, interface_name);
+  if (service_id.has_value()) {
+    const ScopedCFRef<CFDictionaryRef> ipv6 = CopyServiceEntry(store, *service_id, "IPv6");
+    const std::string router = StringField(ipv6.Get(), CFSTR("Router"));
+    if (!router.empty()) {
+      CopyText(out_state->router, router);
+      out_state->has_default_route = true;
+    }
+    CopyText(out_state->method, StringField(ipv6.Get(), CFSTR("ConfigMethod")));
+
+    // DNS 回读
+    const ScopedCFRef<CFDictionaryRef> dns = CopyServiceEntry(store, *service_id, "DNS");
+    const std::vector<std::string> servers = StringArrayField(dns.Get(), CFSTR("ServerAddresses"));
+    for (const std::string& server : servers) {
+      if (out_state->dns_count >= TK_DNS_MAX) {
+        break;
+      }
+      CopyText(out_state->dns[out_state->dns_count], TK_ADDRESS_CAPACITY, server);
+      ++out_state->dns_count;
+    }
+  }
+
+  out_state->is_primary_default_route = PrimaryInterfaceV6(store) == interface_name;
+  // 内核已经配上了全局地址，但动态存储里还没有对应服务 —— 例如地址是内核
+  // 自己按 RA 做的 SLAAC，而 IPConfiguration 还没来得及登记。这种情况如实
+  // 报成「自动配置、已生效」，否则界面上会出现「有地址却没有配置方式」的怪状态。
+  if (out_state->has_address && out_state->method[0] == '\0') {
+    CopyText(out_state->method, "AUTOMATIC-V6");
+    CopyText(out_state->service_state, "BOUND");
+  }
   return TK_OK;
 }

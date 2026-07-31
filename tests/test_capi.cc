@@ -517,4 +517,72 @@ TEST_CASE("查询不存在的 feth 网卡是成功且全空，而不是报错") 
   CHECK(std::strlen(error.message) == 0);
 }
 
+TEST_CASE("tk_ip_config_v6_init 默认自动配置且不抢全局默认路由") {
+  tk_ip_config_v6_t config{};
+  tk_ip_config_v6_init(&config);
+  CHECK(config.mode == TK_IP_MODE_V6_AUTOMATIC);
+  CHECK_FALSE(config.set_default_route);
+  CHECK(config.dns_count == 0);
+  CHECK(config.prefix_length == 0);
+  CHECK(std::strlen(config.address) == 0);
+  CHECK(std::strlen(config.router) == 0);
+}
+
+TEST_CASE("IPv6 同样拒绝对非 feth 网卡下手") {
+  // 与 IPv4 一致的防线。IPv6 是后加的代码路径，必须独立验证一遍，
+  // 否则「只加 IPv6」这件事可能悄悄绕开护栏。
+  tk_ip_config_v6_t config{};
+  tk_ip_config_v6_init(&config);
+  tk_error_t error{};
+
+  CHECK(tk_net_apply_v6("en0", &config, &error) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(std::string{error.message}.find("en0") != std::string::npos);
+
+  CHECK(tk_net_clear_v6("en0", &error) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_net_query_v6("en0", nullptr, &error) == TK_ERR_INVALID_ARGUMENT);
+
+  tk_net_state_v6_t state{};
+  CHECK(tk_net_query_v6("bridge0", &state, &error) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_net_apply_v6(nullptr, &config, &error) == TK_ERR_INVALID_ARGUMENT);
+  CHECK(tk_net_apply_v6("feth0", nullptr, &error) == TK_ERR_INVALID_ARGUMENT);
+}
+
+TEST_CASE("IPv6 非 root 下写操作返回 TK_ERR_PERMISSION") {
+  tk_ip_config_v6_t config{};
+  tk_ip_config_v6_init(&config);
+  tk_error_t error{};
+
+  CHECK(tk_net_apply_v6("feth9", &config, &error) == TK_ERR_PERMISSION);
+  CHECK(std::strlen(error.message) > 0);
+  CHECK(tk_net_clear_v6("feth9", &error) == TK_ERR_PERMISSION);
+}
+
+TEST_CASE("IPv6 查询不存在的 feth 网卡是成功且全空") {
+  tk_net_state_v6_t state{};
+  tk_error_t error{};
+  CHECK(tk_net_query_v6("feth99", &state, &error) == TK_OK);
+  CHECK_FALSE(state.has_address);
+  CHECK(state.dns_count == 0);
+  CHECK(state.prefix_length == 0);
+  CHECK_FALSE(state.is_primary_default_route);
+  CHECK(std::strlen(error.message) == 0);
+}
+
+TEST_CASE("IPv4 与 IPv6 是彼此独立的配置面") {
+  // 「不破坏已有 IPv4 流程」的回归保护：查 IPv6 不能影响 IPv4 的读数，
+  // 两个 state 结构也不能共享缓冲。
+  tk_net_state_t v4{};
+  tk_net_state_v6_t v6{};
+  tk_error_t error{};
+
+  CHECK(tk_net_query("feth98", &v4, &error) == TK_OK);
+  CHECK(tk_net_query_v6("feth98", &v6, &error) == TK_OK);
+  CHECK_FALSE(v4.has_address);
+  CHECK_FALSE(v6.has_address);
+
+  // IPv6 的地址缓冲必须放得下完整的 IPv6 字面量（46 = INET6_ADDRSTRLEN）。
+  CHECK(sizeof(v6.address) >= 46);
+  CHECK(sizeof(v6.router) >= 46);
+}
+
 }  // TEST_SUITE("capi.net_config")
