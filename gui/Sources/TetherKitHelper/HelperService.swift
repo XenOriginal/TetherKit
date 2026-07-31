@@ -156,8 +156,15 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
     func drainFeed(reply: @escaping (Data?) -> Void) {
         bumpActivity()
+        // 空闲时（没有新日志、没有新提示）绝大多数刷新周期都走这里：直接回 nil，
+        // 省掉每次都把日志数组 JSON 序列化再通过网络发过去的无谓开销。App 侧
+        // 对 nil 的处理就是「沿用上一次」，行为完全不变。
         let drained = TetherKitLibrary.drainLogs()
         let notices = takeNotices()
+        guard !drained.entries.isEmpty || !notices.isEmpty else {
+            reply(nil)
+            return
+        }
         let feed = HelperFeed(logs: drained.entries, droppedLogs: drained.dropped, notices: notices)
         reply(try? JSONEncoder().encode(feed))
     }

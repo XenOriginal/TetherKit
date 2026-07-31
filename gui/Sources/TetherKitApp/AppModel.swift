@@ -124,6 +124,14 @@ final class AppModel {
     private(set) var status: SessionStatus = .idle
     private(set) var networkState: NetworkState = .empty
     private(set) var networkStateV6: NetworkStateV6 = .empty
+
+    /// 网络配置节流用的状态：上次查询时刻与上次查询的接口名。
+    ///
+    /// `queryNetwork` 走 XPC（helper 内部是 ioctl + SCDynamicStore，单次不贵，
+    /// 但跟着 500 ms 状态轮询每周期查两次就是没必要的 XPC 往返）。接口没变、
+    /// 又没到 `Self.networkQueryInterval` 时就沿用上次结果，把这两类查询降频。
+    private var lastNetworkQueryAt: Date = .distantPast
+    private var lastNetworkInterfaceQueried: String = ""
     private(set) var throughput: ThroughputSample = .zero
     private(set) var throughputHistory: [ThroughputSample] = []
     private(set) var logs: [LogEntry] = []
@@ -243,14 +251,25 @@ final class AppModel {
     /// 卸载特权组件时授权框里的说明。
     private static var helperUninstallPrompt: String { L(.authPromptUninstall) }
 
-    /// 轮询周期。
+    /// 轮询周期（窗口可见、且会话在跑或在起停时）。
     ///
-    /// 500 ms 是「看起来实时」与「别把 XPC 往返变成负担」的平衡点：更快对人眼
-    /// 已无区别，更慢会让速率曲线看起来一顿一顿的。
-    private static let pollInterval: Duration = .milliseconds(500)
+    /// 1 秒是「看起来实时」与「别把 XPC 往返变成负担」的平衡点：吞吐速率由库内
+    /// 单调时钟差分计算，与轮询间隔无关，所以降频不影响数值准确性；而对人眼来说
+    /// 1 Hz 的速率刷新已经完全够用，2 Hz 毫无可感知差别，却把 App + helper 的
+    /// 每周期 XPC 负载砍掉一半。
+    private static let pollInterval: Duration = .seconds(1)
 
     /// 纯后台待机（窗口关着、会话没跑）时的轮询间隔。
-    private static let backgroundPollInterval: Duration = .seconds(2)
+    ///
+    /// 拉到 4 秒：后台时没人盯着实时速率，状态轮询的唯一产出是 helper 探活与
+    /// 设备扫描，没人需要它们每两秒一次。省下的 XPC 往返也直接降低 helper 负载。
+    private static let backgroundPollInterval: Duration = .seconds(4)
+
+    /// 网络配置（IP/网关/DNS）的轮询间隔（秒）。
+    ///
+    /// 这些信息在会话运行期间基本不变，没必要跟着状态轮询一起每周期查两次 XPC。
+    /// 降到 2 秒就足够「看起来实时」，并把 helper 上这两类查询的频次砍到约四分之一。
+    private static let networkQueryIntervalSeconds: TimeInterval = 2
 
     /// 设备枚举的最小间隔。
     ///
@@ -258,7 +277,7 @@ final class AppModel {
     /// 响应延迟用户基本感觉不到，而开销降到了原来的四分之一。
     private static let deviceRefreshInterval: Duration = .seconds(2)
 
-    /// 吞吐曲线保留的采样点数。120 点 × 500 ms = 最近 60 秒。
+    /// 吞吐曲线保留的采样点数。120 点 × 1 s = 最近 120 秒。
     private static let historyCapacity = 120
 
     /// 日志面板保留的行数。
@@ -394,6 +413,12 @@ final class AppModel {
             return
         }
 
+        // 版本探测只做一次：协议修订号只在 App/helper 更新时才变，没必要每 500 ms
+        // 查一次 XPC。已确认可用（或已知协议对不上）就跳过，省一次往返；helper
+        // 真挂了，下面的 sessionStatus 会重建连接（见 HelperClient.invalidationHandler）。
+        if case .available = helperAvailability {
+            // 已确认可用，无需重探。
+        } else {
         do {
             let (revision, version) = try await probeHelperVersion()
             guard revision == HelperConstants.protocolRevision else {
@@ -414,6 +439,7 @@ final class AppModel {
             // 只会把日志刷满。
             return
         }
+        }  // else（需要重探版本）
 
         if environment == nil {
             environment = try? await client.environment()
@@ -454,14 +480,24 @@ final class AppModel {
             }
         }
 
+        // 网络配置（IP/网关/DNS）走 XPC。接口没变且未到节流间隔时沿用上次结果
+        // —— 这些信息在会话期间基本不变，没必要每 500 ms 查两次。
         if !status.systemInterface.isEmpty {
-            networkState = (try? await client.queryNetwork(interface: status.systemInterface))
-                ?? .empty
-            networkStateV6 = (try? await client.queryNetworkV6(interface: status.systemInterface))
-                ?? .empty
+            let now = Date()
+            let due = now.timeIntervalSince(lastNetworkQueryAt) >= Self.networkQueryIntervalSeconds
+            let ifaceChanged = status.systemInterface != lastNetworkInterfaceQueried
+            if due || ifaceChanged {
+                networkState = (try? await client.queryNetwork(interface: status.systemInterface))
+                    ?? .empty
+                networkStateV6 = (try? await client.queryNetworkV6(interface: status.systemInterface))
+                    ?? .empty
+                lastNetworkQueryAt = now
+                lastNetworkInterfaceQueried = status.systemInterface
+            }
         } else {
             networkState = .empty
             networkStateV6 = .empty
+            lastNetworkInterfaceQueried = ""
         }
     }
 
