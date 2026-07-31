@@ -260,6 +260,12 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case ipv6CurrentlyEffective
     case ipv6NoAddressYet
 
+    // MARK: - 自动应用
+
+    case autoApply
+    case autoApplyTooltip
+    case autoApplyApplied
+
     // MARK: - 状态卡（StatusHeroCard.swift）
 
     case linkUp
@@ -666,7 +672,7 @@ extension L10nKey {
             return ("静态模式下 DNS 是否生效取决于系统的解析器管理，请以「当前生效」里的回读结果为准。",
                     "In manual mode, whether DNS takes effect is up to the system resolver, so "
                     + "trust what \"Currently effective\" reads back.")
-        case .ipModeLabel: return ("上网方式", "Configure IPv4")
+        case .ipModeLabel: return ("网络配置", "Configure")
         case .connectBeforeConfiguring:
             return ("连接设备后才能配置网络", "Connect a device before configuring the network")
         case .dhcpHelp:
@@ -697,7 +703,7 @@ extension L10nKey {
             return ("等同于 ipconfig set <网卡> NONE，会移除地址与相关路由",
                     "Equivalent to ipconfig set <interface> NONE; removes the address and its "
                     + "routes")
-        case .currentlyEffective: return ("当前生效", "Currently effective")
+        case .currentlyEffective: return ("IPv4 当前生效", "IPv4 Currently effective")
         case .primaryDefaultRoute: return ("主默认路由", "Primary default route")
         case .notEffective: return ("未生效", "Not in effect")
         case .noAddressYet:
@@ -725,6 +731,15 @@ extension L10nKey {
         case .ipv6NoAddressYet:
             return ("%@ 目前没有 IPv6 地址。选择 IPv6 上网方式后点「应用」。",
                     "%@ has no IPv6 address yet. Pick an IPv6 configuration and press Apply.")
+
+        // MARK: 自动应用
+
+        case .autoApply: return ("连接时自动应用", "Auto apply on connect")
+        case .autoApplyTooltip:
+            return ("手机通过 RNDIS 连接后，自动按已保存的配置获取并应用 IP 地址。",
+                    "Automatically apply saved network configuration when the phone connects via RNDIS.")
+        case .autoApplyApplied:
+            return ("已自动应用网络配置", "Network configuration auto-applied")
 
         // MARK: 状态卡
 

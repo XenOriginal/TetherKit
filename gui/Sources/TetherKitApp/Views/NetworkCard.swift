@@ -238,8 +238,19 @@ struct NetworkCard: View {
     }
 
     private var actionRow: some View {
-        HStack(spacing: Design.Spacing.small) {
-            Button {
+        VStack(alignment: .leading, spacing: Design.Spacing.small) {
+            // Auto-apply toggle: 当手机通过 RNDIS 连接后自动应用已保存的配置。
+            Toggle(isOn: $model.autoApplyEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L(.autoApply))
+                    Text(L(.autoApplyTooltip))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: Design.Spacing.small) {
+                Button {
                 Task { await model.applyNetworkConfiguration() }
             } label: {
                 HStack(spacing: Design.Spacing.tight) {
@@ -260,6 +271,7 @@ struct NetworkCard: View {
             .help(L(.clearConfigurationTooltip))
 
             Spacer()
+            }
         }
     }
 

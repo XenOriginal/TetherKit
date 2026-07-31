@@ -126,6 +126,18 @@ final class AppModel {
     /// 网络配置表单（IPv6）。
     var networkConfigurationV6: NetworkConfigurationV6 = .automatic
 
+    /// 自动应用：手机通过 RNDIS 连接后自动按已保存的配置获取 IP 地址。
+    ///
+    /// 经 @AppStorage 持久化，重启不丢失。默认开启 —— 大多数用户连上就想上网，
+    /// 多点一次 Apply 只是额外摩擦。
+    /// @ObservationIgnored 是必须的：@Observable 宏会追踪所有存储属性，
+    /// 而 @AppStorage 自己也会合成一个 _autoApplyEnabled 存储属性，两者冲突。
+    @ObservationIgnored
+    @AppStorage("TetherKitAutoApply") var autoApplyEnabled = true
+
+    /// 当前会话是否已执行过自动应用（防止每次轮询都重复触发）。
+    private var autoAppliedForCurrentSession = false
+
     /// 界面语言偏好。改它会**同时**做三件事：切 Swift 侧的文案表、把语言推给
     /// libtetherkit（否则日志卡里会混进另一种语言）、再推给 helper（它以 root
     /// 跑在 launchd 下，看不到用户的语言偏好）。
@@ -378,8 +390,15 @@ final class AppModel {
         // 记录/清除连接时刻，用于显示已连接时长。
         if fresh.runState == .running, sessionStartedAt == nil {
             sessionStartedAt = Date()
+            // 自动应用：会话刚建立、用户开了自动应用、且本次会话还没应用过 →
+            // 在后台异步执行，不阻塞状态更新流程。
+            if autoApplyEnabled && !autoAppliedForCurrentSession {
+                autoAppliedForCurrentSession = true
+                Task { await applyNetworkConfiguration() }
+            }
         } else if fresh.runState != .running, fresh.runState != .stopping {
             sessionStartedAt = nil
+            autoAppliedForCurrentSession = false
         }
 
         guard let previous = previousStatus,

@@ -110,11 +110,90 @@ struct MenuBarPanel: View {
                  bitsPerSecond: model.throughput.transmitBitsPerSecond, tint: .purple)
 
         if !status.systemInterface.isEmpty {
-            Text("\(status.systemInterface) · "
-                 + (model.networkState.hasAddress ? model.networkState.address
-                                                  : L(.noIPConfigured)))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+            Divider()
+
+            // IPv4 生效信息
+            effectiveInfoSection(
+                header: L(.currentlyEffective),
+                tint: .blue,
+                rows: networkInfoRowsIPv4
+            )
+
+            // IPv6 生效信息
+            if model.networkStateV6.hasAddress {
+                Divider()
+                effectiveInfoSection(
+                    header: L(.ipv6CurrentlyEffective),
+                    tint: .teal,
+                    rows: networkInfoRowsV6
+                )
+            }
+        }
+    }
+
+    // MARK: - 网络信息辅助
+
+    /// IPv4 当前生效信息的键值对列表。
+    private var networkInfoRowsIPv4: [(String, String)] {
+        let s = model.networkState
+        guard s.hasAddress else { return [] }
+        return [
+            (L(.ipAddress), s.address),
+            (L(.netmask), s.netmask),
+            (L(.router), s.router),
+            ("DNS", s.dnsServers.isEmpty ? L(.notEffective) : s.dnsServers.joined(separator: L(.listSeparator)))
+        ]
+    }
+
+    /// IPv6 当前生效信息的键值对列表。
+    private var networkInfoRowsV6: [(String, String)] {
+        let s = model.networkStateV6
+        guard s.hasAddress else { return [] }
+        return [
+            (L(.ipv6Address), "\(s.address)/\(s.prefixLength)"),
+            (L(.router), s.router.isEmpty ? "—" : s.router),
+            ("DNS", s.dnsServers.isEmpty ? L(.notEffective) : s.dnsServers.joined(separator: L(.listSeparator)))
+        ]
+    }
+
+    /// 一段紧凑的网络信息区块：彩色圆点标题 + 两列键值网格。
+    private func effectiveInfoSection(header: String, tint: Color,
+                                      rows: [(String, String)]) -> some View {
+        VStack(alignment: .leading, spacing: Design.Spacing.tight) {
+            HStack(spacing: Design.Spacing.tight) {
+                Circle().fill(tint).frame(width: 7, height: 7)
+                Text(header).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            }
+
+            Grid(alignment: .leading,
+                 horizontalSpacing: Design.Spacing.medium,
+                 verticalSpacing: 2) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    GridRow {
+                        infoCell(label: row.0, value: row.1)
+                        if index + 1 < rows.count {
+                            infoCell(label: rows[index + 1].0, value: rows[index + 1].1)
+                        } else {
+                            Color.clear
+                        }
+                    }
+                    // 每次跳两条（两列一行）
+                    if index + 1 < rows.count { }
+                }
+            }
+        }
+    }
+
+    /// 单个信息格：标签 + 等宽值，超长截断，悬停看全。
+    private func infoCell(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Design.Spacing.tight) {
+            Text(label).font(.caption2).foregroundStyle(.tertiary).frame(width: 48, alignment: .leading)
+            Text(value.isEmpty ? "—" : value)
+                .font(.system(.caption2, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(value)
         }
     }
 
