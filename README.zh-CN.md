@@ -19,7 +19,7 @@ DriverKit、不用关 SIP、不用开发者账号**。Apple Silicon 与 Intel �
 - **网卡侧**：macOS 的 `feth`（`if_fake`）虚拟网卡对 + BPF，直接读写原始以太帧。
 - **无内核代码**：纯用户态 C++23，不需要 kext、不需要 DriverKit、不需要关 SIP。
 
-> ⚠️ **状态**：全部模块已实现，210 个测试用例（10408 条断言）在普通构建与
+> ⚠️ **状态**：全部模块已实现，221 个测试用例（10569 条断言）在普通构建与
 > ThreadSanitizer 构建下均通过。端到端已用 Android 手机压测：**RX 约 326 Mbps /
 > TX 约 240~300 Mbps，双向零重传**（USB 2.0 高速，理论上限 426 Mbps）。
 > 测量方法与完整结果见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)，
