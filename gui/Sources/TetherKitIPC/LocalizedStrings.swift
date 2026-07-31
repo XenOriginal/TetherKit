@@ -93,6 +93,7 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case helperOrphanCleanupFailed
     case helperSigtermReceived
     case helperReady
+    case helperClientGoneExiting
     case installerNeedsRoot
     case installerUseTerminal
     case installerScriptMissing
@@ -403,6 +404,8 @@ extension L10nKey {
                     "Failed to clean up leftover virtual interfaces: %@")
         case .helperSigtermReceived: return ("收到 SIGTERM，正在停机", "Received SIGTERM; shutting down")
         case .helperReady: return ("tetherkit-helper 已就绪：%@", "tetherkit-helper ready: %@")
+        case .helperClientGoneExiting: return ("App 连接已断开，拆除会话并退出 helper",
+                                                "App connection lost; tearing down session and exiting helper")
         case .installerNeedsRoot:
             return ("错误：无法取得 root（euid=%1$ld，ruid=%2$ld）。",
                     "Error: cannot obtain root (euid=%1$ld, ruid=%2$ld).")

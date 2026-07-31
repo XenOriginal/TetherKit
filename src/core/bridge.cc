@@ -19,6 +19,13 @@ namespace {
 /// 完成时间），绝大多数等待都由完成回调的 notify 提前唤醒，几乎不会等满。
 constexpr std::uint32_t kTxCapacityWaitMillis = 50;
 
+/// 没凑满一批就写出（流量稀疏/突发）时，让出的时间（微秒）。
+///
+/// RX 注入线程每轮从队列取一批帧写进 feth。若这一批没取满（队列里就那么几帧），
+/// 说明此刻流量不大 —— 让出 200 µs 既能让后续帧聚合、减少 BPF write() 系统调用
+/// 次数（降 CPU），又不明显增加延迟（上限 200 µs）。空闲时另有 1 ms 兜底睡眠。
+constexpr std::uint32_t kRxPartialBatchYieldMicros = 200;
+
 /// 把字节数换算成 Mbps。
 [[nodiscard]] double ToMegabitsPerSecond(std::uint64_t bytes, double seconds) {
   if (seconds <= 0.0) {
@@ -187,6 +194,13 @@ void Bridge::RunReceiveInjector() noexcept {
         }
         // 注意：内核侧的 bs_drop 是**读**方向的统计，由 TX 抽取线程从
         // ReadFrames 的结果里更新，这里不碰它。
+      }
+
+      // 没凑满一批（队列里就那么几帧）说明此刻流量稀疏或突发。让出极短时间
+      // 让下一波帧聚合，减少 BPF write() 系统调用次数 —— 实机下能把 RX 方向
+      // 的 CPU 占用显著压下来，又不增加可感知的延迟（上限 kRxPartialBatchYieldMicros）。
+      if (result && rx_batch_.size() < config_.tx_write_batch) {
+        std::this_thread::sleep_for(std::chrono::microseconds(kRxPartialBatchYieldMicros));
       }
     }  // 批量会话析构 → 一次 PublishRead(n)
   }

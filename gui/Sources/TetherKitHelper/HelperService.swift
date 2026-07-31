@@ -35,6 +35,21 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     /// 无会话运行且无 XPC 活动时，经过多久自动退出（秒）。
     private static let idleTimeout: TimeInterval = 60
 
+    /// 当前连上来的 App 连接。helper 仅服务 TetherKit 一个客户端，理论上同时
+    /// 只有一条；但 App 崩溃重启时旧连接先失效、新连接紧接着来，会短暂出现两条。
+    /// 用 ObjectIdentifier 做键，因为 NSXPCConnection 本身不可 Hash。
+    private let connectionLock = NSLock()
+    private var clientConnectionIDs = Set<ObjectIdentifier>()
+
+    /// App 连接全部断开后，延迟多久再拆除会话并退出（秒）。
+    ///
+    /// 留出宽限是为了兼容 App 的「崩溃后立即重启」：旧连接失效会触发拆除流程，
+    /// 但新连接若在宽限内到达就该取消，而不是把一个正要重连的 App 的 helper 杀掉。
+    private static let clientGoneGraceSeconds: TimeInterval = 2
+
+    /// App 连接断开后待执行的「拆除 + 退出」任务。新连接到达时取消它。
+    private var pendingExitWorkItem: DispatchWorkItem?
+
     // MARK: - 不需要授权的探测接口
 
     func helperVersion(reply: @escaping (String) -> Void) {
@@ -289,6 +304,51 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         scheduleIdleTimeout()
     }
 
+    // MARK: - 客户端连接生命周期
+
+    /// App 建立了一条新 XPC 连接。
+    func clientConnectionDidConnect(_ connection: NSXPCConnection) {
+        connectionLock.withLock {
+            clientConnectionIDs.insert(ObjectIdentifier(connection))
+            // 有新连接 → 取消「全断开后退出」的待定任务。
+            pendingExitWorkItem?.cancel()
+            pendingExitWorkItem = nil
+        }
+        bumpActivity()
+    }
+
+    /// App 的 XPC 连接失效（App 退出 / 崩溃 / 强杀 / 窗口关闭后进程终止）。
+    ///
+    /// ★ 这是修掉「helper 残留 + 残留期间高 CPU + feth 网卡不清理」的关键 ★
+    ///
+    /// 此前 helper 只有两条退出路径：App 显式调 `quit()`，或「无会话运行时」的
+    /// 60 秒空闲自退。若 App 在会话运行中崩溃/被强杀，这两条都不会触发 ——
+    /// 于是带着活跃数据路径的 helper 常驻后台，烧 CPU 且把 feth 网卡漏在内核里。
+    ///
+    /// 接住连接失效后：先等到宽限期满，若期间没有新连接来（即 App 真的走了），
+    /// 就拆除会话（顺带销毁 feth0/feth1）并退出进程。
+    func clientConnectionDidInvalidate(_ connection: NSXPCConnection) {
+        let stillConnected: Bool = connectionLock.withLock {
+            clientConnectionIDs.remove(ObjectIdentifier(connection))
+            return !clientConnectionIDs.isEmpty
+        }
+        if stillConnected {
+            return  // 还有别的连接（极少见的并发场景），不退出
+        }
+
+        connectionLock.withLock { pendingExitWorkItem?.cancel() }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.connectionLock.withLock { self.pendingExitWorkItem = nil }
+            writeToStandardError(L(.helperClientGoneExiting))
+            self.shutdown()
+            exit(0)
+        }
+        connectionLock.withLock { pendingExitWorkItem = item }
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.clientGoneGraceSeconds,
+                                          execute: item)
+    }
+
     // MARK: - 内部工具
 
     /// 记录一次 XPC 活动，用于空闲自退出计时。
@@ -369,7 +429,16 @@ final class HelperListenerDelegate: NSObject, NSXPCListenerDelegate {
         //   对开源、源码分发的工具，凭据复核是更合适的模型：谁编译的都一样安全。
         connection.exportedInterface = NSXPCInterface(with: TetherKitHelperProtocol.self)
         connection.exportedObject = service
+
+        // 接住连接失效：App 退出 / 崩溃 / 强杀时，libxpc 会通过死端口通知触发它。
+        // 这是 helper 能感知「自己的唯一客户端走了」的唯一途径 —— 否则会话运行
+        // 中 App 一死，helper 就带着活跃数据路径常驻，烧 CPU 且漏掉 feth 网卡。
+        connection.invalidationHandler = { [weak service] in
+            service?.clientConnectionDidInvalidate(connection)
+        }
+
         connection.resume()
+        service.clientConnectionDidConnect(connection)
         return true
     }
 }
