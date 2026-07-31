@@ -29,6 +29,10 @@
 #include <memory>
 #include <span>
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+
 #include "tetherkit/common/cache.h"
 #include "tetherkit/common/spsc_ring.h"
 
@@ -299,6 +303,43 @@ class FrameRing {
 
   [[nodiscard]] BatchRead BeginBatchRead() noexcept { return BatchRead{*this}; }
 
+
+  // ---------------------------------------------------------------------------
+  // 消费者唤醒（阻塞式等待，把空闲轮询换成中断驱动）
+  // ---------------------------------------------------------------------------
+
+  /// 生产者发布帧后调用：唤醒一个可能在 WaitForReadable() 上阻塞的消费者线程。
+  ///
+  /// 在 libusb 事件线程（RX 生产者）里调用是安全的：只瞬间持有一把专供唤醒用的
+  /// 互斥量，不做任何阻塞 I/O。每次有效发布都调用一次即可 —— 消费者被唤醒后会
+  /// 自行重读队列，因此漏一次也不会丢数据（队列非空的事实会持续成立）。
+  void NotifyReadable() noexcept {
+    {
+      const std::lock_guard<std::mutex> guard(consumer_sync_.mutex);
+      ++consumer_sync_.epoch;
+    }
+    consumer_sync_.cv.notify_one();
+  }
+
+  /// 强制唤醒消费者线程，用于停机等不需要队列有数据的情况。
+  ///
+  /// 与 NotifyReadable() 的区别：不更新 epoch。WaitForReadable() 的谓词会同时
+  /// 检查传入的停机标志，因此只发通知就足以让消费者退出阻塞并看到停机条件。
+  void WakeConsumer() noexcept { consumer_sync_.cv.notify_one(); }
+
+  /// 消费者发现队列空时阻塞，直到 NotifyReadable() 或 `stop` 为真。
+  ///
+  /// 返回后**不**保证队列非空（典型虚假唤醒处理）——调用方必须亲自重读队列。
+  /// `stop` 在持锁状态下被检查，用于注入停机等退出条件；生产者侧的 epoch 变化
+  /// 也会被当作唤醒条件，因此不会漏掉「先 Notify 后 Wait」的竞态。
+  void WaitForReadable(const std::atomic<bool>& stop) noexcept {
+    std::unique_lock<std::mutex> lock(consumer_sync_.mutex);
+    const std::uint64_t epoch = consumer_sync_.epoch;
+    consumer_sync_.cv.wait(lock, [this, epoch, &stop] {
+      return consumer_sync_.epoch != epoch || stop.load(std::memory_order_acquire);
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // 观测
   // ---------------------------------------------------------------------------
@@ -371,6 +412,17 @@ class FrameRing {
   // 前面为 SpscCursor 做的缓存行隔离就全白费了。
   TETHERKIT_CACHE_ALIGNED std::size_t pending_write_index_ = 0;
   TETHERKIT_CACHE_ALIGNED std::size_t pending_read_index_ = 0;
+
+  // 消费者阻塞等待用的同步原语。**只被生产者 NotifyReadable 与消费者
+  // WaitForReadable 短暂持有**，与读写两侧的热路径字段分处不同缓存行，
+  // 否则每次 Notify 都会 invalidate 消费者侧刚取走的 pending_read_index_，
+  // 把无锁队列的缓存行隔离优势抵消掉。
+  struct ConsumerSync {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::uint64_t epoch = 0;  // 受 mutex 保护
+  };
+  TETHERKIT_CACHE_ALIGNED ConsumerSync consumer_sync_;
 };
 
 }  // namespace tetherkit

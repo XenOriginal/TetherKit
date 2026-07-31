@@ -211,6 +211,9 @@ void UsbDataChannel::OnReceiveComplete(Slot& slot) noexcept {
         if (batch.Staged() != 0) {
           const std::uint32_t staged = batch.Staged();
           batch.Publish();
+          // 唤醒可能在 WaitForReadable() 上阻塞的 RX 注入线程：空闲时一有流量
+          // 立刻被唤醒处理，无需轮询。
+          rx_ring_->NotifyReadable();
           // NOLINTNEXTLINE(readability-suspicious-call-argument)
           rx_counters_->AddBatch(staged, frame_bytes);
         }

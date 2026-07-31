@@ -110,6 +110,10 @@ void Bridge::Stop() {
   stop_requested_.store(true, std::memory_order_release);
 
   link_->Interrupt();
+  // 唤醒可能在 WaitForReadable() 上阻塞的 RX 注入线程（它的退出条件里有
+  // stop_requested_，但 condition_variable 必须显式 notify 才会醒来，否则
+  // 下面的 join 会永远等下去）。
+  rx_ring_->WakeConsumer();
 
   if (receive_injector_.joinable()) {
     receive_injector_.join();
@@ -177,11 +181,14 @@ void Bridge::RunReceiveInjector() noexcept {
         rx_batch_.push_back(view);
       }
 
-      if (rx_batch_.empty()) {
-        // 队列空。以前用自旋 + yield，结果在空闲时烧掉一个核（Activity Monitor
-        // 里 helper 92%+）。改成小睡 1 ms：没流量时几乎不占 CPU，有流量时帧
-        // 一来就立刻被 libusb 事件线程推进队列，醒来即可处理，延迟上界 1 ms。
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if ( rx_batch_.empty() ) {
+        // 队列空。改为**阻塞等待**生产者（libusb 事件线程）的 NotifyReadable()
+        // 通知，而非轮询 sleep_for(1ms)。空闲时 RX 注入线程彻底挂起、CPU ~0%，
+        // 一旦生产者把帧推进队列并 notify，立刻被唤醒处理 —— 延迟上界从 <=1 ms
+        // 缩短为「一次通知 + 一次上下文切换」（通常远小于 1 ms，且远在 USB bulk
+        // 传输本身几十~几百 us 的噪声范围内）。WaitForReadable 内同时检查
+        // stop_requested_，因此必须配合 Bridge::Stop 里的 WakeConsumer 才不会漏醒。
+        rx_ring_->WaitForReadable(stop_requested_);
         continue;
       }
 
