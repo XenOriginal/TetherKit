@@ -2,35 +2,45 @@ import AppKit
 import SwiftUI
 import TetherKitIPC
 
-/// 菜单栏里的常驻标签：状态图标 + 实时速率（单行、零抖动）。
+/// 菜单栏里的常驻标签：状态图标 + 实时速率（单行、零抖动、可隐藏）。
 ///
-/// 系统菜单栏每行高度固定，两段式 VStack 会被裁成单行 —— 所以这里改为
-/// 单行布局，但把下载 / 上传各自放进固定宽度的分段里，配合等宽数字，
-/// 无论速率从 "0K" 跳到 "999.9G"，整体宽度恒定，彻底消除状态栏左右抖动。
-/// 空闲时不显示速率 —— 图标本身已把状态说清楚。
+/// 关键设计决策：macOS 给 MenuBarExtra label 的水平空间有限，SwiftUI 的
+/// frame(width:) 约束会被系统裁剪（右侧内容直接消失）。所以这里**不用 frame
+/// 定宽**，而是把速率格式化成**固定字符数的字符串**，配合 .monospacedDigit()
+/// 让每个值占据完全相同的像素宽度。单个 Text 渲染，不存在嵌套 HStack 被裁的
+/// 风险。
+///
+/// 用户可在菜单栏面板中切换是否显示速率（showSpeedInMenuBar）。
 struct MenuBarLabel: View {
     var model: AppModel
+    @AppStorage("TetherKitShowMenuBarSpeed") private var showSpeed = true
 
-    /// 最宽输出为 "↓999.9G"（7 字符）。给每个分段固定宽度 + 等宽数字，
-    /// 任何速率值都不会撑开布局，整体尺寸恒定。
-    private static let segmentWidth: CGFloat = 44
+    /// compactBitrate 最宽输出为 "999.9G"（7 字符），加箭头 "↓" 共 8 字符。
+    /// 每个字段统一填充到 8 字符，短值右侧补空格 —— 配合 monospacedDigit，
+    /// "↓0K    " 与 "↓999.9G" 的像素宽度完全一致。
+    private static let kFieldWidth = 8
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             Image(systemName: Design.statusSymbol(for: model.status))
-            if model.status.runState == .running {
-                HStack(spacing: 4) {
-                    segment("↓", model.throughput.receiveBitsPerSecond)
-                    segment("↑", model.throughput.transmitBitsPerSecond)
-                }
-                .font(.system(size: 9, weight: .medium).monospacedDigit())
+            if showSpeed && model.status.runState == .running {
+                Text(speedText)
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .fixedSize()
             }
         }
     }
 
-    private func segment(_ arrow: String, _ bps: Double) -> some View {
-        Text("\(arrow)\(Format.compactBitrate(bps))")
-            .frame(width: Self.segmentWidth, alignment: .leading)
+    private var speedText: String {
+        pad("↓", model.throughput.receiveBitsPerSecond)
+          + " "
+          + pad("↑", model.throughput.transmitBitsPerSecond)
+    }
+
+    /// 把 "箭头+速率" 填充到固定字符数，短值右侧补空格。
+    private func pad(_ arrow: String, _ bps: Double) -> String {
+        let raw = "\(arrow)\(Format.compactBitrate(bps))"
+        return raw.padding(toLength: Self.kFieldWidth, withPad: " ", startingAt: 0)
     }
 }
 
@@ -135,6 +145,8 @@ struct MenuBarPanel: View {
                 // 而在这个模式下 App 菜单只有把窗口开出来才看得见。
                 languageMenu
 
+                speedToggle
+
                 Button(L(.quit)) {
                     NSApp.terminate(nil)
                 }
@@ -169,6 +181,21 @@ struct MenuBarPanel: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(L(.languageLabel))
+    }
+
+    /// 菜单栏速率显示开关。控制 MenuBarLabel 是否渲染 ↓/↑ 数值；
+    /// 状态通过 @AppStorage("TetherKitShowMenuBarSpeed") 持久化，重启不丢失。
+    @ViewBuilder
+    private var speedToggle: some View {
+        @AppStorage("TetherKitShowMenuBarSpeed") var showSpeed = true
+        Button {
+            showSpeed.toggle()
+        } label: {
+            Image(systemName: showSpeed ? "eye" : "eye.slash")
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .help(showSpeed ? L(.hideSpeed) : L(.showSpeed))
     }
 
     private func speedRow(symbol: String, caption: String, bitsPerSecond: Double,

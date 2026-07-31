@@ -225,6 +225,8 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case openMainWindow
     case quit
     case quitTooltip
+    case hideSpeed
+    case showSpeed
 
     // MARK: - 网络卡（NetworkCard.swift）
 
@@ -653,6 +655,10 @@ extension L10nKey {
         case .quitTooltip:
             return ("退出只是关闭界面，已建立的连接会继续运行。",
                     "Quitting only closes the interface; an established connection keeps running.")
+        case .hideSpeed:
+            return ("隐藏速率", "Hide speed")
+        case .showSpeed:
+            return ("显示速率", "Show speed")
 
         // MARK: 网络卡
 
