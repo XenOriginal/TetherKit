@@ -216,6 +216,14 @@ final class HelperClient {
         }
     }
 
+    /// 请求 helper 优雅停机并退出。**失败静默** —— 这通常在 App 终止时调用，
+    /// 用户已经走了，弹错误没有任何意义。
+    func quit() async throws {
+        _ = try await invoke { proxy, guarded in
+            proxy.quit { guarded.resume(returning: ()) }
+        }
+    }
+
     // MARK: - 特权操作（需要授权凭据）
 
     func startSession(authorization: Data, configuration: SessionConfiguration) async throws {

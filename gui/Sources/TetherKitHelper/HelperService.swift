@@ -28,18 +28,28 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     /// 尚未被 App 取走的提示。
     private var pendingNotices: [String] = []
 
+    /// 最后一次收到 XPC 调用或会话状态变更的时刻，用于空闲自退出。
+    private let idleLock = NSLock()
+    private var lastActivity = Date()
+
+    /// 无会话运行且无 XPC 活动时，经过多久自动退出（秒）。
+    private static let idleTimeout: TimeInterval = 60
+
     // MARK: - 不需要授权的探测接口
 
     func helperVersion(reply: @escaping (String) -> Void) {
+        bumpActivity()
         // 带上 XPC 接口修订号，让 App 能发现「helper 是升级前的旧版本」。
         reply(HelperConstants.encodeVersion(TetherKitLibrary.versionInfo.version))
     }
 
     func environment(reply: @escaping (Data?, String?) -> Void) {
+        bumpActivity()
         respond(with: TetherKitLibrary.checkEnvironment(), reply: reply)
     }
 
     func listDevices(reply: @escaping (Data?, String?) -> Void) {
+        bumpActivity()
         // 设备被本进程持有期间不读字符串描述符：读要 libusb_open，白白失败一遍，
         // 还会往正在握手的控制端点插传输。判定用「真的持有」而不是「session
         // 非 nil」—— failed / stopped 的死会话早就把 USB 拆干净了，把它们也算
@@ -62,6 +72,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     }
 
     func sessionStatus(reply: @escaping (Data?, String?) -> Void) {
+        bumpActivity()
         let status = withState { $0?.status() } ?? .idle
         // 顺带把会话事件收进提示队列 —— 状态轮询本来就是每个刷新周期一次，
         // 搭车过来不用多一次 XPC 往返。
@@ -72,6 +83,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     }
 
     func queryNetwork(interface: String, reply: @escaping (Data?, String?) -> Void) {
+        bumpActivity()
         do {
             respond(with: try NetworkConfigurator.query(interface: interface), reply: reply)
         } catch {
@@ -81,6 +93,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
     func applyNetworkV6(authorization: Data, interface: String, configuration: Data,
                        reply: @escaping (String?, Bool) -> Void) {
+        bumpActivity()
         guard let configuration = decode(NetworkConfigurationV6.self, from: configuration, reply: reply),
               authorize(authorization, reply: reply) else {
             return
@@ -102,6 +115,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     }
 
     func queryNetworkV6(interface: String, reply: @escaping (Data?, String?) -> Void) {
+        bumpActivity()
         do {
             respond(with: try NetworkConfigurator.queryV6(interface: interface), reply: reply)
         } catch {
@@ -110,6 +124,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     }
 
     func drainFeed(reply: @escaping (Data?) -> Void) {
+        bumpActivity()
         let drained = TetherKitLibrary.drainLogs()
         let notices = takeNotices()
         let feed = HelperFeed(logs: drained.entries, droppedLogs: drained.dropped, notices: notices)
@@ -117,6 +132,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     }
 
     func setLanguage(_ rawValue: String, reply: @escaping () -> Void) {
+        bumpActivity()
         // 认不出来就保持原样。宁可继续用上一种语言，也不要因为 App 传了个新值
         // 就退回默认 —— 那会表现成「切了个语言，helper 的日志反而变回英文」。
         if let language = Language(rawValue: rawValue) {
@@ -130,6 +146,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
     func startSession(authorization: Data, configuration: Data,
                       reply: @escaping (String?, Bool) -> Void) {
+        bumpActivity()
         guard let configuration = decode(SessionConfiguration.self, from: configuration, reply: reply),
               authorize(authorization, reply: reply) else {
             return
@@ -170,6 +187,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     }
 
     func stopSession(authorization: Data, reply: @escaping (String?, Bool) -> Void) {
+        bumpActivity()
         guard authorize(authorization, reply: reply) else { return }
 
         lifecycleQueue.async { [weak self] in
@@ -188,6 +206,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
     func applyNetwork(authorization: Data, interface: String, configuration: Data,
                       reply: @escaping (String?, Bool) -> Void) {
+        bumpActivity()
         guard let configuration = decode(NetworkConfiguration.self, from: configuration, reply: reply),
               authorize(authorization, reply: reply) else {
             return
@@ -213,6 +232,19 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
     // MARK: - 停机清理
 
+    /// App 请求 helper 优雅停机并退出进程。**不要求授权。**
+    ///
+    /// 先回复再退出：给 XPC 一帧时间把 reply 发出去。实际 Mach 消息大概率已经
+    /// 在路上了，0.05 秒的延迟只是兜底。
+    func quit(reply: @escaping () -> Void) {
+        bumpActivity()
+        reply()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.shutdown()
+            exit(0)
+        }
+    }
+
     /// 收到 SIGTERM（`launchctl bootout`）时调用。
     ///
     /// Swift 的 deinit 在进程被终止时不会跑，不主动停一下就会把 feth 网卡漏在
@@ -226,7 +258,43 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         session?.stop()
     }
 
+    /// 启动空闲自退出检查。
+    ///
+    /// helper 作为 LaunchDaemon 按需拉起，没会话运行时还一直挂着对用户没意义；
+    /// 之前 RX injector 忙等待的 bug 也让我们学到「后台 helper 可能烧 CPU」。
+    /// 这里设一个 60 秒空闲超时：无会话运行且 60 秒没有任何 XPC 调用时主动退出。
+    func scheduleIdleTimeout() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleTimeout) { [weak self] in
+            self?.checkIdleTimeout()
+        }
+    }
+
+    private func checkIdleTimeout() {
+        let sessionRunning = stateLock.withLock {
+            guard let session else { return false }
+            switch session.status().runState {
+            case .running, .starting, .stopping: return true
+            case .idle, .stopped, .failed: return false
+            }
+        }
+        let idle = idleLock.withLock { Date().timeIntervalSince(lastActivity) }
+
+        if !sessionRunning && idle >= Self.idleTimeout {
+            writeToStandardError("TetherKit helper idle timeout reached; exiting.")
+            shutdown()
+            exit(0)
+        }
+
+        // 还不该退，继续下一轮检查。
+        scheduleIdleTimeout()
+    }
+
     // MARK: - 内部工具
+
+    /// 记录一次 XPC 活动，用于空闲自退出计时。
+    private func bumpActivity() {
+        idleLock.withLock { lastActivity = Date() }
+    }
 
     /// 复核授权；不通过时回复错误并把第二个参数置为 true，告诉 App
     /// 「这是授权问题，重新弹框再来一次也许就成了」。

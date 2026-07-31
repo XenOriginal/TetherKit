@@ -76,4 +76,15 @@ import Foundation
     /// 不是整数：将来加语言时，旧 helper 收到不认识的值会原样忽略，而不是
     /// 把它当成某个碰巧存在的枚举值。
     func setLanguage(_ rawValue: String, reply: @escaping () -> Void)
+
+    /// 请求 helper 优雅停机并退出进程。**不要求授权**。
+    ///
+    /// 用于 App 完全退出时同步结束 helper：先停掉可能正在运行的会话、销毁
+    /// 虚拟网卡，再退出进程。没有这一条，helper 作为 LaunchDaemon 会在后台
+    /// 一直挂着，甚至继续烧 CPU。
+    ///
+    /// 安全上可以接受：helper 本来就在监听 Mach 服务，连接方除了调用这个接口
+    /// 之外只能做同样能造成 DoS 的事（比如反复连上断下）。真正的特权操作
+    ///（startSession / applyNetwork 等）仍要求授权复核。
+    func quit(reply: @escaping () -> Void)
 }

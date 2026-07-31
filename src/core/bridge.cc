@@ -132,8 +132,6 @@ void Bridge::RunReceiveInjector() noexcept {
   ConfigureCurrentThread("rx-inject", ThreadRole::kDataPath);
   TETHERKIT_DEBUG_TR(Msg::kCoreRxInjectorStarted);
 
-  std::uint32_t idle_spins = 0;
-
   while (!stop_requested_.load(std::memory_order_acquire)) {
     // 先撤销确认位，再判断是否暂停。顺序不能反 —— 留着上一轮的 true 会让
     // SetPaused(true) 误以为本线程已经停住，而它其实正要去取帧。
@@ -145,7 +143,7 @@ void Bridge::RunReceiveInjector() noexcept {
       // 置确认位是给 SetPaused(true) 看的：从这里到下一轮看见 paused_ 变回
       // false 之前，本线程不会碰 rx_ring_，所以这个确认是可信的。
       rx_paused_ack_.store(true, std::memory_order_release);
-      std::this_thread::yield();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
     }
 
@@ -163,16 +161,12 @@ void Bridge::RunReceiveInjector() noexcept {
       }
 
       if (rx_batch_.empty()) {
-        // 队列空。先自旋一小会儿覆盖「生产者正在写下一帧」这种极短空窗，
-        // 再让出 CPU —— 纯自旋会白烧一个核，直接 yield 又会在高吞吐下抬高延迟。
-        if (++idle_spins < config_.rx_spin_before_yield) {
-          continue;
-        }
-        idle_spins = 0;
-        std::this_thread::yield();
+        // 队列空。以前用自旋 + yield，结果在空闲时烧掉一个核（Activity Monitor
+        // 里 helper 92%+）。改成小睡 1 ms：没流量时几乎不占 CPU，有流量时帧
+        // 一来就立刻被 libusb 事件线程推进队列，醒来即可处理，延迟上界 1 ms。
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
-      idle_spins = 0;
 
       const auto result = link_->WriteFrames(rx_batch_);
       if (!result) {

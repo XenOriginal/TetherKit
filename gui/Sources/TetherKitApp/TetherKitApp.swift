@@ -18,9 +18,13 @@ import TetherKitIPC
 ///   没跑」时放慢到 2 秒一次，见 AppModel.pollDelay。
 @main
 struct TetherKitApplication: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var model = AppModel()
 
     init() {
+        // 把模型交给 App 生命周期委托，这样退出时可以请求 helper 一起结束。
+        appDelegate.model = model
+
         // CI 冒烟与手动补建用的模式：建完 Finder 别名即退，不进 GUI。
         // 恒 exit 0 —— 别名建不上（受管机器之类）不该把流程判失败，结果打给
         // stdout。（brew 的 postinstall 也在沙箱里、写不了 /Applications ——
@@ -177,4 +181,22 @@ func presentMainWindow(_ model: AppModel, _ openWindow: OpenWindowAction) {
     NSApp.setActivationPolicy(.regular)
     openWindow(id: "main")
     NSApp.activate(ignoringOtherApps: true)
+}
+
+/// App 生命周期委托。
+///
+/// 主要职责：用户按 Cmd+Q / 选「退出」时，先让 helper 优雅停机，再真正结束 App。
+/// 不用 SwiftUI 内置生命周期是因为 `App` 协议没有直接暴露
+/// `applicationShouldTerminate` 这种能延迟退出的钩子。
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var model: AppModel?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task {
+            await model?.quitHelper()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 }

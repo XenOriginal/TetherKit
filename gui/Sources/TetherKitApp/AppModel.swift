@@ -283,6 +283,15 @@ final class AppModel {
         pollingTask = nil
     }
 
+    /// App 完全退出时调用：停轮询，并请求 helper 一起退出。
+    ///
+    /// helper 是 LaunchDaemon，App 退出后它本会继续挂在后台；调用 quit() 可以让
+    /// 它先停掉可能正在跑的会话、销毁虚拟网卡，再结束进程。
+    func quitHelper() async {
+        stopPolling()
+        _ = try? await client.quit()
+    }
+
     /// 主窗口出现（含从菜单栏重新打开）。
     ///
     /// 立刻刷一次而不是等下一个周期：后台轮询可能正睡在 2 秒的长间隔里，
@@ -424,9 +433,12 @@ final class AppModel {
         // 记录/清除连接时刻，用于显示已连接时长。
         if fresh.runState == .running, sessionStartedAt == nil {
             sessionStartedAt = Date()
-            // 自动应用：会话刚建立、用户开了自动应用、且本次会话还没应用过 →
-            // 在后台异步执行，不阻塞状态更新流程。
-            if autoApplyEnabled && !autoAppliedForCurrentSession {
+            // 自动应用：只在「本次 App 生命周期内会话从非运行变为运行」时触发。
+            //
+            // App 启动时若会话已经在跑（previousStatus == nil），则跳过自动应用：
+            // 自动应用需要授权，而缓存的授权在 App 退出后已失效；若此时触发，
+            // 用户一打开程序就会弹密码框。新连接在 App 运行期间建立时正常自动应用。
+            if autoApplyEnabled && !autoAppliedForCurrentSession && previousStatus != nil {
                 autoAppliedForCurrentSession = true
                 Task { await applyNetworkConfiguration() }
             }

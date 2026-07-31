@@ -78,12 +78,6 @@ struct BridgeConfig {
   /// 空闲时批很小（延迟低），突发时自动变大（吞吐高）。
   std::uint32_t rx_write_batch = 64;
 
-  /// RX 队列空时自旋多少次再让出 CPU。
-  ///
-  /// 纯自旋会白烧一个核；直接 yield 又会在高吞吐下增加延迟。少量自旋能覆盖
-  /// 「生产者正在写下一帧」这种极短的空窗。
-  std::uint32_t rx_spin_before_yield = 64;
-
   /// TX 方向单批最多提交多少帧给 USB。
   std::uint32_t tx_submit_batch = 256;
 
