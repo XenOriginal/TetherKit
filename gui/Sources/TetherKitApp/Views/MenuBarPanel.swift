@@ -2,26 +2,30 @@ import AppKit
 import SwiftUI
 import TetherKitIPC
 
-/// 菜单栏里的常驻标签：状态图标 + 实时速率。
+/// 菜单栏里的常驻标签：状态图标 + 实时速率（上下紧凑排列）。
 ///
-/// 只在会话运行时显示速率文本 —— 空闲时一串 "0K" 只是噪音，图标本身已经把
-/// 状态说清楚了。数字用等宽，避免速率跳动时把右边的其它菜单栏项挤来挤去。
+/// 下载 / 上传分两行显示，每行固定宽度，数字长度变化时整体尺寸不变，
+/// 彻底消除状态栏抖动。空闲时不显示速率 —— 图标本身已把状态说清楚。
 struct MenuBarLabel: View {
     var model: AppModel
 
+    /// compactBitrate 最宽输出为 "999.9G"（7 字符），加箭头 "↓" 共 8 字符。
+    /// 用 monospacedDigit + 固定 frame 宽度兜底，确保任何速率值都不会撑开布局。
+    private static let speedFieldWidth: CGFloat = 58
+
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 3) {
             Image(systemName: Design.statusSymbol(for: model.status))
             if model.status.runState == .running {
-                Text(speedText)
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                VStack(alignment: .leading, spacing: -2) {
+                    Text("↓\(Format.compactBitrate(model.throughput.receiveBitsPerSecond))")
+                    Text("↑\(Format.compactBitrate(model.throughput.transmitBitsPerSecond))")
+                }
+                .font(.system(size: 9, weight: .medium).monospacedDigit())
+                .frame(width: Self.speedFieldWidth, alignment: .leading)
+                .fixedSize()
             }
         }
-    }
-
-    private var speedText: String {
-        "↓\(Format.compactBitrate(model.throughput.receiveBitsPerSecond))"
-            + " ↑\(Format.compactBitrate(model.throughput.transmitBitsPerSecond))"
     }
 }
 
