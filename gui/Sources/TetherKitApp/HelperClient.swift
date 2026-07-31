@@ -101,11 +101,26 @@ final class HelperClient {
     }
 
     /// 发一次调用。`body` 拿到代理与守卫，负责发起请求并兑现结果。
+    ///
+    /// XPC 超时保护：`NSXPCConnection` 没有内置超时。如果 helper 进程崩溃或
+    /// 死锁但连接未断开，reply block 永远不会被调用，continuation 永远不会
+    /// resume → 整个 async 调用无限挂起 → UI 卡死。
+    ///
+    /// 这里加一个 10 秒超时：到点还没回就用 unreachable 兜底。
+    /// `ContinuationGuard` 保证只 resume 一次，所以正常回复后这个是 no-op。
     private func invoke<T>(
         _ body: @escaping (TetherKitHelperProtocol, ContinuationGuard<T>) -> Void
     ) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             let guarded = ContinuationGuard(continuation)
+
+            // 超时守卫：10 秒后若 continuation 仍未被 resume，强制以超时错误兑现
+            Task {
+                try? await Task.sleep(for: .seconds(10))
+                guarded.resume(throwing: Failure.unreachable(
+                    "XPC call timed out after 10 s — helper may have crashed"))
+            }
+
             let proxy = connection().remoteObjectProxyWithErrorHandler { error in
                 guarded.resume(throwing: Failure.unreachable(error.localizedDescription))
             }
