@@ -138,6 +138,14 @@ final class AppModel {
     /// 当前会话是否已执行过自动应用（防止每次轮询都重复触发）。
     private var autoAppliedForCurrentSession = false
 
+    /// 是否已对「运行中会话的设备列表」做过首次填充尝试。
+    ///
+    /// 场景：App 启动即发现会话已在跑、而设备列表还空着（手机早就连上了）。
+    /// 这时必须枚举一次把设备填进去，但枚举要 libusb_open，运行中频繁做会
+    /// 干扰独占中的设备，所以只试一次——成功就填上了，失败也不再重试，
+    /// 等会话停止后标志复位、回到正常的「未运行时枚举」节奏。
+    private var deviceFillAttemptedWhileRunning = false
+
     /// 界面语言偏好。改它会**同时**做三件事：切 Swift 侧的文案表、把语言推给
     /// libtetherkit（否则日志卡里会混进另一种语言）、再推给 helper（它以 root
     /// 跑在 launchd 下，看不到用户的语言偏好）。
@@ -351,20 +359,30 @@ final class AppModel {
             apply(feed: feed)
         }
 
-        // 设备列表只在没跑起来的时候刷：运行中设备已被独占，列表也不该变。
+        // 设备列表：未运行会话时照常枚举（设备不被独占，列表随插拔更新），
+        // 而且刷得比状态慢——枚举要 libusb_open 读描述符，按 500 ms 节奏做等于
+        // 每秒开关设备两次，浪费且可能干扰。
         //
-        // 而且**刷得比状态慢**。枚举一次要读 USB 字符串描述符，那需要
-        // libusb_open 真的把设备打开一遍 —— 按 500 ms 的状态轮询节奏做这件事，
-        // 等于每秒钟去开关用户的设备两次，既浪费又可能干扰它。插拔响应慢 2 秒
-        // 完全不影响体感。
-        if status.runState != .running, shouldRefreshDevices() {
-            if let fresh = try? await client.listDevices() {
-                devices = fresh
-                // 用户选中的设备被拔掉后，选择要跟着失效，否则「启动」会按一个
-                // 不存在的总线地址去找设备。
-                if let selected = selectedDeviceID,
-                   !devices.contains(where: { $0.id == selected }) {
-                    selectedDeviceID = nil
+        // 例外：**App 启动即发现会话已在跑、而设备列表还空着**——手机早就连上
+        // 了，但设备枚举被「运行中不刷」的规矩跳过，列表永远填不进来，会卡在
+        // 「无设备」。这时必须至少枚举一次把设备填进去（只试一次，见下面标志），
+        // 不能因为「运行中」就永远不刷。
+        let wantsDevices = status.runState != .running
+        let mustFillEmpty = devices.isEmpty
+            && status.runState == .running
+            && !deviceFillAttemptedWhileRunning
+        if wantsDevices || mustFillEmpty {
+            // 未运行时按节流节奏；运行中补空只做一次，不受节流限制。
+            if wantsDevices ? shouldRefreshDevices() : true {
+                deviceFillAttemptedWhileRunning = true
+                if let fresh = try? await client.listDevices() {
+                    devices = fresh
+                    // 用户选中的设备被拔掉后，选择要跟着失效，否则「启动」会按一个
+                    // 不存在的总线地址去找设备。
+                    if let selected = selectedDeviceID,
+                       !devices.contains(where: { $0.id == selected }) {
+                        selectedDeviceID = nil
+                    }
                 }
             }
         }
@@ -399,6 +417,7 @@ final class AppModel {
         } else if fresh.runState != .running, fresh.runState != .stopping {
             sessionStartedAt = nil
             autoAppliedForCurrentSession = false
+            deviceFillAttemptedWhileRunning = false
         }
 
         guard let previous = previousStatus,
