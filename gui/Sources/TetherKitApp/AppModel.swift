@@ -5,7 +5,7 @@ import TetherKitCore
 import TetherKitIPC
 
 /// 一次采样得到的瞬时速率。
-struct ThroughputSample: Identifiable, Equatable {
+struct ThroughputSample: Identifiable {
     let id = UUID()
     let timestamp: Date
     let receiveBitsPerSecond: Double
@@ -16,15 +16,6 @@ struct ThroughputSample: Identifiable, Equatable {
     static let zero = ThroughputSample(timestamp: .distantPast, receiveBitsPerSecond: 0,
                                        transmitBitsPerSecond: 0, receivePacketsPerSecond: 0,
                                        transmitPacketsPerSecond: 0)
-
-    /// Equatable 忽略 id（UUID 每次创建都不同，不影响语义相等性）。
-    static func == (lhs: ThroughputSample, rhs: ThroughputSample) -> Bool {
-        lhs.timestamp == rhs.timestamp
-            && lhs.receiveBitsPerSecond == rhs.receiveBitsPerSecond
-            && lhs.transmitBitsPerSecond == rhs.transmitBitsPerSecond
-            && lhs.receivePacketsPerSecond == rhs.receivePacketsPerSecond
-            && lhs.transmitPacketsPerSecond == rhs.transmitPacketsPerSecond
-    }
 }
 
 /// 连续重复的日志折叠成一条。
@@ -233,21 +224,6 @@ final class AppModel {
     /// 就是一次合法的窗口展示。
     private var windowPresentationRequestedAt = ContinuousClock.now
 
-    /// 连续「无任何可观测变化」的轮询周期数。用于自适应退避：
-    /// 连续 N 次空转后把间隔从 1s 逐步拉长到 5s，有变化时立刻复位。
-    ///
-    /// 空转判定：status 未变、throughput 未变（或变化 < 1%）、无新日志、
-    /// 设备列表未变、网络状态未变 —— 即整个 refresh() 对 UI 零影响。
-    private var consecutiveNoChangeCycles = 0
-
-    /// 自适应退避的最大轮询间隔（秒）。即使一直没变化也不超过这个值，
-    /// 因为心跳（3s）和菜单栏速率仍需较及时的更新。
-    private static let maxBackoffSeconds: Double = 5
-
-    /// 退避加速因子：连续多少次空转后开始退避，以及每级增加的秒数。
-    private static let backoffStartThreshold = 3   // 前 3 次保持 1s
-    private static let backoffStepSeconds: Double = 1  // 之后每级 +1s
-
     /// 缓存的授权令牌。为 nil 表示下次特权操作需要弹框。
     ///
     /// 不自己记过期时间：系统的 timeout 由授权数据库控制（可能被管理员改），
@@ -357,15 +333,8 @@ final class AppModel {
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let changed = await self.refresh()
-                // 自适应退避：有变化立刻复位，无变化则累加计数（由 pollDelay 读取）。
-                if changed {
-                    self.consecutiveNoChangeCycles = 0
-                } else {
-                    self.consecutiveNoChangeCycles += 1
-                }
+                await self.refresh()
                 // 间隔是动态的：会话在跑或窗口开着就保持流畅，纯后台待机时放慢。
-                // 稳态下还会逐步拉长（见 pollDelay 的自适应退避逻辑）。
                 try? await Task.sleep(for: self.pollDelay)
             }
         }
@@ -410,7 +379,6 @@ final class AppModel {
     /// 用户打开窗口的第一眼不该看到陈旧数据。
     func windowDidAppear() {
         isWindowVisible = true
-        consecutiveNoChangeCycles = 0  // 窗口出现：立刻恢复快轮询
         Task { await refresh() }
     }
 
@@ -441,48 +409,21 @@ final class AppModel {
     /// 三种情况用快节奏：会话在跑（菜单栏要显示实时速率）、正在启动/停止
     /// （用户在等结果）、窗口开着（用户在看）。只有「纯后台待机」才放慢 ——
     /// 那时轮询唯一的产出是 helper 探活与设备扫描，没人需要它们每半秒一次。
-    ///
-    /// ★ 自适应退避 ★
-    ///   即使在「快节奏」场景下，如果连续多个周期 status / throughput /
-    ///   logs / network 全部未变（即 helper 侧完全平稳），说明当前处于稳态，
-    ///   没必要每秒打 2~4 次 XPC。此时逐步拉长间隔（1s → 2s → … → 5s），
-    ///   一旦有任何变化立刻复位到基础间隔。心跳由独立任务负责，不受此影响。
     private var pollDelay: Duration {
         let sessionActive = status.runState == .running || status.runState.isTransitional
-        let base = sessionActive || isWindowVisible ? Self.pollInterval : Self.backgroundPollInterval
-
-        // 后台模式已有 4s 基础间隔，不再叠加退避（避免过长）。
-        guard sessionActive || isWindowVisible else { return base }
-
-        // 连续空转次数不够：保持基础间隔。
-        guard consecutiveNoChangeCycles >= Self.backoffStartThreshold else { return base }
-
-        // 线性退避：每多一次空转 +1s，封顶 maxBackoffSeconds。
-        let extraSeconds = Double(consecutiveNoChangeCycles - Self.backoffStartThreshold + 1)
-                             * Self.backoffStepSeconds
-        let baseSeconds = sessionActive ? 1.0 : 4.0
-        let capped = min(baseSeconds + extraSeconds, Self.maxBackoffSeconds)
-        return .seconds(capped)
+        return sessionActive || isWindowVisible ? Self.pollInterval : Self.backgroundPollInterval
     }
 
     // MARK: - 轮询
 
-    /// 执行一轮完整的状态刷新。返回是否有任何可观测变化。
-    ///
-    /// 返回值用于自适应退避：连续多轮返回 false 时逐步拉长轮询间隔，
-    /// 任何一轮返回 true 则立刻复位到基础间隔。
-    @discardableResult
-    private func refresh() async -> Bool {
-        var changed = false
-
+    private func refresh() async {
         // 快路径：helper 二进制不在预期位置（多半是被系统清理工具删掉了，
         // 本机装了 CleanMyMac 一类软件就可能这么干）。直接判缺失并给出安装引导，
         // 省去 10 秒 XPC 超时干等 —— 否则界面会一直卡在「Checking…」，用户无从下手。
         if !Self.helperBinaryIsInstalled() {
-            let wasAvailable = helperAvailability.isAvailable
             helperAvailability = .missing(reason: L(.helperBinaryMissing))
             helperVersionMismatch = nil
-            return wasAvailable  // 状态从可用变为缺失 = 有变化
+            return
         }
 
         // 版本探测只做一次：协议修订号只在 App/helper 更新时才变，没必要每 500 ms
@@ -496,36 +437,26 @@ final class AppModel {
             guard revision == HelperConstants.protocolRevision else {
                 helperAvailability = .outdated(installed: revision,
                                                expected: HelperConstants.protocolRevision)
-            helperVersionMismatch = nil
-            return true  // 协议版本变化总是有变化的
-            // 接口对不上就别继续发请求了 —— 参数与应答的形状都可能不一致。
+                // 协议对不上时不再另报版本不一致：那张卡本来就是要用户去更新组件，
+                // 同一件事说两遍只会让人怀疑是两个问题。
+                helperVersionMismatch = nil
+                // 接口对不上就别继续发请求了 —— 参数与应答的形状都可能不一致。
+                return
             }
-            let prevAvail = helperAvailability.isAvailable
             helperAvailability = .available(version: version)
             helperVersionMismatch = Self.versionMismatch(installed: version)
-            changed = changed || !prevAvail || (helperVersionMismatch != nil)
         } catch {
-            let prevMissing = !helperAvailability.isAvailable
             helperAvailability = .missing(reason: error.localizedDescription)
             helperVersionMismatch = nil
-            changed = changed || !prevMissing
             // 连不上就别再发后续请求了 —— 每一个都会重复同样的失败，
             // 只会把日志刷满。
-            return changed
+            return
         }
         }  // else（需要重探版本）
 
         if environment == nil {
             environment = try? await client.environment()
         }
-
-        let statusBefore = status
-        let throughputBefore = throughput
-        let logCountBefore = logs.count
-        let droppedBefore = droppedLogCount
-        let deviceCountBefore = devices.count
-        let networkBefore = networkState
-        let networkV6Before = networkStateV6
 
         if let fresh = try? await client.sessionStatus() {
             apply(status: fresh)
@@ -581,18 +512,6 @@ final class AppModel {
             networkStateV6 = .empty
             lastNetworkInterfaceQueried = ""
         }
-
-        // 判定本轮是否有任何可观测变化。
-        changed = changed
-                 || statusBefore != status
-                 || throughputBefore != throughput
-                 || logCountBefore != logs.count
-                 || droppedBefore != droppedLogCount
-                 || deviceCountBefore != devices.count
-                 || networkBefore != networkState
-                 || networkV6Before != networkStateV6
-
-        return changed
     }
 
     /// helper 二进制的预期安装路径。不在就说明没装（或被外部删除），
@@ -673,28 +592,6 @@ final class AppModel {
             transmitPacketsPerSecond: Double(fresh.txFrames &- previous.txFrames) / seconds)
 
         throughput = sample
-
-        // ★ 稳态节流：速率变化 < 1% 时不追加新采样点，只更新最后一个点的
-        // 时间戳。这样图表仍会「滚动」（x 轴推进），但 SwiftUI 不需要为
-        // 新数据点重新布局 ForEach + monotone 插值 —— 这是活跃转发时
-        // GUI CPU 的主要贡献者之一（60 点 × 3 Mark × 每秒 1 次全量重绘）。
-        //
-        // 变化 ≥ 1% 或方向反转（比如从有流量到零）时照常追加，确保曲线形状准确。
-        if let last = throughputHistory.last {
-            let rxChanged = abs(sample.receiveBitsPerSecond - last.receiveBitsPerSecond)
-                             / max(last.receiveBitsPerSecond, 1.0)
-            let txChanged = abs(sample.transmitBitsPerSecond - last.transmitBitsPerSecond)
-                             / max(last.transmitBitsPerSecond, 1.0)
-            let isNearZero = sample.receiveBitsPerSecond < 1000 && sample.transmitBitsPerSecond < 1000
-                              && last.receiveBitsPerSecond < 1000 && last.transmitBitsPerSecond < 1000
-
-            if rxChanged < 0.01 && txChanged < 0.01 && !isNearZero {
-                // 稳态：复用最后一个点，只更新时间戳让曲线滚动。
-                throughputHistory[throughputHistory.count - 1] = sample
-                return
-            }
-        }
-
         throughputHistory.append(sample)
         if throughputHistory.count > Self.historyCapacity {
             throughputHistory.removeFirst(throughputHistory.count - Self.historyCapacity)
@@ -767,7 +664,6 @@ final class AppModel {
     /// 启动会话。会弹一次系统授权框。
     func startSession() async {
         guard !isBusy else { return }
-        consecutiveNoChangeCycles = 0  // 用户动作：立刻恢复快轮询
         isBusy = true
         defer { isBusy = false }
 
@@ -790,7 +686,6 @@ final class AppModel {
     /// 停止会话。
     func stopSession() async {
         guard !isBusy else { return }
-        consecutiveNoChangeCycles = 0  // 用户动作：立刻恢复快轮询
         isBusy = true
         defer { isBusy = false }
 
@@ -802,7 +697,6 @@ final class AppModel {
     /// 下发网络配置（IPv4 + IPv6 一并下发）。
     func applyNetworkConfiguration() async {
         guard !isBusy else { return }
-        consecutiveNoChangeCycles = 0  // 用户动作：立刻恢复快轮询
         let interface = status.systemInterface
         guard !interface.isEmpty else {
             alertMessage = L(.interfaceNotReadyYet)
@@ -854,7 +748,6 @@ final class AppModel {
     /// 混进模式选择器里会让人以为选中它就已经生效了。
     func clearNetworkConfiguration() async {
         guard !isBusy else { return }
-        consecutiveNoChangeCycles = 0  // 用户动作：立刻恢复快轮询
         let interface = status.systemInterface
         guard !interface.isEmpty else { return }
 
@@ -875,7 +768,6 @@ final class AppModel {
     ///
     /// 手动触发时不受节流限制 —— 用户点了按钮就是想立刻看到结果。
     func refreshDevices() async {
-        consecutiveNoChangeCycles = 0  // 用户动作：立刻恢复快轮询
         lastDeviceRefresh = .now
         devices = (try? await client.listDevices()) ?? []
     }
