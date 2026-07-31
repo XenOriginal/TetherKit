@@ -336,6 +336,15 @@ final class AppModel {
     // MARK: - 轮询
 
     private func refresh() async {
+        // 快路径：helper 二进制不在预期位置（多半是被系统清理工具删掉了，
+        // 本机装了 CleanMyMac 一类软件就可能这么干）。直接判缺失并给出安装引导，
+        // 省去 10 秒 XPC 超时干等 —— 否则界面会一直卡在「Checking…」，用户无从下手。
+        if !Self.helperBinaryIsInstalled() {
+            helperAvailability = .missing(reason: L(.helperBinaryMissing))
+            helperVersionMismatch = nil
+            return
+        }
+
         do {
             let (revision, version) = try await probeHelperVersion()
             guard revision == HelperConstants.protocolRevision else {
@@ -405,6 +414,16 @@ final class AppModel {
             networkState = .empty
             networkStateV6 = .empty
         }
+    }
+
+    /// helper 二进制的预期安装路径。不在就说明没装（或被外部删除），
+    /// `refresh()` 据此走安装引导，不必等 XPC 超时。
+    private static let helperInstallPath =
+        "/Library/PrivilegedHelperTools/\(HelperConstants.machServiceName)"
+
+    /// helper 二进制是否还在预期位置。
+    private static func helperBinaryIsInstalled() -> Bool {
+        FileManager.default.fileExists(atPath: helperInstallPath)
     }
 
     /// 探测 helper 版本，对 unreachable 做一次重试。

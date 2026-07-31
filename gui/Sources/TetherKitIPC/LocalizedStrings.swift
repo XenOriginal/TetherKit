@@ -101,6 +101,7 @@ public enum L10nKey: String, CaseIterable, Sendable {
 
     case helperConnectFailed
     case helperReplyUnparsable
+    case helperBinaryMissing
     case installerNoPayload
     case installerAPIUnavailable
     case installerLaunchFailed
@@ -416,6 +417,13 @@ extension L10nKey {
         case .helperReplyUnparsable:
             return ("特权组件的应答无法解析，可能是版本不一致",
                     "The helper's reply could not be parsed; the versions may not match")
+        case .helperBinaryMissing:
+            return ("特权组件未安装：找不到 /Library/PrivilegedHelperTools/com.tetherkit.helper。"
+                    + "点击下方「安装特权组件」按钮，或在终端执行 sudo 安装脚本。",
+                    "The privileged helper is not installed: "
+                    + "/Library/PrivilegedHelperTools/com.tetherkit.helper is missing. "
+                    + "Click “Install privileged component” below, or run the install "
+                    + "script with sudo in a terminal.")
         // 这两条各自都以「请改用终端」收尾，因此把两句合成一条 —— 拆成两半再拼
         // 的话，中文之间不该有空格、英文之间必须有，join 的写法一定会错一边。
         case .installerNoPayload:
