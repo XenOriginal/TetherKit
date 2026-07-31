@@ -80,47 +80,90 @@ public enum AuthorizationBroker {
         }
     }
 
-    /// 弹出系统授权框，成功后返回持有这次授权的令牌。
+    /// 尝试获取授权，优先静默（不弹框），仅在必要时才弹出系统授权框。
     ///
-    /// ★ 令牌应当被**缓存复用**，而不是每次操作重新取一次 ★
+    /// ★ 为什么分两趟 ★
+    ///   macOS 的 securityd 会在登录会话内缓存近期成功的管理员认证。
+    ///   对 `system.privilege.admin` 这条权利，缓存的典型窗口是 5 分钟（可被
+    ///   系统管理员通过 /etc/authorization 改动）。如果用户在本会话中最近输入过
+    ///   密码（无论是给 TetherKit、sudo 还是其他工具），不带 .interactionAllowed
+    ///   的 AuthorizationCopyRights 可以直接命中缓存、不弹任何 UI。
     ///
-    ///   `system.privilege.admin` 这条规则的实测参数是 `shared = false`、
-    ///   `timeout = 300`：
-    ///     * `shared = false` —— 凭据**不跨 AuthorizationRef 共享**。每次
-    ///       `AuthorizationCreate` 建一个新 ref，就必然要用户重新认证一次。
-    ///     * `timeout = 300` —— 但在**同一个 ref** 上，凭据 5 分钟内有效。
+    ///   这就是为什么「每次连接都弹密码框」的根本原因不是安全策略太严，
+    ///   而是我们的代码**每次都带 .interactionAllowed** —— 这个标志的意思是
+    ///   「必须弹框交互」，securityd 即使有缓存也会照弹不误。
     ///
-    ///   所以「连接、配网络、断开」各弹一次框，纯粹是因为我们每次都新建 ref。
-    ///   复用同一个令牌，5 分钟内只需要认证一次。这也是 Apple 自己在
-    ///   EvenBetterAuthorizationSample 里的做法。
+    /// ★ 调用方必须让令牌活到 XPC 往返结束之后。★
     ///
-    ///   过期之后 helper 侧的复核会失败，调用方据此丢弃缓存、重新取一次即可。
+    /// - Parameter right: 要取得的权利名，默认为 HelperConstants 定义的管理员权利。
+    /// - Parameter prompt: 弹框时显示的说明文字。静默成功时不使用。
+    /// - Parameter allowInteraction: 是否允许弹框。传 false 可用于「仅在有缓存时
+    ///   才继续」的场景（如自动应用）。
     ///
-    /// ⚠️ **调用方必须让令牌活到 XPC 往返结束之后。** 令牌一释放，securityd 里的
-    /// 授权就没了，helper 还原外部形式时会报 `errAuthorizationDenied (-60005)`。
-    ///
-    /// - Parameter prompt: 显示在系统授权框里的一句说明，告诉用户这次授权是干
-    ///   什么用的。不传的话框里只有干巴巴的「想要进行更改」。
-    ///
-    /// 必须在主线程调用 —— 它会呈现 UI。
+    /// 必须在主线程调用 —— 它可能呈现 UI。
     public static func requestAuthorization(
         right: String = HelperConstants.privilegedRightName,
-        prompt: String? = nil
+        prompt: String? = nil,
+        allowInteraction: Bool = true
+    ) throws -> AuthorizationToken {
+        // 第一趟：静默尝试。不弹框，只查 securityd 的会话级缓存。
+        if let token = trySilentAuthorization(right: right) {
+            return token
+        }
+
+        // 第二趟：缓存未命中，需要用户交互（或调用方明确禁止交互）。
+        guard allowInteraction else {
+            throw Failure.denied(errAuthorizationInteractionNotAllowed)
+        }
+
+        return try requestInteractiveAuthorization(right: right, prompt: prompt)
+    }
+
+    /// 不带 .interactionAllowed 的静默授权尝试。
+    ///
+    /// 成功条件：securityd 在当前登录会话中持有该权利的有效缓存凭证。
+    /// 典型场景：用户最近 5 分钟内（默认窗口）在任意地方输入过管理员密码。
+    ///
+    /// 返回 nil 而不是抛错：缓存未命中是正常情况，不应被视为错误。
+    private static func trySilentAuthorization(right: String) -> AuthorizationToken? {
+        var authorization: AuthorizationRef?
+        let createStatus = AuthorizationCreate(nil, nil, [], &authorization)
+        guard createStatus == errAuthorizationSuccess, let authorization else { return nil }
+        var handedOff = false
+        defer {
+            if !handedOff { AuthorizationFree(authorization, [.destroyRights]) }
+        }
+
+        let copyStatus = copyRights(authorization, right: right, prompt: nil,
+                                     interactionAllowed: false)
+        guard copyStatus == errAuthorizationSuccess else { return nil }
+
+        var external = AuthorizationExternalForm()
+        let externalStatus = AuthorizationMakeExternalForm(authorization, &external)
+        guard externalStatus == errAuthorizationSuccess else { return nil }
+
+        handedOff = true
+        return AuthorizationToken(authorization: authorization,
+                                  externalForm: withUnsafeBytes(of: &external) { Data($0) })
+    }
+
+    /// 带交互（弹框）的授权请求。仅在静默尝试失败后才走到这里。
+    private static func requestInteractiveAuthorization(
+        right: String,
+        prompt: String?
     ) throws -> AuthorizationToken {
         var authorization: AuthorizationRef?
         let createStatus = AuthorizationCreate(nil, nil, [], &authorization)
         guard createStatus == errAuthorizationSuccess, let authorization else {
             throw Failure.internalFailure(createStatus)
         }
-        // 失败路径上要立刻释放；成功路径上所有权交给 AuthorizationToken。
         var handedOff = false
         defer {
-            if !handedOff {
-                AuthorizationFree(authorization, [.destroyRights])
-            }
+            if !handedOff { AuthorizationFree(authorization, [.destroyRights]) }
         }
 
-        let copyStatus = copyRights(authorization, right: right, prompt: prompt)
+        let copyStatus = copyRights(authorization, right: right, prompt: prompt,
+                                     interactionAllowed: true)
         guard copyStatus == errAuthorizationSuccess else {
             throw copyStatus == errAuthorizationCanceled
                 ? Failure.userCancelled
@@ -138,14 +181,21 @@ public enum AuthorizationBroker {
                                   externalForm: withUnsafeBytes(of: &external) { Data($0) })
     }
 
-    /// 请求权利，必要时弹框。
+    /// 请求权利，控制是否弹框。
     ///
     /// 单独抽出来是因为环境项的构造要嵌好几层 `withUnsafe*` —— 那些缓冲必须活
     /// 到 `AuthorizationCopyRights` 返回之后，写在主流程里很容易被后来的人
     /// 「顺手整理」成悬垂指针。
+    ///
+    /// - Parameters:
+    ///   - authorization: 要取得权利的 AuthorizationRef。
+    ///   - right: 权利名（如 system.privilege.admin）。
+    ///   - prompt: 授权框里的说明文字。nil 时不传环境变量（框里只有默认文案）。
+    ///   - interactionAllowed: 是否允许弹框。false = 纯静默查询 securityd 缓存。
     private static func copyRights(_ authorization: AuthorizationRef,
                                    right: String,
-                                   prompt: String?) -> OSStatus {
+                                   prompt: String?,
+                                   interactionAllowed: Bool) -> OSStatus {
         var name = Array(right.utf8CString)
         var promptKey = Array(kAuthorizationEnvironmentPrompt.utf8CString)
         var promptValue = Array(prompt?.utf8 ?? "".utf8)
@@ -156,10 +206,10 @@ public enum AuthorizationBroker {
             return withUnsafeMutablePointer(to: &rightItem) { rightPointer in
                 var rights = AuthorizationRights(count: 1, items: rightPointer)
 
-                // App 侧**要**带 .interactionAllowed —— 弹框正是我们要的。
-                // .preAuthorize 让权利当场就被授予，而不是等到真正使用时，
-                // 这样凭据才会进入这个 ref 的缓存、供后续操作复用。
-                let flags: AuthorizationFlags = [.extendRights, .interactionAllowed, .preAuthorize]
+                var flags: AuthorizationFlags = [.extendRights, .preAuthorize]
+                if interactionAllowed {
+                    flags.insert(.interactionAllowed)
+                }
 
                 guard prompt != nil else {
                     return AuthorizationCopyRights(authorization, &rights, nil, flags, nil)

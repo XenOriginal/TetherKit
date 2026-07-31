@@ -477,9 +477,14 @@ final class AppModel {
             // App 启动时若会话已经在跑（previousStatus == nil），则跳过自动应用：
             // 自动应用需要授权，而缓存的授权在 App 退出后已失效；若此时触发，
             // 用户一打开程序就会弹密码框。新连接在 App 运行期间建立时正常自动应用。
+            //
+            // 使用 allowInteraction: false：自动应用是静默操作，不应主动弹授权框。
+            // 若 securityd 有近期缓存则静默成功；无缓存则跳过，用户可手动点 Apply。
             if autoApplyEnabled && !autoAppliedForCurrentSession && previousStatus != nil {
                 autoAppliedForCurrentSession = true
-                Task { await applyNetworkConfiguration() }
+                Task { await self.authorized(allowInteraction: false) { authorization in
+                    await self.applyNetworkConfiguration()
+                } }
             }
         } else if fresh.runState != .running, fresh.runState != .stopping {
             sessionStartedAt = nil
@@ -853,34 +858,32 @@ final class AppModel {
         return kept.isEmpty ? L(.scriptNoOutput) : kept
     }
 
-    /// 带着授权凭据执行一次特权操作，必要时才弹系统授权框。
+    /// 带着授权凭据执行一次特权操作，优先静默（不弹框），必要时才弹系统授权框。
     ///
-    /// ★ 为什么缓存令牌 ★
-    ///   `system.privilege.admin` 的实测参数是 `shared = false`、`timeout = 300`。
-    ///   `shared = false` 意味着凭据**不跨 AuthorizationRef 共享** —— 每次操作
-    ///   新建一个 ref，就必然要用户重新认证一次，于是「连接、配网络、断开」
-    ///   会连弹三次框。而 `timeout = 300` 意味着同一个 ref 上的凭据 5 分钟内
-    ///   一直有效。
+    /// ★ 为什么静默优先能大幅减少弹框 ★
     ///
-    ///   所以缓存令牌复用：第一次操作弹一次框，之后 5 分钟内都不用再弹。
-    ///   过期后 helper 的复核会失败并明确告知「这是授权问题」，我们据此丢弃
-    ///   缓存、重新弹一次框、把这次操作重试一遍 —— 用户看到的仍然是「操作前
-    ///   弹了一次框」，而不是一个莫名其妙的失败。
+    ///   macOS 的 securityd 会在登录会话内缓存近期成功的管理员认证（类似 sudo
+    ///   的 5 分钟窗口）。只要用户在本会话中最近输入过密码——无论是给 TetherKit、
+    ///   终端 sudo 还是任何其他工具——不带 .interactionAllowed 的
+    ///   AuthorizationCopyRights 就可以直接命中缓存，不弹任何 UI。
     ///
-    /// ★ 为什么不能自己接住凭据再用 ★
-    ///   外部形式只是指向 securityd 里那份授权的一把钥匙，不是凭据本身。
-    ///   AuthorizationRef 一释放，helper 还原时就会报 -60005。所以令牌由
-    ///   `cachedAuthorization` 持有，并用 `withExtendedLifetime` 保证它活到
-    ///   XPC 往返结束之后。
+    ///   旧代码每次都带 .interactionAllowed（「必须弹框」），所以即使 securityd
+    ///   有缓存也会弹。改成静默优先后：
+    ///     * 同一会话内刚输过密码 → 静默命中，零弹框
+    ///     * 缓存过期（~5分钟无管理员操作）→ 回退到交互式授权，弹一次框
+    ///     * App 重启后若缓存仍有效 → 同样静默命中
+    ///
+    /// ★ 令牌缓存（cachedAuthorization）仍然保留 ★
+    ///   它覆盖的是同一 ref 上的 5 分钟窗口：第一次操作取到令牌后，后续操作在
+    ///   令牌有效期内连静默查询都不用做，直接复用。两层机制叠加：
+    ///   令牌缓存 → 静默查询 → 交互式弹框，逐级降级。
     ///
     /// 用户取消时**不**弹错误提示 —— 取消是正常操作，再弹一个「已取消」的框
     /// 只会烦人。
-    private func authorized(_ body: @escaping (Data) async throws -> Void) async {
+    private func authorized(_ body: @escaping (Data) async throws -> Void,
+                            allowInteraction: Bool = true) async {
         // 第一趟：有缓存就直接用，不打扰用户。
         if let cached = cachedAuthorization {
-            // withExtendedLifetime 不能接 async 闭包，所以用 defer 把令牌钉到
-            // 作用域结束 —— 光靠局部 let 不够，ARC 可以在最后一次读
-            // externalForm 之后就释放它，而那时 XPC 往返还没回来。
             defer { withExtendedLifetime(cached) {} }
             do {
                 try await body(cached.externalForm)
@@ -894,10 +897,11 @@ final class AppModel {
             }
         }
 
-        // 第二趟：弹框取新凭据，然后执行（或重试）。
+        // 第二趟：请求新凭据（静默优先，根据 allowInteraction 决定是否允许弹框）。
         do {
             let token = try AuthorizationBroker.requestAuthorization(
-                prompt: Self.authorizationPrompt)
+                prompt: Self.authorizationPrompt,
+                allowInteraction: allowInteraction)
             defer { withExtendedLifetime(token) {} }
             cachedAuthorization = token
             try await body(token.externalForm)
