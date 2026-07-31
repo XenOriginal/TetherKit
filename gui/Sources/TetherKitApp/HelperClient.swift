@@ -45,12 +45,23 @@ final class HelperClient {
     ///
     /// XPC 的错误块和 reply 块存在都被调用的可能，而重复 resume 会崩溃 ——
     /// 这个坑只在「请求发出后连接才断」这种时序上出现，很难靠测试撞到。
+    ///
+    /// ★ 超时取消 ★
+    ///   持有超时守卫 Task 的引用。正常路径（reply/错误先到）在 take() 时
+    ///   取消该 Task，避免它挂起 10 秒等 sleep 完成再执行 no-op resume。
+    ///   这消除了 1 Hz 轮询下每秒 2~4 个 lingering Task 的调度开销。
     private final class ContinuationGuard<T>: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<T, Error>?
+        /// 超时守卫 Task，正常回复后立刻取消。
+        private var timeoutTask: Task<Void, Never>?
 
         init(_ continuation: CheckedContinuation<T, Error>) {
             self.continuation = continuation
+        }
+
+        func setTimeoutTask(_ task: Task<Void, Never>) {
+            lock.withLock { self.timeoutTask = task }
         }
 
         func resume(returning value: T) {
@@ -63,7 +74,12 @@ final class HelperClient {
 
         private func take() -> CheckedContinuation<T, Error>? {
             lock.withLock {
-                defer { continuation = nil }
+                defer {
+                    continuation = nil
+                    // 正常路径：取消超时守卫，不再需要它。
+                    timeoutTask?.cancel()
+                    timeoutTask = nil
+                }
                 return continuation
             }
         }
@@ -114,12 +130,15 @@ final class HelperClient {
         try await withCheckedThrowingContinuation { continuation in
             let guarded = ContinuationGuard(continuation)
 
-            // 超时守卫：10 秒后若 continuation 仍未被 resume，强制以超时错误兑现
-            Task {
+            // 超时守卫：10 秒后若 continuation 仍未被 resume，强制以超时错误兑现。
+            // 正常路径（reply/错误先到）会在 ContinuationGuard.take() 里取消此 Task，
+            // 避免它挂起 10 秒做无意义的 sleep + no-op resume。
+            let timeoutTask = Task { [weak guarded] in
                 try? await Task.sleep(for: .seconds(10))
-                guarded.resume(throwing: Failure.unreachable(
+                guarded?.resume(throwing: Failure.unreachable(
                     "XPC call timed out after 10 s — helper may have crashed"))
             }
+            guarded.setTimeoutTask(timeoutTask)
 
             let proxy = connection().remoteObjectProxyWithErrorHandler { error in
                 guarded.resume(throwing: Failure.unreachable(error.localizedDescription))

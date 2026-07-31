@@ -193,8 +193,19 @@ private struct StatusRing: View {
         } else {
             rotation = 0
         }
-        withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
-            breathing = isActive
+        // 只在活跃（运行中 + 链路 up）时注册呼吸动画。
+        // 旧代码无条件执行 withAnimation(.repeatForever)，
+        // 导致非活跃状态也在 compositor 层注册了一个 perpetual 动画（即使值不变），
+        // 白白消耗渲染资源。
+        if isActive {
+            withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
+                breathing = true
+            }
+        } else {
+            // 显式移除 repeatForever：赋一个不带动画的终值，SwiftUI 会取消之前的循环动画。
+            withAnimation(.easeOut(duration: 0.3)) {
+                breathing = false
+            }
         }
     }
 }
