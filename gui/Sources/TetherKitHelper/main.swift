@@ -61,8 +61,7 @@ signal(SIGTERM, SIG_IGN)
 let terminationSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 terminationSource.setEventHandler {
     writeToStandardError(L(.helperSigtermReceived))
-    service.shutdown()
-    exit(0)
+    service.gracefulExit(reason: "SIGTERM received")
 }
 terminationSource.resume()
 
@@ -75,6 +74,10 @@ writeToStandardError(L(.helperReady, TetherKitLibrary.versionInfo.version))
 // 启动空闲自退出检查。会话运行期间不会退出；App 退出后若 helper 没人管，
 // 60 秒无 XPC 活动也会自己结束，避免变成后台僵尸还烧 CPU。
 service.scheduleIdleTimeout()
+
+// 启动心跳超时检查。GUI 每 3 秒发一次心跳；若连续 10 秒未收到，
+// 判定 GUI 已异常退出，自动断开连接并销毁 feth 网卡后退出。
+service.scheduleHeartbeatCheck()
 
 // 阻塞在主 runloop 上。
 dispatchMain()

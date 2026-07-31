@@ -35,6 +35,22 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     /// 无会话运行且无 XPC 活动时，经过多久自动退出（秒）。
     private static let idleTimeout: TimeInterval = 60
 
+    // MARK: - 心跳检测
+
+    /// 最后一次收到 GUI 心跳的时刻。
+    private let heartbeatLock = NSLock()
+    private var lastHeartbeat = Date()
+
+    /// 连续未收到心跳多少秒后判定 GUI 已死、helper 自行退出（秒）。
+    ///
+    /// 取值需大于 GUI 的心跳发送间隔（3 秒），留出网络抖动和调度延迟的余量。
+    /// 10 秒意味着 GUI 要连续丢失 3~4 个心跳才会触发退出——足够区分
+    /// 「真的崩了」和「暂时卡顿」。
+    private static let heartbeatTimeout: TimeInterval = 10
+
+    /// 心跳超时检查是否已启动（避免重复调度）。
+    private var heartbeatCheckScheduled = false
+
     /// 当前连上来的 App 连接。helper 仅服务 TetherKit 一个客户端，理论上同时
     /// 只有一条；但 App 崩溃重启时旧连接先失效、新连接紧接着来，会短暂出现两条。
     /// 用 ObjectIdentifier 做键，因为 NSXPCConnection 本身不可 Hash。
@@ -255,9 +271,21 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         bumpActivity()
         reply()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.shutdown()
-            exit(0)
+            self?.gracefulExit(reason: "quit requested by GUI")
         }
+    }
+
+    /// 收到 GUI 心跳。**不要求授权**。
+    ///
+    /// 每次调用都刷新心跳时钟，并启动超时检查（若尚未启动）。
+    func heartbeat(reply: @escaping () -> Void) {
+        bumpActivity()
+        heartbeatLock.withLock { lastHeartbeat = Date() }
+        if !heartbeatCheckScheduled {
+            heartbeatCheckScheduled = true
+            scheduleHeartbeatCheck()
+        }
+        reply()
     }
 
     /// 收到 SIGTERM（`launchctl bootout`）时调用。
@@ -271,6 +299,19 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
             return self.session
         }
         session?.stop()
+    }
+
+    /// 统一退出路径：先断开连接（销毁 feth 网卡），再退出进程。
+    ///
+    /// 所有退出入口（quit / heartbeat-timeout / orphan / SIGTERM）都汇聚到这里，
+    /// 确保资源清理顺序一致：disconnect → cleanup → exit。
+    func gracefulExit(reason: String) {
+        writeToStandardError("TetherKit helper exiting: \(reason)")
+        // 第一步：断开会话 —— 这会触发 Runtime::Teardown()，
+        // 内部执行 SIOCIFDESTROY 销毁 feth0/feth1。
+        shutdown()
+        // 第二步：退出进程。
+        exit(0)
     }
 
     /// 启动空闲自退出检查。
@@ -296,12 +337,34 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
         if !sessionRunning && idle >= Self.idleTimeout {
             writeToStandardError("TetherKit helper idle timeout reached; exiting.")
-            shutdown()
-            exit(0)
+            gracefulExit(reason: "idle timeout (\(Self.idleTimeout)s no activity)")
         }
 
         // 还不该退，继续下一轮检查。
         scheduleIdleTimeout()
+    }
+
+    // MARK: - 心跳超时检查
+
+    /// 启动心跳超时检查循环。
+    func scheduleHeartbeatCheck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.heartbeatTimeout) { [weak self] in
+            self?.checkHeartbeatTimeout()
+        }
+    }
+
+    private func checkHeartbeatTimeout() {
+        let elapsed = heartbeatLock.withLock { Date().timeIntervalSince(lastHeartbeat) }
+
+        if elapsed >= Self.heartbeatTimeout {
+            // 连续 N 秒未收到心跳 → GUI 已死。执行 disconnect → cleanup → exit。
+            writeToStandardError("TetherKit helper: no heartbeat for \(Int(elapsed))s; assuming GUI is gone.")
+            gracefulExit(reason: "heartbeat timeout (\(Int(elapsed))s >= \(Self.heartbeatTimeout)s)")
+            return  // exit(0) 已执行，不会回来
+        }
+
+        // 心跳还在，继续下一轮检查。
+        scheduleHeartbeatCheck()
     }
 
     // MARK: - 客户端连接生命周期
@@ -341,8 +404,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
             guard let self else { return }
             self.connectionLock.withLock { self.pendingExitWorkItem = nil }
             writeToStandardError(L(.helperClientGoneExiting))
-            self.shutdown()
-            exit(0)
+            self.gracefulExit(reason: "all XPC connections gone (\(Self.clientGoneGraceSeconds)s grace)")
         }
         connectionLock.withLock { pendingExitWorkItem = item }
         DispatchQueue.global().asyncAfter(deadline: .now() + Self.clientGoneGraceSeconds,

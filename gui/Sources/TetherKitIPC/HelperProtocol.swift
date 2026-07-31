@@ -87,4 +87,16 @@ import Foundation
     /// 之外只能做同样能造成 DoS 的事（比如反复连上断下）。真正的特权操作
     ///（startSession / applyNetwork 等）仍要求授权复核。
     func quit(reply: @escaping () -> Void)
+
+    /// GUI → helper 心跳。**不要求授权**。
+    ///
+    /// GUI 在 helper 可用期间定期（每 3 秒）调用此接口，告知 helper「我还活着」。
+    /// helper 记录最后收到心跳的时刻；若连续 **heartbeatTimeout** 秒未收到，
+    /// 则判定 GUI 已异常退出（崩溃、强杀、断电等），自动执行：
+    ///   1. stopSession —— 断开连接、销毁 feth0/feth1 网卡
+    ///   2. exit(0) —— 进程退出
+    ///
+    /// 这是对 XPC invalidationHandler 的补充：某些场景下 XPC 连接的失效回调
+    /// 可能不触发（权限隔离、进程被 SIGKILL 等），心跳超时是更可靠的兜底。
+    func heartbeat(reply: @escaping () -> Void)
 }

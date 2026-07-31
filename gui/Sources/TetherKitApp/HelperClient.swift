@@ -224,6 +224,14 @@ final class HelperClient {
         }
     }
 
+    /// 向 helper 发送心跳。**失败静默** —— 心跳丢失一两次不影响正确性，
+    /// 超时阈值（10 秒）本身就容忍了偶发丢失。
+    func sendHeartbeat() async {
+        _ = try? await invoke { proxy, guarded in
+            proxy.heartbeat { guarded.resume(returning: ()) }
+        }
+    }
+
     // MARK: - 特权操作（需要授权凭据）
 
     func startSession(authorization: Data, configuration: SessionConfiguration) async throws {

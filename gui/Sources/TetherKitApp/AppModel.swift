@@ -178,6 +178,9 @@ final class AppModel {
 
     private let client = HelperClient()
     private var pollingTask: Task<Void, Never>?
+    /// 心跳任务：每 3 秒向 helper 发一次心跳，让 helper 确认 GUI 还活着。
+    /// helper 在连续 10 秒未收到心跳时会自动断开连接并退出。
+    private var heartbeatTask: Task<Void, Never>?
     /// 上一次的状态快照，用来做差算速率。
     private var previousStatus: SessionStatus?
     private var sessionStartedAt: Date?
@@ -274,6 +277,16 @@ final class AppModel {
                 try? await Task.sleep(for: self.pollDelay)
             }
         }
+        // 心跳：每 3 秒发一次。只在 helper 可用时发送（失败静默）。
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.helperAvailability.isAvailable {
+                    await self.client.sendHeartbeat()
+                }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
         restoreKnownUpdate()
         Task { await checkForUpdatesQuietly() }
     }
@@ -283,12 +296,19 @@ final class AppModel {
         pollingTask = nil
     }
 
-    /// App 完全退出时调用：停轮询，并请求 helper 一起退出。
+    /// 停止心跳定时器。
+    private func stopHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+    }
+
+    /// App 完全退出时调用：停轮询、停心跳，并请求 helper 一起退出。
     ///
     /// helper 是 LaunchDaemon，App 退出后它本会继续挂在后台；调用 quit() 可以让
     /// 它先停掉可能正在跑的会话、销毁虚拟网卡，再结束进程。
     func quitHelper() async {
         stopPolling()
+        stopHeartbeat()
         _ = try? await client.quit()
     }
 

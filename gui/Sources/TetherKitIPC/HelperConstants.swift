@@ -39,7 +39,8 @@ public enum HelperConstants {
     ///   3 —— 新增 setLanguage，让 helper 的提示与库日志跟随界面语言
     ///   4 —— 新增 applyNetworkV6 / queryNetworkV6，支持 IPv6 取址与 DNS
     ///   5 —— 新增 quit() 与 helper 空闲自退出，修复 App 退出后 helper 残留
-    public static let protocolRevision = 5
+    ///   6 —— 新增 heartbeat() 心跳检测，helper 在 GUI 失联后自动退出
+    public static let protocolRevision = 6
 
     /// 把修订号编进版本串。
     ///
