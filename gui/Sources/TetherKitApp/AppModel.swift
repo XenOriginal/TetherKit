@@ -328,7 +328,7 @@ final class AppModel {
 
     private func refresh() async {
         do {
-            let (revision, version) = HelperConstants.decodeVersion(try await client.helperVersion())
+            let (revision, version) = try await probeHelperVersion()
             guard revision == HelperConstants.protocolRevision else {
                 helperAvailability = .outdated(installed: revision,
                                                expected: HelperConstants.protocolRevision)
@@ -395,6 +395,24 @@ final class AppModel {
         } else {
             networkState = .empty
             networkStateV6 = .empty
+        }
+    }
+
+    /// 探测 helper 版本，对「连不上」做一次性的重试。
+    ///
+    /// on-demand 的 LaunchDaemon 在 App 启动首连时可能还没被 launchd 拉起来，
+    /// 第一次 XPC 往返会超时 / 报 unreachable。若立刻把它判成「未安装」，主界面
+    /// 会闪一下安装卡、多出一次无谓的密码框。这里等约 0.6 秒让 launchd 把服务
+    /// 拉起后再试一次，绝大多数情况就能连上，避免误报。
+    ///
+    /// ★ 只对 unreachable 重试 ★：协议号不一致（revision mismatch）是确定性的
+    /// 「该更新组件」信号，不该被重试掩盖；所以只吞 unreachable 这一类瞬态错误。
+    private func probeHelperVersion() async throws -> (revision: Int, version: String) {
+        do {
+            return HelperConstants.decodeVersion(try await client.helperVersion())
+        } catch let error as HelperClient.Failure where error.isUnreachable {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            return HelperConstants.decodeVersion(try await client.helperVersion())
         }
     }
 
