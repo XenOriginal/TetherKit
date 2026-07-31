@@ -26,6 +26,16 @@ constexpr std::uint32_t kTxCapacityWaitMillis = 50;
 /// 次数（降 CPU），又不明显增加延迟（上限 200 µs）。空闲时另有 1 ms 兜底睡眠。
 constexpr std::uint32_t kRxPartialBatchYieldMicros = 200;
 
+/// 每次成功写出一批（包括满批）后的基础让出时间（微秒）。
+///
+/// 活跃转发时 RX 队列永远不空、每批都凑满，旧代码只在「部分批」才让出，
+/// 导致满批路径退化为纯忙循环 —— 实测 helper 占 73%+ CPU。
+///
+/// 加上这个固定微睡眠后，即使持续满批也能把迭代频率从「每秒百万次」压到
+/// 「每秒数万次」，CPU 降到合理水平。10 µs 对单包延迟的影响在噪声范围内
+/// （USB bulk 一次传输本身就要几十到几百 µs），但对 CPU 占用是数量级改善。
+constexpr std::uint32_t kRxBatchWriteYieldMicros = 10;
+
 /// 把字节数换算成 Mbps。
 [[nodiscard]] double ToMegabitsPerSecond(std::uint64_t bytes, double seconds) {
   if (seconds <= 0.0) {
@@ -196,11 +206,22 @@ void Bridge::RunReceiveInjector() noexcept {
         // ReadFrames 的结果里更新，这里不碰它。
       }
 
-      // 没凑满一批（队列里就那么几帧）说明此刻流量稀疏或突发。让出极短时间
-      // 让下一波帧聚合，减少 BPF write() 系统调用次数 —— 实机下能把 RX 方向
-      // 的 CPU 占用显著压下来，又不增加可感知的延迟（上限 kRxPartialBatchYieldMicros）。
-      if (result && rx_batch_.size() < config_.tx_write_batch) {
-        std::this_thread::sleep_for(std::chrono::microseconds(kRxPartialBatchYieldMicros));
+      // 每次写出一批后都让出，避免活跃转发时退化为纯忙循环。
+      //
+      // 旧逻辑只在「部分批」（size < tx_write_batch）才 sleep_for(200µs)，
+      // 但持续转发时队列永远不空、每批都凑满 —— 那条路径永远不会触发，
+      // RX 线程变成零睡眠纯忙等，实测 helper 占 73%+ CPU。
+      //
+      // 新逻辑：
+      //   • 部分批（流量稀疏/突发）：让出 200 µs，给后续帧聚合时间，
+      //     减少 BPF write() 系统调用频率；
+      //   • 满批（持续转发）：也让出 10 µs。这个值对单包延迟的影响在
+      //     USB bulk 传输本身的噪声范围内（几十~几百 µs），但能把迭代
+      //     频率从「每秒百万次」压到「十万次以下」，CPU 占用数量级下降。
+      const bool was_partial = rx_batch_.size() < config_.rx_write_batch;
+      if (result) {
+        std::this_thread::sleep_for(std::chrono::microseconds(
+            was_partial ? kRxPartialBatchYieldMicros : kRxBatchWriteYieldMicros));
       }
     }  // 批量会话析构 → 一次 PublishRead(n)
   }

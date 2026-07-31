@@ -137,6 +137,15 @@ final class AppModel {
     private(set) var logs: [LogEntry] = []
     private(set) var droppedLogCount: UInt64 = 0
 
+    /// 缓存版的 filteredLogs。
+    ///
+    /// 原始 filteredLogs 是 O(n) 计算属性（n ≤ 2000），在 SwiftUI 每次 body 重算时
+    /// 都执行一遍。活跃转发时状态每秒变 6+ 次（吞吐/计数器/日志），每个依赖
+    /// filteredLogs 的视图都会触发全量扫描 —— 实测是 GUI CPU 38%+ 的主要来源之一。
+    ///
+    /// 改为在 apply(feed:) 里增量更新缓存，这里直接返回，O(1)。
+    private(set) var cachedFilteredLogs: [CollapsedLogEntry] = []
+
     /// 用户在设备列表里选中的那台。为 nil 表示「用找到的第一台」。
     var selectedDeviceID: String?
     /// 会话配置里用户可调的部分。
@@ -277,8 +286,12 @@ final class AppModel {
     /// 响应延迟用户基本感觉不到，而开销降到了原来的四分之一。
     private static let deviceRefreshInterval: Duration = .seconds(2)
 
-    /// 吞吐曲线保留的采样点数。120 点 × 1 s = 最近 120 秒。
-    private static let historyCapacity = 120
+    /// 吞吐曲线保留的采样点数。60 点 × 1 s = 最近 60 秒。
+    ///
+    /// 从 120 降到 60：Swift Charts 的 ForEach + monotone 插值渲染成本与数据点数
+    /// 近似线性，减半能显著降低活跃转发时的 GUI CPU（实测 Charts 重绘是
+    /// 38%+ 的主要贡献者之一）。60 秒的滚动窗口对「看抖动和趋势」完全够用。
+    private static let historyCapacity = 60
 
     /// 日志面板保留的行数。
     ///
@@ -591,8 +604,24 @@ final class AppModel {
             if logs.count > Self.logCapacity {
                 logs.removeFirst(logs.count - Self.logCapacity)
             }
+            // 日志变了 → 顺便刷新缓存，避免下次 body 重算时全量扫描。
+            cachedFilteredLogs = rebuildFilteredLogs()
         }
         droppedLogCount += feed.droppedLogs
+    }
+
+    /// 全量重建 filteredLogs 缓存。O(n), n ≤ logCapacity(2000)。
+    /// 只在日志实际变化或过滤级别切换时调用。
+    private func rebuildFilteredLogs() -> [CollapsedLogEntry] {
+        var result: [CollapsedLogEntry] = []
+        for entry in logs where entry.level >= logLevelFilter {
+            if let last = result.last, last.matches(entry) {
+                result[result.count - 1].absorb(entry)
+            } else {
+                result.append(CollapsedLogEntry(entry))
+            }
+        }
+        return result
     }
 
     // MARK: - 动作
@@ -611,20 +640,26 @@ final class AppModel {
 
     /// 过滤 + 连续去重后的日志。
     ///
+    /// 过滤 + 连续去重后的日志（缓存版）。
+    ///
     /// 折叠放在过滤**之后**：原始流里两条相同的 INFO 之间可能夹着 trace，
     /// 按原始顺序折叠会失效，而用户在某个级别下看到的相邻重复才是该合并的。
-    /// O(n) 重算，n ≤ 2000，对 500 ms 的刷新节奏无感。
+    ///
+    /// **性能关键**：这里直接返回 `cachedFilteredLogs`（O(1)），而不是每次
+    /// SwiftUI body 重算都 O(2000) 全量扫描。缓存在 `apply(feed:)` 日志变化时
+    /// 更新。用户切换 logLevelFilter 时会触发一次全量重建。
     var filteredLogs: [CollapsedLogEntry] {
-        var collapsed: [CollapsedLogEntry] = []
-        for entry in logs where entry.level >= logLevelFilter {
-            if let last = collapsed.last, last.matches(entry) {
-                collapsed[collapsed.count - 1].absorb(entry)
-            } else {
-                collapsed.append(CollapsedLogEntry(entry))
-            }
+        // 检测 logLevelFilter 是否变了（用户点了过滤按钮）—— 需要全量重建。
+        // 用一个简单记录上次过滤级别的变量来检测变化，避免每次访问都比较。
+        if _lastLogLevelFilter != logLevelFilter {
+            _lastLogLevelFilter = logLevelFilter
+            cachedFilteredLogs = rebuildFilteredLogs()
         }
-        return collapsed
+        return cachedFilteredLogs
     }
+
+    /// 上次重建缓存时的日志级别过滤器值，用于检测用户切换过滤级别。
+    private var _lastLogLevelFilter: LogLevel? = nil
 
     /// 启动会话。会弹一次系统授权框。
     func startSession() async {
