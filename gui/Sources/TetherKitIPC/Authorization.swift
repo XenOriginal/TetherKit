@@ -99,13 +99,25 @@ public enum AuthorizationBroker {
     /// - Parameter prompt: 弹框时显示的说明文字。静默成功时不使用。
     /// - Parameter allowInteraction: 是否允许弹框。传 false 可用于「仅在有缓存时
     ///   才继续」的场景（如自动应用）。
+    /// - Parameter password: 明文管理员密码（来自钥匙串）。传入时**不弹任何 UI**，
+    ///   用这组凭据静默取得授权；错误（密码错、被锁）一律抛 `.denied`，交给调用方
+    ///   决定是清掉失效的钥匙串项还是回退到交互式授权。
     ///
     /// 必须在主线程调用 —— 它可能呈现 UI。
     public static func requestAuthorization(
         right: String = HelperConstants.privilegedRightName,
         prompt: String? = nil,
-        allowInteraction: Bool = true
+        allowInteraction: Bool = true,
+        password: String? = nil
     ) throws -> AuthorizationToken {
+        // 密码路径：用明文密码（来自钥匙串）静默取得授权，绝不弹 UI。
+        if let password {
+            if let token = tryPasswordAuthorization(right: right, password: password) {
+                return token
+            }
+            throw Failure.denied(errAuthorizationDenied)
+        }
+
         // 第一趟：静默尝试。不弹框，只查 securityd 的会话级缓存。
         if let token = trySilentAuthorization(right: right) {
             return token
@@ -145,6 +157,90 @@ public enum AuthorizationBroker {
         handedOff = true
         return AuthorizationToken(authorization: authorization,
                                   externalForm: withUnsafeBytes(of: &external) { Data($0) })
+    }
+
+    /// 用明文密码（来自钥匙串）静默取得授权，不弹任何 UI。
+    ///
+    /// 原理：把用户名 + 密码放进 `AuthorizationEnvironment`，传给
+    /// `AuthorizationCopyRights` 并**不**带 `.interactionAllowed`。Security 服务器
+    /// 会用这组凭据认证 `system.privilege.admin`：密码正确则静默成功，错误则返回
+    /// 失败（随后由调用方清掉钥匙串里那条失效的密码）。
+    ///
+    /// 这是「把密码存进钥匙串、启动时自动加载」方案的关键一环：用户只在第一次
+    /// （或密码改了之后）亲手输一次密码，之后每次启动都走这条静默路径。
+    private static func tryPasswordAuthorization(right: String, password: String) -> AuthorizationToken? {
+        var authorization: AuthorizationRef?
+        let createStatus = AuthorizationCreate(nil, nil, [], &authorization)
+        guard createStatus == errAuthorizationSuccess, let authorization else { return nil }
+        var handedOff = false
+        defer {
+            if !handedOff { AuthorizationFree(authorization, [.destroyRights]) }
+        }
+
+        let copyStatus = copyRightsWithPassword(authorization, right: right, password: password,
+                                                interactionAllowed: false)
+        guard copyStatus == errAuthorizationSuccess else { return nil }
+
+        var external = AuthorizationExternalForm()
+        let externalStatus = AuthorizationMakeExternalForm(authorization, &external)
+        guard externalStatus == errAuthorizationSuccess else { return nil }
+
+        handedOff = true
+        return AuthorizationToken(authorization: authorization,
+                                  externalForm: withUnsafeBytes(of: &external) { Data($0) })
+    }
+
+    /// 带「用户名 + 密码」环境项的授权请求。钥匙串里的密码走这一条。
+    private static func copyRightsWithPassword(_ authorization: AuthorizationRef,
+                                               right: String,
+                                               password: String,
+                                               interactionAllowed: Bool) -> OSStatus {
+        var name = Array(right.utf8CString)
+        let username = NSUserName()
+
+        return name.withUnsafeMutableBufferPointer { nameBuffer in
+            var rightItem = AuthorizationItem(name: nameBuffer.baseAddress!, valueLength: 0,
+                                             value: nil, flags: 0)
+            return withUnsafeMutablePointer(to: &rightItem) { rightPointer in
+                var rights = AuthorizationRights(count: 1, items: rightPointer)
+
+                var flags: AuthorizationFlags = [.extendRights, .preAuthorize]
+                if interactionAllowed {
+                    flags.insert(.interactionAllowed)
+                }
+
+                var usernameKey = Array(kAuthorizationEnvironmentUsername.utf8CString)
+                var usernameValue = Array(username.utf8)
+                var passwordKey = Array(kAuthorizationEnvironmentPassword.utf8CString)
+                var passwordValue = Array(password.utf8)
+
+                return usernameKey.withUnsafeMutableBufferPointer { uk in
+                    usernameValue.withUnsafeMutableBufferPointer { uv in
+                        passwordKey.withUnsafeMutableBufferPointer { pk in
+                            passwordValue.withUnsafeMutableBufferPointer { pv in
+                                let usernameItem = AuthorizationItem(
+                                    name: uk.baseAddress!, valueLength: uv.count,
+                                    value: uv.baseAddress, flags: 0)
+                                let passwordItem = AuthorizationItem(
+                                    name: pk.baseAddress!, valueLength: pv.count,
+                                    value: pv.baseAddress, flags: 0)
+                                var envItems = [usernameItem, passwordItem]
+                                // count 提到闭包外取，避免和 withUnsafeMutableBufferPointer
+                                // 的独占访问冲突。
+                                let envCount = UInt32(envItems.count)
+                                return envItems.withUnsafeMutableBufferPointer { envBuffer in
+                                    var environment = AuthorizationEnvironment(
+                                        count: envCount,
+                                        items: envBuffer.baseAddress!)
+                                    return AuthorizationCopyRights(authorization, &rights, &environment,
+                                                                 flags, nil)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 带交互（弹框）的授权请求。仅在静默尝试失败后才走到这里。

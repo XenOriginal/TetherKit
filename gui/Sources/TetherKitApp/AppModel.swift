@@ -92,6 +92,19 @@ enum UpdateCheckResult: Equatable {
     case unavailable
 }
 
+/// 让用户输入管理员密码的弹窗状态。
+///
+/// 只在「钥匙串里没有可用密码」或「存的密码已经失效（用户改了管理员密码）」时
+/// 出现 —— 正常情况下自动加载钥匙串，根本不会看到它。凭据由 Security 服务器校验，
+/// 这里只负责把用户现输的密码交出去。
+struct CredentialPromptState: Identifiable {
+    let id = UUID()
+    /// 标题。
+    let title: String
+    /// 说明文字：首次是「请输入密码以便下次自动加载」，重试是「密码不正确」。
+    let message: String
+}
+
 /// 界面的全部状态与动作。
 ///
 /// ★ 为什么所有事都经过 helper，而不是 App 自己调库 ★
@@ -199,6 +212,22 @@ final class AppModel {
     /// 不自己记过期时间：系统的 timeout 由授权数据库控制（可能被管理员改），
     /// 我们自己算一份只会和系统不一致。以 helper 的复核结果为准更可靠。
     private var cachedAuthorization: AuthorizationToken?
+
+    /// 当前是否正在向用户索要密码（驱动 ContentView 的 sheet）。
+    ///
+    /// 与 `alertMessage` 一样走 `var`（而非 `private(set)`）：`.sheet(item:)` 在
+    /// 用户取消/提交后需要把绑定写回 nil 来关闭弹窗，需要可写绑定。
+    var credentialPrompt: CredentialPromptState?
+
+    /// 密码框里当前输入的明文。弹窗关闭即清空，不在内存里久留。
+    var credentialPassword: String = ""
+
+    /// 提交中 / 取消中：防止重复点击与「提交后又取消」的竞态。
+    var credentialSubmitting = false
+    var credentialCancelling = false
+
+    /// 密码输入框的异步等待点。用户提交或取消时 `resume`。
+    private var credentialContinuation: CheckedContinuation<String?, Never>?
 
     /// 系统授权框里显示的说明。
     ///
@@ -757,6 +786,11 @@ final class AppModel {
             let token: AuthorizationToken
             if let cached = cachedAuthorization {
                 token = cached
+            } else if let saved = CredentialStore.load(),
+                      let passwordToken = try? AuthorizationBroker.requestAuthorization(password: saved) {
+                // 钥匙串里有密码：静默取得，安装也免弹框。
+                token = passwordToken
+                cachedAuthorization = token
             } else {
                 token = try AuthorizationBroker.requestAuthorization(prompt: prompt)
                 cachedAuthorization = token
@@ -897,18 +931,98 @@ final class AppModel {
             }
         }
 
-        // 第二趟：请求新凭据（静默优先，根据 allowInteraction 决定是否允许弹框）。
-        do {
-            let token = try AuthorizationBroker.requestAuthorization(
-                prompt: Self.authorizationPrompt,
-                allowInteraction: allowInteraction)
-            defer { withExtendedLifetime(token) {} }
+        // 第二趟起：拿授权凭据。优先用钥匙串里存的密码静默取得；
+        // 存的不对或没有，再回到 TetherKit 自己的密码框（用户现输一次）。
+        var lastAttemptFailed = false
+        while true {
+            // 钥匙串里有密码：静默试一次，正确就直接用并把令牌缓存起来。
+            if let saved = CredentialStore.load(),
+               let token = try? AuthorizationBroker.requestAuthorization(password: saved) {
+                cachedAuthorization = token
+                defer { withExtendedLifetime(token) {} }
+                do {
+                    try await body(token.externalForm)
+                    return
+                } catch let failure as HelperClient.Failure where failure.isAuthorizationProblem {
+                    // 凭据被 helper 判为过期（极少）—— 清缓存重试。
+                    cachedAuthorization = nil
+                } catch {
+                    alertMessage = error.localizedDescription
+                    return
+                }
+            }
+
+            // 走到这里说明：钥匙串里没有密码，或存的密码已经失效。
+            // 没有交互权限（自动应用）就直接放弃，不弹框 —— 用户可手动点 Apply。
+            guard allowInteraction else { return }
+
+            // 失效的那条清掉，避免下次启动又用错误的试一次。
+            CredentialStore.delete()
+
+            // 弹 TetherKit 自己的密码框让用户现输一次（失败过就带「不正确」提示）。
+            // 取消则放弃本次授权，连接/应用照常跳过（可手动触发系统授权框）。
+            let entered = await requestPasswordFromUser(retry: lastAttemptFailed)
+            guard let entered, !entered.isEmpty else { return }
+
+            // 用刚输的密码静默取得授权。
+            guard let token = try? AuthorizationBroker.requestAuthorization(password: entered) else {
+                // 密码不对：记下来，下一轮带着「不正确」的提示再弹，让用户改。
+                // 用户可随时取消退出循环。
+                lastAttemptFailed = true
+                continue
+            }
+            // 密码对了：落盘钥匙串（下次启动自动加载），缓存令牌并继续。
+            CredentialStore.save(entered)
             cachedAuthorization = token
-            try await body(token.externalForm)
-        } catch AuthorizationBroker.Failure.userCancelled {
-            return
-        } catch {
-            alertMessage = error.localizedDescription
+            defer { withExtendedLifetime(token) {} }
+            do {
+                try await body(token.externalForm)
+                return
+            } catch {
+                alertMessage = error.localizedDescription
+                return
+            }
         }
+    }
+
+    /// 弹出 TetherKit 自己的密码框，等用户提交或取消，返回密码或 nil（取消）。
+    ///
+    /// 必须是 AppModel 自己收密码、而不是复用系统授权框：系统框的返回值里
+    /// 根本没有密码，我们拿不到可落盘的凭据；只有自己收一次，才能把密码存进
+    /// 钥匙串、实现「下次启动自动加载」。
+    private func requestPasswordFromUser(retry: Bool) async -> String? {
+        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            self.credentialContinuation = cont
+            // 重置框内状态，避免上一次输入残留。
+            self.credentialPassword = ""
+            self.credentialSubmitting = false
+            self.credentialCancelling = false
+            self.credentialPrompt = CredentialPromptState(
+                title: L(.credentialPromptTitle),
+                message: retry ? L(.credentialWrongMessage) : L(.credentialPromptMessage))
+        }
+    }
+
+    /// 用户在密码框里点了「确定」：把密码交出去，由上面的静默授权路径判断对不对 ——
+    /// 不对就带着重试文案再次弹出。
+    func submitCredential(_ password: String) {
+        let cont = credentialContinuation
+        credentialContinuation = nil
+        credentialPrompt = nil
+        credentialPassword = ""
+        credentialSubmitting = false
+        credentialCancelling = false
+        cont?.resume(returning: password)
+    }
+
+    /// 用户取消密码框：当次不授权。已存的失效密码顺手清掉，免得下次启动又试一次。
+    func cancelCredential() {
+        let cont = credentialContinuation
+        credentialContinuation = nil
+        credentialPrompt = nil
+        credentialPassword = ""
+        credentialSubmitting = false
+        credentialCancelling = false
+        cont?.resume(returning: nil)
     }
 }

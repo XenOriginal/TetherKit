@@ -62,6 +62,13 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case authorizationRestoreFailed
     case authorizationRightMissing
 
+    // MARK: - 凭据持久化（CredentialStore.swift / AppModel.swift）
+
+    case credentialPromptTitle
+    case credentialPromptMessage
+    case credentialWrongMessage
+    case credentialPromptPlaceholder
+
     // MARK: - 库错误（TetherKitError.swift）
 
     case libraryGenericFailure
@@ -356,6 +363,21 @@ extension L10nKey {
         case .authorizationRightMissing:
             return ("调用方没有执行该操作所需的授权（%ld）",
                     "The caller lacks the authorization this operation requires (%ld)")
+
+        // MARK: 凭据持久化
+
+        case .credentialPromptTitle: return ("管理员密码", "Administrator password")
+        case .credentialPromptMessage:
+            return ("请输入本机管理员密码。连接成功后会保存在系统钥匙串中，"
+                    + "下次启动将自动加载、无需再次输入。",
+                    "Enter this Mac's administrator password. After a successful connection it is "
+                    + "stored in the system Keychain, so future launches apply automatically "
+                    + "without prompting.")
+        case .credentialWrongMessage:
+            return ("密码不正确，请重新输入管理员密码。",
+                    "That password was incorrect. Please re-enter the administrator password.")
+        case .credentialPromptPlaceholder:
+            return ("管理员密码", "Administrator password")
 
         // MARK: 库错误
 

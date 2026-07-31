@@ -94,6 +94,15 @@ struct ContentView: View {
         } message: {
             Text(updateCheckDescription)
         }
+        // 让用户亲手输入管理员密码的弹窗：只在钥匙串里没有可用密码、或存的密码
+        // 已经失效时出现。正常路径下自动加载钥匙串，根本不会看到它。
+        .sheet(item: $model.credentialPrompt) { state in
+            CredentialPromptSheet(
+                state: state,
+                password: $model.credentialPassword,
+                onSubmit: { model.submitCredential($0) },
+                onCancel: { model.cancelCredential() })
+        }
     }
 
     /// 「检查更新」弹窗的正文。
@@ -421,5 +430,56 @@ private struct EnvironmentWarningCard: View {
                 }
             }
         }
+    }
+}
+
+/// 让用户亲手输入管理员密码的弹窗。
+///
+/// 之所以要 TetherKit 自己的输入框、而不是复用系统授权框：系统框的返回值里
+/// 根本没有密码，我们拿不到可落盘的凭据；只有自己收一次，才能把密码存进钥匙串、
+/// 实现「下次启动自动加载」。正常路径下用户只在首次（或改了管理员密码后）见它一次。
+private struct CredentialPromptSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let state: CredentialPromptState
+    @Binding var password: String
+    var onSubmit: (String) -> Void
+    var onCancel: () -> Void
+
+    @State private var submitting = false
+    @State private var cancelling = false
+
+    var body: some View {
+        VStack(spacing: Design.Spacing.medium) {
+            Text(state.title)
+                .font(.headline)
+            Text(state.message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            SecureField(L(.credentialPromptPlaceholder), text: $password)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 300)
+            HStack {
+                Button(L(.cancel), role: .cancel) {
+                    guard !submitting, !cancelling else { return }
+                    cancelling = true
+                    dismiss()
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(submitting || cancelling)
+                Button(L(.ok)) {
+                    guard !submitting, !cancelling else { return }
+                    submitting = true
+                    let value = password
+                    dismiss()
+                    onSubmit(value)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(password.isEmpty || submitting || cancelling)
+            }
+        }
+        .padding(Design.Spacing.large)
     }
 }
