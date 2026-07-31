@@ -78,7 +78,7 @@ struct MenuBarPanel: View {
             actions
         }
         .padding(Design.Spacing.medium)
-        .frame(width: 320)
+        .frame(width: 380)
         // 与主窗口同理：文案来自全局查表，改语言不会让任何 @Observable 属性
         // 「看起来」变了，得靠显式 identity 强制重建。面板本身会随轮询刷新，
         // 不加这行语言也会在下一个周期跟上 —— 但从面板里改语言时，用户盯着
@@ -173,8 +173,25 @@ struct MenuBarPanel: View {
         }
     }
 
-    /// 单行信息：标签 + 值（可选中文本）+ 复制按钮。
+    /// 单行信息：标签 + 值（可选中文本）+ 复制按钮（带反馈动画）。
     private func infoRow(label: String, value: String) -> some View {
+        InfoRowView(label: label, value: value)
+    }
+
+    // MARK: - InfoRowView（独立视图，持有复制反馈状态）
+
+/// 网络信息单行：标签 + 值 + 复制按钮。
+/// 点击复制后图标短暂变为绿色 ✓，1.5 秒后自动恢复，让用户确认操作成功。
+private struct InfoRowView: View {
+    let label: String
+    let value: String
+
+    @State private var copied = false
+
+    /// ✓ 反馈持续时间（秒）。
+    private static let feedbackDuration: Double = 1.5
+
+    var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Design.Spacing.tight) {
             Text(label)
                 .font(.caption2)
@@ -193,19 +210,32 @@ struct MenuBarPanel: View {
             // 复制按钮：仅在值非空时显示
             if !value.isEmpty {
                 Button {
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(value, forType: .string)
+                    copyToPasteboard()
                 } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 9, weight: copied ? .bold : .regular))
+                        .foregroundStyle(copied ? Color.green : Color.gray.opacity(0.5))
+                        .animation(.easeInOut(duration: 0.2), value: copied)
+                        .contentTransition(.symbolEffect(.replace))
                 }
                 .buttonStyle(.borderless)
-                .help(L(.copyValue))
+                .help(copied ? L(.copied) : L(.copyValue))
             }
         }
     }
+
+    private func copyToPasteboard() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(value, forType: .string)
+        copied = true
+        // 1.5 秒后自动恢复原始图标
+        Task {
+            try? await Task.sleep(for: .seconds(Self.feedbackDuration))
+            copied = false
+        }
+    }
+}
 
     private var idleHint: some View {
         Text(model.devices.isEmpty
