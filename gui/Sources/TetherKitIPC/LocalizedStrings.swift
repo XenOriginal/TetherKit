@@ -227,6 +227,7 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case quitTooltip
     case hideSpeed
     case showSpeed
+    case copyValue
 
     // MARK: - 网络卡（NetworkCard.swift）
 
@@ -665,6 +666,8 @@ extension L10nKey {
             return ("隐藏速率", "Hide speed")
         case .showSpeed:
             return ("显示速率", "Show speed")
+        case .copyValue:
+            return ("复制", "Copy")
 
         // MARK: 网络卡
 

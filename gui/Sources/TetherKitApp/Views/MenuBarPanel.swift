@@ -78,7 +78,7 @@ struct MenuBarPanel: View {
             actions
         }
         .padding(Design.Spacing.medium)
-        .frame(width: 280)
+        .frame(width: 320)
         // 与主窗口同理：文案来自全局查表，改语言不会让任何 @Observable 属性
         // 「看起来」变了，得靠显式 identity 强制重建。面板本身会随轮询刷新，
         // 不加这行语言也会在下一个周期跟上 —— 但从面板里改语言时，用户盯着
@@ -156,7 +156,7 @@ struct MenuBarPanel: View {
         ]
     }
 
-    /// 一段紧凑的网络信息区块：彩色圆点标题 + 两列键值网格。
+    /// 一段紧凑的网络信息区块：彩色圆点标题 + 单列键值列表（每行带复制按钮）。
     private func effectiveInfoSection(header: String, tint: Color,
                                       rows: [(String, String)]) -> some View {
         VStack(alignment: .leading, spacing: Design.Spacing.tight) {
@@ -165,35 +165,45 @@ struct MenuBarPanel: View {
                 Text(header).font(.caption.weight(.medium)).foregroundStyle(.secondary)
             }
 
-            Grid(alignment: .leading,
-                 horizontalSpacing: Design.Spacing.medium,
-                 verticalSpacing: 2) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                    GridRow {
-                        infoCell(label: row.0, value: row.1)
-                        if index + 1 < rows.count {
-                            infoCell(label: rows[index + 1].0, value: rows[index + 1].1)
-                        } else {
-                            Color.clear
-                        }
-                    }
-                    // 每次跳两条（两列一行）
-                    if index + 1 < rows.count { }
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(rows, id: \.0) { row in
+                    infoRow(label: row.0, value: row.1)
                 }
             }
         }
     }
 
-    /// 单个信息格：标签 + 等宽值，超长截断，悬停看全。
-    private func infoCell(label: String, value: String) -> some View {
+    /// 单行信息：标签 + 值（可选中文本）+ 复制按钮。
+    private func infoRow(label: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Design.Spacing.tight) {
-            Text(label).font(.caption2).foregroundStyle(.tertiary).frame(width: 48, alignment: .leading)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(width: 52, alignment: .leading)
+
             Text(value.isEmpty ? "—" : value)
                 .font(.system(.caption2, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
                 .help(value)
+
+            Spacer(minLength: 0)
+
+            // 复制按钮：仅在值非空时显示
+            if !value.isEmpty {
+                Button {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(value, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.borderless)
+                .help(L(.copyValue))
+            }
         }
     }
 
