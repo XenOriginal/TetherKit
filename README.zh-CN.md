@@ -25,6 +25,15 @@ DriverKit、不用关 SIP、不用开发者账号**。Apple Silicon 与 Intel �
 > 测量方法与完整结果见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)，
 > 验证清单见 [AGENTS.md](AGENTS.md) 第 6 节。
 
+> **版本**：**0.1.6**（BETA）。
+> - **构建戳**（由 `gui/Scripts/build-gui.sh` 构建时自动写入 `CFBundleVersion`）：
+>   `{YYYYMMDD}-XENO-BETA-{仓库}-{commit}`，例如 `20260801-XENO-BETA-XenOriginal/TetherKit-a1b2c3d`
+>   —— 构建日期、改进作者 **XENO**、`BETA` 标记、仓库（`XenOriginal/TetherKit`）以及本构建对应的
+>   确切 commit。任意 `.app` 都可据此回溯到具体 commit。
+> - **主要变更**：消除了连接状态下 GUI 约 40% 的 CPU 占用（状态环的 `.repeatForever` 永久呼吸动画
+>   在连接期间改为静态，详见 [docs/PERFORMANCE-GUI-CPU-ROOTCAUSE.md](docs/PERFORMANCE-GUI-CPU-ROOTCAUSE.md)）；
+>   并稳定了 IP 地址显示（接口瞬空查询不再导致地址反复横跳）。
+
 ---
 
 ## 从 HoRNDIS 过来的？

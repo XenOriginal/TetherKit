@@ -64,6 +64,15 @@ VERSION="$(sed -n 's/^  VERSION \([0-9.]*\)$/\1/p' "${REPO_ROOT}/CMakeLists.txt"
 
 log "TetherKit ${VERSION}（Swift ${SWIFT_CONFIGURATION} 构建）"
 
+# 构建戳：{YYYYMMDD}-XENO-BETA-{仓库简称}-{commit短哈希}，便于版本溯源。
+# 示例：20260801-XENO-BETA-XenOriginal-TetherKit-0a7bf64
+BUILD_DATE="$(date +%Y%m%d)"
+REPO_SHORT="$(git -C "${REPO_ROOT}" remote get-url origin 2>/dev/null | sed -E 's/\.git$//; s#.*[:/]([^/]+/[^/]+)$#\1#')"
+REPO_SHORT="${REPO_SHORT:-XenOriginal/TetherKit}"
+COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_META="${BUILD_DATE}-XENO-BETA-${REPO_SHORT}-${COMMIT}"
+log "构建戳：${BUILD_META}"
+
 # ------------------------------------------------------------------------------
 # 编译 Swift
 # ------------------------------------------------------------------------------
@@ -92,7 +101,10 @@ mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Frameworks" \
          "${APP_DIR}/Contents/Resources"
 
 cp "${SWIFT_BIN_DIR}/TetherKitApp" "${APP_DIR}/Contents/MacOS/TetherKit"
-sed "s/__TETHERKIT_VERSION__/${VERSION}/g" \
+# 用 | 作分隔符：BUILD_META 含仓库简称里的 /（如 XenOriginal/TetherKit），
+# 若用 / 作分隔符会被提前截断，报 "bad flag in substitute command"。
+sed -e "s|__TETHERKIT_VERSION__|${VERSION}|g" \
+    -e "s|__TETHERKIT_BUILD__|${BUILD_META}|g" \
   "${GUI_DIR}/Resources/App-Info.plist" > "${APP_DIR}/Contents/Info.plist"
 cp "${GUI_DIR}/Resources/AppIcon.icns" "${APP_DIR}/Contents/Resources/"
 

@@ -27,7 +27,17 @@ connect, configure IP in three clicks — plus a command-line tool, `tetherkit-c
 > measured against a real Android phone: **~326 Mbps RX / ~240–300 Mbps TX, zero
 > retransmits in both directions** (USB 2.0 high-speed; theoretical ceiling 426 Mbps).
 > Methodology and full results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md); the
-> verification checklist lives in [AGENTS.md](AGENTS.md) §6 (Chinese).
+> verification checklist lives in [AGENTS.md](AGENTS.md)
+
+> **Version**: **0.1.6** (BETA).
+> - **Build stamp** (auto-injected into `CFBundleVersion` by `gui/Scripts/build-gui.sh`):
+>   `{YYYYMMDD}-XENO-BETA-{repo}-{commit}`, e.g. `20260801-XENO-BETA-XenOriginal/TetherKit-a1b2c3d`
+>   — build date, author **XENO**, the `BETA` tag, repository (`XenOriginal/TetherKit`), and the
+>   exact commit this artifact was built from. Every `.app` is therefore traceable to a commit.
+> - **What changed**: eliminated the ~40% GUI CPU usage during an active tether (the status ring's
+>   perpetual `.repeatForever` animation is now static while connected; see
+>   [docs/PERFORMANCE-GUI-CPU-ROOTCAUSE.md](docs/PERFORMANCE-GUI-CPU-ROOTCAUSE.md)), and stabilized
+>   the IP address display (no more flapping on transient empty interface queries). §6 (Chinese).
 
 ---
 
