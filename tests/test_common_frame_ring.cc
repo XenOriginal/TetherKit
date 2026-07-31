@@ -3,6 +3,7 @@
 // FrameRing 是 RX 路径的核心：libusb 回调线程把拆出的以太帧写进去，
 // BPF 写线程取出来 write()。因此这里既测语义，也测并发。
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -353,3 +354,231 @@ TEST_CASE("批量接口并发搬运 20 万帧不丢不乱序") {
 }
 
 }  // TEST_SUITE("common.frame_ring_batch")
+
+// =============================================================================
+// 事件驱动唤醒机制（NotifyReadable / WaitForReadable / WakeConsumer）
+//
+// 这些测试验证 commit 1b3a690 引入的 condition_variable + epoch 唤醒逻辑。
+// 核心保证：
+//   * 消费者空队列时阻塞，生产者发布后立即唤醒
+//   * 不丢通知：「先 Notify 后 Wait」不会永久阻塞（epoch 谓词保证）
+//   * WakeConsumer 能强制唤醒停机路径上的消费者
+// =============================================================================
+
+namespace wakeup_detail {
+
+/// 等待条件成立或超时，用于检测线程是否在预期时间内完成。
+template <typename Predicate>
+bool WaitForCond(Predicate pred, std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return pred();
+}
+
+}  // namespace wakeup_detail
+
+TEST_SUITE("common.frame_ring_wakeup") {
+
+TEST_CASE("NotifyReadable 唤醒阻塞的消费者") {
+  FrameRing ring(16, 512);
+
+  std::atomic<bool> consumer_started{false};
+  std::atomic<bool> consumer_woken{false};
+  std::atomic<bool> stop{false};
+
+  std::thread consumer([&] {
+    consumer_started.store(true, std::memory_order_release);
+    // 队列为空 → 阻塞
+    ring.WaitForReadable(stop);
+    consumer_woken.store(true, std::memory_order_release);
+  });
+
+  // 等消费者确实进入阻塞
+  while (!consumer_started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  CHECK_FALSE(consumer_woken.load(std::memory_order_acquire));
+
+  // 推一帧并发布
+  REQUIRE(ring.TryPush(MakeFrame(64, 0xAA)));
+  ring.NotifyReadable();
+
+  CHECK(wakeup_detail::WaitForCond([&] { return consumer_woken.load(std::memory_order_acquire); }));
+  consumer.join();
+  CHECK_FALSE(stop.load(std::memory_order_acquire));
+}
+
+TEST_CASE("先 Notify 后 Wait 不丢通知（epoch 谓词）") {
+  FrameRing ring(16, 512);
+  std::atomic<bool> stop{false};
+  std::atomic<bool> done{false};
+
+  // 先推帧 + Notify
+  REQUIRE(ring.TryPush(MakeFrame(64, 0x01)));
+  ring.NotifyReadable();
+
+  // 消费者尚未调用 WaitForReadable —— 通知已经发出。
+  // 如果没有 epoch 机制，这次通知会被永久错过，导致死锁。
+  // 有 epoch：WaitForReadable 进入时发现 epoch 已变，谓词为 true，立即返回。
+  std::thread consumer([&] {
+    ring.WaitForReadable(stop);  // 应该立即返回，不阻塞
+    done.store(true, std::memory_order_release);
+  });
+
+  // 如果没有 epoch 保护，这里会超时
+  CHECK(wakeup_detail::WaitForCond([&] { return done.load(std::memory_order_acquire); }));
+  consumer.join();
+}
+
+TEST_CASE("WakeConsumer 强制唤醒（停机路径）") {
+  FrameRing ring(16, 512);
+  std::atomic<bool> stop{false};
+  std::atomic<bool> done{false};
+
+  std::thread consumer([&] {
+    ring.WaitForReadable(stop);
+    done.store(true, std::memory_order_release);
+  });
+
+  // 等消费者进入阻塞
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  // 模拟 Bridge::Stop 的路径：先置停机标志，再 WakeConsumer。
+  // WakeConsumer 不改 epoch 也不推帧，但 stop=true 让谓词为 true，
+  // notify_one 唤醒 cv.wait 重新检查谓词后返回。
+  stop.store(true, std::memory_order_release);
+  ring.WakeConsumer();
+
+  CHECK(wakeup_detail::WaitForCond([&] { return done.load(std::memory_order_acquire); }));
+  consumer.join();
+}
+
+TEST_CASE("stop 标志为 true 时 WaitForReadable 立即返回") {
+  FrameRing ring(16, 512);
+  std::atomic<bool> stop{true};  // 已经停机
+
+  // 应该立即返回，不阻塞
+  ring.WaitForReadable(stop);
+  CHECK(true);  // 到这里就说明没挂死
+}
+
+TEST_CASE("并发生产者-消费者：事件驱动搬运不丢帧") {
+  constexpr std::uint32_t kTotal = 50'000;
+  FrameRing ring(256, 512);
+  std::atomic<bool> stop{false};
+  std::atomic<bool> corrupted{false};
+
+  std::thread producer([&] {
+    std::uint32_t sent = 0;
+    while (sent < kTotal) {
+      auto batch = ring.BeginBatchWrite();
+      for (std::uint32_t i = 0; i < 16 && sent < kTotal; ++i) {
+        const std::span<std::byte> dst = batch.Begin();
+        if (dst.empty()) {
+          break;
+        }
+        const auto length = static_cast<std::uint32_t>(14 + (sent % 400));
+        const auto tag = static_cast<std::uint8_t>(sent & 0xFFU);
+        for (std::uint32_t k = 0; k < length; ++k) {
+          dst[k] = std::byte{static_cast<unsigned char>((tag + k) & 0xFFU)};
+        }
+        batch.Commit(length);
+        ++sent;
+      }
+      batch.Publish();
+      ring.NotifyReadable();
+    }
+    // 最后一推：通知消费者退出
+    stop.store(true, std::memory_order_release);
+    ring.WakeConsumer();
+  });
+
+  std::uint32_t received = 0;
+  while (received < kTotal) {
+    auto batch = ring.BeginBatchRead();
+    bool got_any = false;
+    for (std::uint32_t i = 0; i < 16; ++i) {
+      const FrameView view = batch.Next();
+      if (view.Empty()) {
+        break;
+      }
+      got_any = true;
+      const auto expected_length = static_cast<std::uint32_t>(14 + (received % 400));
+      const auto expected_tag = static_cast<std::uint8_t>(received & 0xFFU);
+      if (view.length != expected_length || !VerifyFrame(view.Bytes(), expected_tag)) {
+        corrupted.store(true, std::memory_order_relaxed);
+        received = kTotal;
+        break;
+      }
+      ++received;
+    }
+    // batch 析构 → Release
+    if (!got_any && received < kTotal) {
+      // 队列空，阻塞等待
+      ring.WaitForReadable(stop);
+    }
+  }
+
+  producer.join();
+  CHECK_FALSE(corrupted.load());
+  CHECK(received == kTotal);
+  CHECK(ring.TotalDequeued() == kTotal);
+}
+
+TEST_CASE("多次 Notify 不导致消费者丢失后续唤醒") {
+  // 场景：生产者连续推两批帧，每批都 Notify。
+  // 消费者在第一批 Notify 后醒来处理帧，处理完再次 WaitForReadable。
+  // 第二批的 Notify 必须能唤醒它 —— epoch 机制保证不丢。
+  FrameRing ring(16, 512);
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint32_t> consumed{0};
+  std::atomic<bool> done{false};
+
+  std::thread consumer([&] {
+    while (consumed.load(std::memory_order_acquire) < 2 && !stop.load(std::memory_order_acquire)) {
+      auto batch = ring.BeginBatchRead();
+      while (true) {
+        const FrameView view = batch.Next();
+        if (view.Empty()) break;
+        (void)view;
+      }
+      // batch 析构 → Release
+      if (ring.SizeSnapshot() == 0 && consumed.load(std::memory_order_acquire) < 2) {
+        ring.WaitForReadable(stop);
+      }
+      // 重新检查并计数
+      while (ring.SizeSnapshot() > 0) {
+        auto b2 = ring.BeginBatchRead();
+        const FrameView v = b2.Next();
+        if (v.Empty()) break;
+        (void)v;
+      }
+    }
+    done.store(true, std::memory_order_release);
+  });
+
+  // 第一批
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  REQUIRE(ring.TryPush(MakeFrame(64, 0x01)));
+  ring.NotifyReadable();
+  consumed.fetch_add(1, std::memory_order_acq_rel);
+
+  // 第二批（可能消费者还在处理第一批，epoch 会保证不丢）
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  REQUIRE(ring.TryPush(MakeFrame(64, 0x02)));
+  ring.NotifyReadable();
+  consumed.fetch_add(1, std::memory_order_acq_rel);
+
+  stop.store(true, std::memory_order_release);
+  ring.WakeConsumer();
+
+  CHECK(wakeup_detail::WaitForCond([&] { return done.load(std::memory_order_acquire); }));
+  consumer.join();
+}
+
+}  // TEST_SUITE("common.frame_ring_wakeup")

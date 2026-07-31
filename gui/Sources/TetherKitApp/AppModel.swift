@@ -985,8 +985,8 @@ final class AppModel {
     ///
     /// 用户取消时**不**弹错误提示 —— 取消是正常操作，再弹一个「已取消」的框
     /// 只会烦人。
-    private func authorized(_ body: @escaping (Data) async throws -> Void,
-                            allowInteraction: Bool = true) async {
+    private func authorized(allowInteraction: Bool = true,
+                            _ body: @escaping (Data) async throws -> Void) async {
         // 第一趟：有缓存就直接用，不打扰用户。
         if let cached = cachedAuthorization {
             defer { withExtendedLifetime(cached) {} }

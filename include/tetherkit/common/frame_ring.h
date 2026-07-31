@@ -321,22 +321,39 @@ class FrameRing {
     consumer_sync_.cv.notify_one();
   }
 
-  /// 强制唤醒消费者线程，用于停机等不需要队列有数据的情况。
+  /// 强制唤醒消费者线程，用于暂停 / 停机等不需要队列有数据的情况。
   ///
-  /// 与 NotifyReadable() 的区别：不更新 epoch。WaitForReadable() 的谓词会同时
-  /// 检查传入的停机标志，因此只发通知就足以让消费者退出阻塞并看到停机条件。
-  void WakeConsumer() noexcept { consumer_sync_.cv.notify_one(); }
+  /// 与 NotifyReadable() 的实现一致（递增 epoch + notify_one），因为
+  /// WaitForReadable() 的谓词靠 epoch 差异、队列非空、stop 标志三条件之一唤醒。
+  /// 如果只 notify 不改 epoch，谓词仍为 false，消费者会被虚假唤醒后再次阻塞 ——
+  /// 对于 SetPaused(true) 这种 stop=false 的场景就会永久卡死。
+  /// 保留独立方法名是为了语义清晰：NotifyReadable 由生产者调（推了帧之后），
+  /// WakeConsumer 由控制器调（暂停 / 停机路径）。
+  void WakeConsumer() noexcept {
+    {
+      const std::lock_guard<std::mutex> guard(consumer_sync_.mutex);
+      ++consumer_sync_.epoch;
+    }
+    consumer_sync_.cv.notify_one();
+  }
 
   /// 消费者发现队列空时阻塞，直到 NotifyReadable() 或 `stop` 为真。
   ///
   /// 返回后**不**保证队列非空（典型虚假唤醒处理）——调用方必须亲自重读队列。
   /// `stop` 在持锁状态下被检查，用于注入停机等退出条件；生产者侧的 epoch 变化
   /// 也会被当作唤醒条件，因此不会漏掉「先 Notify 后 Wait」的竞态。
+  ///
+  /// 谓词同时检查 epoch 变化和队列非空：如果 NotifyReadable() 在本函数之前被调用，
+  /// epoch 已经变化但被本函数捕获为「当前值」，仅靠 epoch 差异无法检测到。
+  /// 加上 SizeSnapshot() > 0 就能覆盖这种情况 —— 帧在 NotifyReadable 之前已经
+  /// 被 PublishWrite，SizeSnapshot 会读到非零值，谓词为 true，立即返回。
   void WaitForReadable(const std::atomic<bool>& stop) noexcept {
     std::unique_lock<std::mutex> lock(consumer_sync_.mutex);
     const std::uint64_t epoch = consumer_sync_.epoch;
     consumer_sync_.cv.wait(lock, [this, epoch, &stop] {
-      return consumer_sync_.epoch != epoch || stop.load(std::memory_order_acquire);
+      return consumer_sync_.epoch != epoch
+             || stop.load(std::memory_order_acquire)
+             || SizeSnapshot() > 0;
     });
   }
 

@@ -132,8 +132,15 @@ class MockDataChannel final : public usb::DataChannel {
       ++accepted;
       bytes += frame.size();
     }
-    if (accepted != 0 && rx_counters_ != nullptr) {
-      rx_counters_->AddBatch(accepted, bytes);
+    // 先显式发布，再通知 —— 顺序与真实 UsbDataChannel::OnReceiveComplete 一致。
+    // 如果先通知后发布（依赖析构），消费者会被唤醒却发现队列仍然为空，
+    // 然后再次阻塞，而生产者已经不会再发第二次通知 → 死锁。
+    if (accepted != 0) {
+      batch.Publish();
+      rx_ring_->NotifyReadable();
+      if (rx_counters_ != nullptr) {
+        rx_counters_->AddBatch(accepted, bytes);
+      }
     }
     return accepted;
   }

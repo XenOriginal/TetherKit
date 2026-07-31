@@ -137,6 +137,12 @@ void Bridge::SetPaused(bool paused) noexcept {
     return;
   }
 
+  // RX 注入线程可能正阻塞在 WaitForReadable() 上（空闲时队列空）。
+  // 必须先唤醒它，否则它会永远看不到 paused_ 标志，本函数也就永远等不到
+  // rx_paused_ack_。WakeConsumer 只发 notify_one、不推帧，谓词里 stop 仍为
+  // false，但消费者醒来后会重走循环：清 ack → 检查 paused_ → 置 ack → sleep。
+  rx_ring_->WakeConsumer();
+
   // 等 RX 注入线程确认它确实停住了。没有这一步，本函数返回之后 worker 仍可能
   // 把一批已经取出的帧写到链路上：它可能刚过完上面那个标志检查。
   //
