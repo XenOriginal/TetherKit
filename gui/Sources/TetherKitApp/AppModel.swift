@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import ServiceManagement
 import SwiftUI
 import TetherKitCore
 import TetherKitIPC
@@ -200,6 +201,14 @@ final class AppModel {
     @ObservationIgnored
     @AppStorage("TetherKitAutoApply") var autoApplyEnabled = true
 
+    /// 开机自启：App 登录时自动启动，方便随时连接设备。
+    ///
+    /// 经 @AppStorage 持久化；真正的登录项注册/注销通过 SMAppService 完成。
+    /// 启动时在 syncLoginItemState() 中校准，防止系统侧与本地偏好不一致
+    /// （比如用户在「系统设置 → 登录项」里手动改过）。
+    @ObservationIgnored
+    @AppStorage("TetherKitLoginItem") var loginItemEnabled = false
+
     /// 当前会话是否已执行过自动应用（防止每次轮询都重复触发）。
     private var autoAppliedForCurrentSession = false
 
@@ -391,9 +400,36 @@ final class AppModel {
 
     private static let languageDefaultsKey = "TetherKitLanguagePreference"
 
+    /// 启动时校准登录项状态：以系统侧（SMAppService）为准，覆盖本地 AppStorage。
+    ///
+    /// 用户可能在「系统设置 → 登录项」里手动增删过，也可能换过 App 版本导致
+    /// 注册丢失 —— 这里统一拉齐，避免界面显示与实际行为不一致。
+    private func syncLoginItemState() {
+        let registered = SMAppService.mainApp.status == .enabled
+        if loginItemEnabled != registered {
+            loginItemEnabled = registered
+        }
+    }
+
+    /// 切换开机自启：同时更新系统登录项注册与本地偏好存储。
+    func toggleLoginItem() {
+        loginItemEnabled.toggle()
+        do {
+            if loginItemEnabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            // 注册/注销失败时回滚 AppStorage，保持界面与实际一致。
+            loginItemEnabled.toggle()
+        }
+    }
+
     func start() {
         guard pollingTask == nil else { return }
         restoreLanguagePreference()
+        syncLoginItemState()
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }

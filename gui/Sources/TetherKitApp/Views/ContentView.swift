@@ -221,6 +221,16 @@ struct ContentView: View {
                     }
                 }
                 Spacer()
+
+                // 开机自启开关：与卸载按钮同行，复用相同的 caption + borderless 风格。
+                Toggle(L(.loginItem), isOn: Binding(
+                    get: { model.loginItemEnabled },
+                    set: { _ in model.toggleLoginItem() }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .help(L(.loginItemTooltip))
+
                 Button(L(.uninstallHelperMenuItem)) { confirmingHelperUninstall = true }
                     .buttonStyle(.borderless)
                     .font(.caption)

@@ -243,6 +243,11 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case showSpeed
     case copyValue
 
+    // MARK: - 开机自启
+
+    case loginItem
+    case loginItemTooltip
+
     // MARK: - 网络卡（NetworkCard.swift）
 
     case dnsEffectivenessTooltip
@@ -715,6 +720,13 @@ extension L10nKey {
             return ("显示速率", "Show speed")
         case .copyValue:
             return ("复制", "Copy")
+
+        // MARK: 开机自启
+
+        case .loginItem: return ("开机自启", "Launch at login")
+        case .loginItemTooltip:
+            return ("登录时自动打开 TetherKit，方便随时连接设备。",
+                    "Automatically open TetherKit at login so you can connect devices right away.")
 
         // MARK: 网络卡
 

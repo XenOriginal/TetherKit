@@ -266,6 +266,8 @@ private struct InfoRowView: View {
 
                 speedToggle
 
+                loginItemToggle
+
                 Button(L(.quit)) {
                     NSApp.terminate(nil)
                 }
@@ -315,6 +317,20 @@ private struct InfoRowView: View {
         .buttonStyle(.borderless)
         .controlSize(.small)
         .help(showSpeed ? L(.hideSpeed) : L(.showSpeed))
+    }
+
+    /// 开机自启开关。调用 model.toggleLoginItem() 同时更新系统登录项与本地偏好。
+    @ViewBuilder
+    private var loginItemToggle: some View {
+        Button {
+            model.toggleLoginItem()
+        } label: {
+            Image(systemName: model.loginItemEnabled ? "power" : "power")
+                .foregroundStyle(model.loginItemEnabled ? Color.accentColor : Color.gray)
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .help(L(.loginItemTooltip))
     }
 
     private func speedRow(symbol: String, caption: String, bitsPerSecond: Double,

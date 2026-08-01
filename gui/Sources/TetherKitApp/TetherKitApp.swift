@@ -90,6 +90,13 @@ private struct AppMenuItems: View {
         Button(L(.menuCheckForUpdates)) {
             Task { await model.checkForUpdates() }
         }
+
+        Toggle(L(.loginItem), isOn: Binding(
+            get: { model.loginItemEnabled },
+            set: { _ in model.toggleLoginItem() }
+        ))
+        .help(L(.loginItemTooltip))
+
         // 语言放在 App 菜单而不是主界面上：切语言是「设置一次就再也不碰」的
         // 动作，而主界面的高度预算早就见底了（见 ContentView 里管理行那段说明），
         // 不该为它再挤出一行。
