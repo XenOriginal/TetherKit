@@ -71,6 +71,20 @@ jobs:
             echo "sha256=$(shasum -a 256 "$name" | awk '{print $1}')"
           } >> "$GITHUB_OUTPUT"
 
+      - name: 打包 DMG 安装镜像
+        id: dmg
+        run: |
+          name="TetherKit-${GITHUB_REF_NAME}-macos-arm64.dmg"
+          # hdiutil 是 macOS 自带、无需 Homebrew 依赖；UDZO = 压缩的只读镜像。
+          # -srcfolder 直接把 .app 整包塞进镜像，挂载后拖进「应用程序」即可。
+          hdiutil create -volname "TetherKit" \
+            -srcfolder dist/TetherKit.app \
+            -ov -format UDZO "$name"
+          {
+            echo "name=${name}"
+            echo "sha256=$(shasum -a 256 "$name" | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+
       # 这个 sha256 就是 Homebrew formula 里要填的那个，直接写进 Release 说明，
       # 更新 tap 时复制粘贴即可，不用本地再算一遍。
       - name: 计算源码 tarball 的 sha256
@@ -130,6 +144,10 @@ jobs:
           xattr -dr com.apple.quarantine TetherKit.app    # 图形界面（递归）
           ```
 
+          - **DMG 镜像**（`${{ steps.dmg.outputs.name }}`）：双击挂载后把
+            `TetherKit.app` 拖进「应用程序」即可。镜像同样会被隔离，拖完执行
+            上面的 `xattr -dr` 解除即可。
+
           介意的话请用上面的 Homebrew 方式，或自行从源码构建 ——
           本地构建的产物不带隔离属性。
 
@@ -140,6 +158,7 @@ jobs:
           | 源码 tarball（Homebrew formula 用） | `${{ steps.src.outputs.sha256 }}` |
           | `${{ steps.pkg.outputs.name }}` | `${{ steps.pkg.outputs.sha256 }}` |
           | `${{ steps.app.outputs.name }}` | `${{ steps.app.outputs.sha256 }}` |
+          | `${{ steps.dmg.outputs.name }}` | `${{ steps.dmg.outputs.sha256 }}` |
           EOF
 
       - name: 创建 Release
@@ -152,7 +171,8 @@ jobs:
             --generate-notes \
             --verify-tag \
             "${{ steps.pkg.outputs.name }}" \
-            "${{ steps.app.outputs.name }}"
+            "${{ steps.app.outputs.name }}" \
+            "${{ steps.dmg.outputs.name }}"
 
   # Release 建好之后，把 Homebrew tap 同步到新版本。
   #
