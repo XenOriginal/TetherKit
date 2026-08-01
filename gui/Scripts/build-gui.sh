@@ -64,13 +64,13 @@ VERSION="$(sed -n 's/^  VERSION \([0-9.]*\)$/\1/p' "${REPO_ROOT}/CMakeLists.txt"
 
 log "TetherKit ${VERSION}（Swift ${SWIFT_CONFIGURATION} 构建）"
 
-# 构建戳：{YYYYMMDD}-XENO-BETA-{仓库简称}-{commit短哈希}，便于版本溯源。
-# 示例：20260801-XENO-BETA-XenOriginal-TetherKit-0a7bf64
+# 构建戳：{YYYYMMDD}-BETA-{仓库简称}-{commit短哈希}，便于版本溯源。
+# 示例：20260801-BETA-XenOriginal-TetherKit-0a7bf64
 BUILD_DATE="$(date +%Y%m%d)"
 REPO_SHORT="$(git -C "${REPO_ROOT}" remote get-url origin 2>/dev/null | sed -E 's/\.git$//; s#.*[:/]([^/]+/[^/]+)$#\1#')"
 REPO_SHORT="${REPO_SHORT:-XenOriginal/TetherKit}"
 COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-BUILD_META="${BUILD_DATE}-XENO-BETA-${REPO_SHORT}-${COMMIT}"
+BUILD_META="${BUILD_DATE}-BETA-${REPO_SHORT}-${COMMIT}"
 log "构建戳：${BUILD_META}"
 
 # ------------------------------------------------------------------------------

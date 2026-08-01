@@ -120,6 +120,41 @@ final class AppModel {
     /// 装着的组件与 App 版本对不上时的两个版本号；一致（或还没探到）为 nil。
     private(set) var helperVersionMismatch: HelperVersionMismatch?
     private(set) var environment: EnvironmentReport?
+
+    /// App 自身版本号（来自 TetherKitLibrary.versionInfo），供界面底部显示。
+    var appVersion: String { TetherKitLibrary.versionInfo.version }
+
+    /// GitHub 仓库地址与当前 commit 短哈希，供界面右下角显示。
+    ///
+    /// 构建产物（build-gui.sh 组装的 .app）：CFBundleVersion 格式为
+    ///   `{YYYYMMDD}-BETA-{REPO}-{COMMIT}`，从中提取最后一段即为短哈希。
+    /// 开发构建（swift run）：回退到 git 动态查询，再不行显示 "dev"。
+    static let githubRepoURL = "github.com/XenOriginal/TetherKit"
+    var appBuildInfo: String {
+        if let buildStamp = Bundle.main.infoDictionary?["CFBundleVersion"] as? String,
+           !buildStamp.isEmpty && buildStamp != "__TETHERKIT_BUILD__" {
+            // 构建戳格式：20260801-BETA-XenOriginal/TetherKit-3e4eacd
+            // 取最后一段（commit 短哈希）
+            let shortHash = buildStamp.components(separatedBy: "-").last ?? buildStamp
+            return "\(Self.githubRepoURL) · \(shortHash)"
+        }
+        // 开发构建：尝试动态读 git
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        task.arguments = ["-C", Bundle.main.resourcePath ?? ".", "rev-parse", "--short", "HEAD"]
+        task.standardOutput = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+            if task.terminationStatus == 0,
+               let data = (task.standardOutput as? Pipe)?.fileHandleForReading.readDataToEndOfFile(),
+               let hash = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !hash.isEmpty {
+                return "\(Self.githubRepoURL) · \(hash)"
+            }
+        } catch { /* git 不可用，静默降级 */ }
+        return "\(Self.githubRepoURL) · dev"
+    }
     private(set) var devices: [DeviceDescriptor] = []
     private(set) var status: SessionStatus = .idle
     private(set) var networkState: NetworkState = .empty
@@ -222,6 +257,10 @@ final class AppModel {
     /// 上次枚举设备的时刻。用单调时钟，避免系统时间被调整时算出负的间隔。
     private var lastDeviceRefresh: ContinuousClock.Instant?
 
+    /// 会话进入 idle 状态的时刻。用于实现「空闲稳定后停止设备枚举」，
+    /// 消除 macOS 菜单栏 USB 图标闪烁。非 idle 时为 nil。
+    private var sessionBecameIdleAt: ContinuousClock.Instant?
+
     /// 主窗口当前是否可见。只影响轮询节奏；程序坞图标策略在视图层处理。
     private var isWindowVisible = true
 
@@ -290,6 +329,14 @@ final class AppModel {
     /// 比状态轮询慢得多，因为枚举要 libusb_open 去读字符串描述符。2 秒的插拔
     /// 响应延迟用户基本感觉不到，而开销降到了原来的四分之一。
     private static let deviceRefreshInterval: Duration = .seconds(2)
+
+    /// 空闲稳定等待时间：会话进入 idle 后经过此时间且设备列表非空，
+    /// 即视为「已稳定」，停止 libusb_open/close 枚举以消除 macOS 菜单栏
+    /// "USB 连接到虚拟机" 图标反复闪烁。
+    ///
+    /// 8 秒足够覆盖正常的状态转换抖动（starting → running → stopping → idle），
+    /// 同时让用户在拔插设备后最多等 8 秒就能看到列表更新。
+    private static let idleDeviceSettleDuration: Duration = .seconds(8)
 
     /// 吞吐曲线保留的采样点数。60 点 × 1 s = 最近 60 秒。
     ///
@@ -490,13 +537,29 @@ final class AppModel {
         // 了，但设备枚举被「运行中不刷」的规矩跳过，列表永远填不进来，会卡在
         // 「无设备」。这时必须至少枚举一次把设备填进去（只试一次，见下面标志），
         // 不能因为「运行中」就永远不刷。
+        //
+        // ★ 空闲稳定跳过（修复 macOS 菜单栏 USB 图标闪烁）★
+        //   会话处于 idle 超过 idleDeviceSettleDuration（8 秒）且设备列表非空时，
+        //   完全跳过 libusb_open/close 枚举。每次 open/close 都会让 macOS 的 USB 子系统
+        //   刷新菜单栏 "Zubehör für virtuelle Maschinen" 图标，导致反复闪烁。
+        //   C 层的 ReconcileDeviceStrings 字符串记忆保证已知设备名称不会消失。
         let wantsDevices = status.runState != .running
         let mustFillEmpty = devices.isEmpty
             && status.runState == .running
             && !deviceFillAttemptedWhileRunning
+
+        // 空闲稳定检测：idle/stopped/failed 超过阈值 + 已有设备列表 → 跳过本次枚举。
+        let isIdleStable: Bool = {
+            guard (status.runState == .idle || status.runState == .stopped || status.runState == .failed),
+                  let becameIdleAt = sessionBecameIdleAt,
+                  !devices.isEmpty else { return false }
+            return ContinuousClock.now - becameIdleAt >= Self.idleDeviceSettleDuration
+        }()
+
         if wantsDevices || mustFillEmpty {
             // 未运行时按节流节奏；运行中补空只做一次，不受节流限制。
-            if wantsDevices ? shouldRefreshDevices() : true {
+            // 空闲稳定时跳过（mustFillEmpty 不受影响，因为它只在 running 时为 true）。
+            if !(wantsDevices && isIdleStable) && (wantsDevices ? shouldRefreshDevices() : true) {
                 deviceFillAttemptedWhileRunning = true
                 if let fresh = try? await client.listDevices() {
                     devices = fresh
@@ -602,6 +665,21 @@ final class AppModel {
             sessionStartedAt = nil
             autoAppliedForCurrentSession = false
             deviceFillAttemptedWhileRunning = false
+            // 进入空闲/停止/失败状态：记录时刻，用于空闲稳定后停止设备枚举。
+            // ★ 只在首次进入时记录，不在每次轮询时重置 —— 否则 now - becameIdleAt
+            //   永远 ≈0，8 秒阈值永远达不到，isIdleStable 永远 false，枚举永不停止，
+            //   libusb_open/close 每 2 秒触发 macOS 菜单栏 "USB 连接到虚拟机" 图标闪烁。
+            if fresh.runState == .idle || fresh.runState == .stopped || fresh.runState == .failed,
+               sessionBecameIdleAt == nil {
+                sessionBecameIdleAt = ContinuousClock.now
+            }
+        }
+
+        // 离开空闲/停止/失败状态：清除空闲计时，恢复正常枚举节奏。
+        if let prev = previousStatus?.runState,
+           (prev == .idle || prev == .stopped || prev == .failed),
+           !(fresh.runState == .idle || fresh.runState == .stopped || fresh.runState == .failed) {
+            sessionBecameIdleAt = nil
         }
 
         guard let previous = previousStatus,
@@ -626,9 +704,16 @@ final class AppModel {
             transmitPacketsPerSecond: Double(fresh.txFrames &- previous.txFrames) / seconds)
 
         throughput = sample
-        throughputHistory.append(sample)
-        if throughputHistory.count > Self.historyCapacity {
-            throughputHistory.removeFirst(throughputHistory.count - Self.historyCapacity)
+        // ★ 后台暂停图表更新 ★
+        // 窗口不可见（最小化/隐藏/菜单栏模式）时跳过历史采样：
+        //   - throughput 仍更新（菜单栏面板的速率文字需要它）
+        //   - 但 throughputHistory 不增长 → Swift Charts 不重绘 → 渲染循环 idle
+        // 恢复可见时图表从断点继续，短暂空白用户可接受。
+        if isWindowVisible {
+            throughputHistory.append(sample)
+            if throughputHistory.count > Self.historyCapacity {
+                throughputHistory.removeFirst(throughputHistory.count - Self.historyCapacity)
+            }
         }
     }
 

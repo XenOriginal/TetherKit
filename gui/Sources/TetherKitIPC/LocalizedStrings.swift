@@ -158,6 +158,10 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case openReleasePage
     case copyBrewUpgradeCommand
     case updateUpToDate
+    case footerUsbConnected
+    case footerUsbReady
+    case footerUsbDisconnected
+    case footerAppVersion
     case updateAvailable
     case updateCheckFailed
     case updateDevBuild
@@ -533,6 +537,14 @@ extension L10nKey {
         case .copyBrewUpgradeCommand: return ("复制 brew 升级命令", "Copy the brew upgrade command")
         case .updateUpToDate:
             return ("当前已是最新版本（v%@）。", "You are on the latest version (v%@).")
+        case .footerUsbConnected:
+            return ("USB 已连接：%@", "USB connected: %@")
+        case .footerUsbReady:
+            return ("USB 就绪", "USB ready")
+        case .footerUsbDisconnected:
+            return ("USB 未连接", "USB disconnected")
+        case .footerAppVersion:
+            return ("TetherKit %@", "TetherKit %@")
         case .updateAvailable:
             return ("发现新版本 v%@。通过 Homebrew 安装的话，"
                     + "在终端执行 brew upgrade tetherkit；"

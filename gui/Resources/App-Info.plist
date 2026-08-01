@@ -4,7 +4,7 @@
 
   Scripts/build-gui.sh 会把 __TETHERKIT_VERSION__ 替换成语义版本号
   （如 0.1.6，供 UpdateChecker 做数值比较），并把 __TETHERKIT_BUILD__ 替换成
-  构建戳（{YYYYMMDD}-XENO-BETA-{仓库简称}-{commit短哈希}，便于溯源），再拷进
+  构建戳（{YYYYMMDD}-BETA-{仓库简称}-{commit短哈希}，便于溯源），再拷进
   TetherKit.app/Contents/。
 
   App 本身**不需要任何 entitlement**：它以普通用户身份运行，既不碰 USB 也不碰
@@ -29,7 +29,7 @@
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>__TETHERKIT_VERSION__</string>
-    <!-- 构建戳：{YYYYMMDD}-XENO-BETA-{仓库简称}-{commit短哈希}，由 build-gui.sh 注入 -->
+    <!-- 构建戳：{YYYYMMDD}-BETA-{仓库简称}-{commit短哈希}，由 build-gui.sh 注入 -->
     <key>CFBundleVersion</key>
     <string>__TETHERKIT_BUILD__</string>
 

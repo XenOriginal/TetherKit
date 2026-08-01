@@ -162,7 +162,7 @@ struct ContentView: View {
         }
     }
 
-    /// 左栏底部的特权组件管理行。
+    /// 左栏底部的特权组件管理行 + 连接状态与版本信息。
     ///
     /// 刻意做得低调（caption + borderless）：卸载是极低频的管理动作，不该
     /// 从正常使用里抢走任何注意力 —— 但它必须存在于主界面，否则组件
@@ -170,22 +170,24 @@ struct ContentView: View {
     @ViewBuilder
     private var helperManagementFooter: some View {
         if case .available(let version) = model.helperAvailability {
-            HStack(spacing: Design.Spacing.small) {
-                if model.isAutoUpgradingHelper {
-                    // 自动升级中：显示进度提示，禁用所有操作按钮。
-                    ProgressView()
-                        .scaleEffect(0.6)
-                    Text(L(.autoUpgradingHelper))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if let mismatch = model.helperVersionMismatch {
-                    // 版本对不上时这一行从「参考信息」变成「有件事等着你做」：
-                    // 两个版本号一起摆出来，颜色也从 tertiary 提到 orange。
-                    Text(L(.helperVersionMismatch, mismatch.installed, mismatch.expected))
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .textSelection(.enabled)
-                        .lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                // 第一行：helper 版本 / 版本不一致 / 自动升级中 + 卸载按钮
+                HStack(spacing: Design.Spacing.small) {
+                    if model.isAutoUpgradingHelper {
+                        // 自动升级中：显示进度提示，禁用所有操作按钮。
+                        ProgressView()
+                            .scaleEffect(0.6)
+                        Text(L(.autoUpgradingHelper))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if let mismatch = model.helperVersionMismatch {
+                        // 版本对不上时这一行从「参考信息」变成「有件事等着你做」：
+                        // 两个版本号一起摆出来，颜色也从 tertiary 提到 orange。
+                        Text(L(.helperVersionMismatch, mismatch.installed, mismatch.expected))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                            .lineLimit(1)
                     // 忙的时候换成「正在安装……」而不是只把按钮置灰：授权框关掉
                     // 之后要等好几秒（bootout → 拷文件 → bootstrap → 探活），
                     // 一个灰掉的按钮看起来像是点了没反应。
@@ -224,6 +226,36 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .disabled(model.isBusy)
+                }
+
+                // 第二行：USB 连接状态 + App 版本
+                HStack(spacing: Design.Spacing.small) {
+                    Image(systemName: "usb.cable")
+                        .font(.system(size: 9))
+                    let deviceName = (model.selectedDevice ?? model.devices.first)?.displayName
+                        ?? L(.usbDeviceFallbackName)
+                    switch model.status.runState {
+                    case .running:
+                        Text(L(.footerUsbConnected, deviceName))
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    case .idle where !model.devices.isEmpty,
+                         .starting where !model.devices.isEmpty,
+                         .stopping where !model.devices.isEmpty:
+                        Text(L(.footerUsbReady))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    default:
+                        Text(L(.footerUsbDisconnected))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                    Text(model.appBuildInfo)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                }
             }
             .padding(.horizontal, Design.Spacing.tight)
         }

@@ -70,8 +70,16 @@ struct NetworkCard: View {
 
                 defaultRouteToggleV6
 
-                // MARK: - 操作按钮
-                actionRow
+                // MARK: - 自动应用（隔离区）
+                //   Auto Apply 是整个 Configure 模块的行为策略开关——它控制
+                //   IPv4 + IPv6 + 路由 + DNS 是否在 RNDIS 连接建立时自动生效。
+                //   用独立视觉边界将其与具体配置参数区分开，明确「这是策略层」。
+                Divider()
+                    .padding(.vertical, Design.Spacing.tight)
+
+                autoApplyIsolationSection
+
+                // MARK: - 手动操作按钮
 
                 // MARK: - 当前生效状态
                 if interfaceReady {
@@ -237,9 +245,13 @@ struct NetworkCard: View {
         .help(L(.setDefaultRouteTooltip))
     }
 
-    private var actionRow: some View {
+    /// 自动应用隔离区：Auto Apply 策略开关 + 手动操作按钮。
+    ///
+    /// 视觉上用浅色背景 + 内边距与上方 IPv4/IPv6 配置参数区分开，
+    /// 明确表达「这是覆盖整个 Configure 模块的行为策略层」。
+    private var autoApplyIsolationSection: some View {
         VStack(alignment: .leading, spacing: Design.Spacing.small) {
-            // Auto-apply toggle: 当手机通过 RNDIS 连接后自动应用已保存的配置。
+            // 策略开关
             Toggle(isOn: $model.autoApplyEnabled) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(L(.autoApply))
@@ -248,31 +260,35 @@ struct NetworkCard: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .help(L(.autoApplyTooltip))
 
+            // 手动操作按钮（不受 Auto Apply 策略控制，始终可用）
             HStack(spacing: Design.Spacing.small) {
                 Button {
-                Task { await model.applyNetworkConfiguration() }
-            } label: {
-                HStack(spacing: Design.Spacing.tight) {
-                    if model.isBusy {
-                        ProgressView().controlSize(.small)
+                    Task { await model.applyNetworkConfiguration() }
+                } label: {
+                    HStack(spacing: Design.Spacing.tight) {
+                        if model.isBusy {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(L(.apply))
                     }
-                    Text(L(.apply))
+                    .frame(minWidth: 56)
                 }
-                .frame(minWidth: 56)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.isBusy)
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isBusy)
 
-            Button(L(.clearConfiguration)) {
-                Task { await model.clearNetworkConfiguration() }
-            }
-            .disabled(model.isBusy || !model.networkState.hasAddress)
-            .help(L(.clearConfigurationTooltip))
+                Button(L(.clearConfiguration)) {
+                    Task { await model.clearNetworkConfiguration() }
+                }
+                .disabled(model.isBusy || !model.networkState.hasAddress)
+                .help(L(.clearConfigurationTooltip))
 
-            Spacer()
+                Spacer()
             }
         }
+        .padding(Design.Spacing.small)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Design.Radius.card))
     }
 
     // MARK: - IPv6 组件

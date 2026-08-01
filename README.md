@@ -31,8 +31,8 @@ connect, configure IP in three clicks — plus a command-line tool, `tetherkit-c
 
 > **Version**: **0.1.6** (BETA).
 > - **Build stamp** (auto-injected into `CFBundleVersion` by `gui/Scripts/build-gui.sh`):
->   `{YYYYMMDD}-XENO-BETA-{repo}-{commit}`, e.g. `20260801-XENO-BETA-XenOriginal/TetherKit-a1b2c3d`
->   — build date, author **XENO**, the `BETA` tag, repository (`XenOriginal/TetherKit`), and the
+>   `{YYYYMMDD}-BETA-{repo}-{commit}`, e.g. `20260801-BETA-XenOriginal/TetherKit-a1b2c3d`
+>   — build date, the `BETA` tag, repository (`XenOriginal/TetherKit`), and the
 >   exact commit this artifact was built from. Every `.app` is therefore traceable to a commit.
 > - **What changed**: eliminated the ~40% GUI CPU usage during an active tether (the status ring's
 >   perpetual `.repeatForever` animation is now static while connected; see

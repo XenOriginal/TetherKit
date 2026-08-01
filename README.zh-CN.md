@@ -27,8 +27,8 @@ DriverKit、不用关 SIP、不用开发者账号**。Apple Silicon 与 Intel �
 
 > **版本**：**0.1.6**（BETA）。
 > - **构建戳**（由 `gui/Scripts/build-gui.sh` 构建时自动写入 `CFBundleVersion`）：
->   `{YYYYMMDD}-XENO-BETA-{仓库}-{commit}`，例如 `20260801-XENO-BETA-XenOriginal/TetherKit-a1b2c3d`
->   —— 构建日期、改进作者 **XENO**、`BETA` 标记、仓库（`XenOriginal/TetherKit`）以及本构建对应的
+>   `{YYYYMMDD}-BETA-{仓库}-{commit}`，例如 `20260801-BETA-XenOriginal/TetherKit-a1b2c3d`
+>   —— 构建日期、`BETA` 标记、仓库（`XenOriginal/TetherKit`）以及本构建对应的
 >   确切 commit。任意 `.app` 都可据此回溯到具体 commit。
 > - **主要变更**：消除了连接状态下 GUI 约 40% 的 CPU 占用（状态环的 `.repeatForever` 永久呼吸动画
 >   在连接期间改为静态，详见 [docs/PERFORMANCE-GUI-CPU-ROOTCAUSE.md](docs/PERFORMANCE-GUI-CPU-ROOTCAUSE.md)）；
