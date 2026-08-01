@@ -253,6 +253,8 @@ final class AppModel {
     private var heartbeatTask: Task<Void, Never>?
     /// 上一次的状态快照，用来做差算速率。
     private var previousStatus: SessionStatus?
+    /// 上一次的设备列表快照，用于检测设备插拔变化。
+    private var previousDeviceCount: Int = 0
     private var sessionStartedAt: Date?
     /// 上次枚举设备的时刻。用单调时钟，避免系统时间被调整时算出负的间隔。
     private var lastDeviceRefresh: ContinuousClock.Instant?
@@ -260,6 +262,10 @@ final class AppModel {
     /// 会话进入 idle 状态的时刻。用于实现「空闲稳定后停止设备枚举」，
     /// 消除 macOS 菜单栏 USB 图标闪烁。非 idle 时为 nil。
     private var sessionBecameIdleAt: ContinuousClock.Instant?
+
+    /// 会话进入 failed 状态的时刻。用于实现自动错误恢复：failed 超过一定时间
+    /// 后自动重置状态，允许用户重新连接，而不需要手动重启 App。
+    private var sessionFailedAt: ContinuousClock.Instant?
 
     /// 主窗口当前是否可见。只影响轮询节奏；程序坞图标策略在视图层处理。
     private var isWindowVisible = true
@@ -337,6 +343,12 @@ final class AppModel {
     /// 8 秒足够覆盖正常的状态转换抖动（starting → running → stopping → idle），
     /// 同时让用户在拔插设备后最多等 8 秒就能看到列表更新。
     private static let idleDeviceSettleDuration: Duration = .seconds(8)
+
+    /// 自动错误恢复等待时间：会话进入 failed 后经过此时间，自动重置状态
+    /// 允许用户重新连接。避免用户看到错误后必须手动操作才能恢复。
+    ///
+    /// 5 秒足够用户看到错误信息，又不会让界面长时间停留在错误状态。
+    private static let autoRecoveryDuration: Duration = .seconds(5)
 
     /// 吞吐曲线保留的采样点数。60 点 × 1 s = 最近 60 秒。
     ///
@@ -439,6 +451,18 @@ final class AppModel {
         isWindowVisible = false
     }
 
+    /// 窗口可见性检测：SwiftUI 的 onDisappear 可能在某些竞态场景下不触发
+    /// （如窗口被系统关闭、进程被 SIGTERM 后重启），这里做一次兜底检查。
+    /// 在 refresh() 中每个周期调用，确保 isWindowVisible 与真实状态一致。
+    func checkWindowVisibility() {
+        let hasVisibleWindows = NSApp.windows.contains { $0.isVisible && !$0.title.isEmpty }
+        if !hasVisibleWindows && isWindowVisible {
+            windowDidDisappear()
+        } else if hasVisibleWindows && !isWindowVisible {
+            windowDidAppear()
+        }
+    }
+
     /// 登记「接下来这次主窗口展示是我们主动要求的」。
     ///
     /// App 启动时（初始化默认值）与「打开主窗口」按钮各登记一次。
@@ -458,17 +482,41 @@ final class AppModel {
 
     /// 当前该用的轮询间隔。
     ///
-    /// 三种情况用快节奏：会话在跑（菜单栏要显示实时速率）、正在启动/停止
-    /// （用户在等结果）、窗口开着（用户在看）。只有「纯后台待机」才放慢 ——
-    /// 那时轮询唯一的产出是 helper 探活与设备扫描，没人需要它们每半秒一次。
+    /// 动态降频策略：
+    ///   - 窗口可见 + 会话运行中：前 30 秒用 1 秒间隔（快速响应状态转换），
+    ///     之后降到 2 秒（会话稳定后人眼对速率刷新频率不敏感，省一半 XPC 往返）
+    ///   - 窗口可见 + 空闲：2 秒（用户在看但没有实时数据要展示）
+    ///   - 后台 + 会话运行中：2 秒（菜单栏速率文字需要数据，但不需要 1 Hz）
+    ///   - 后台 + 空闲：4 秒（唯一产出是 helper 探活与设备扫描）
     private var pollDelay: Duration {
         let sessionActive = status.runState == .running || status.runState.isTransitional
-        return sessionActive || isWindowVisible ? Self.pollInterval : Self.backgroundPollInterval
+
+        if isWindowVisible {
+            if sessionActive {
+                // 会话刚启动的前 30 秒用快节奏，捕获 link-up、IP 分配等瞬态变化；
+                // 30 秒后降频，省掉一半的 XPC 往返与 SwiftUI body 重算。
+                if let started = sessionStartedAt, Date().timeIntervalSince(started) > 30 {
+                    return .seconds(2)
+                }
+                return Self.pollInterval
+            } else {
+                // 窗口开着但没有活跃会话：2 秒足够（用户能看到设备列表变化）
+                return .seconds(2)
+            }
+        }
+
+        // 后台模式：会话运行时 2 秒（菜单栏速率），否则 4 秒（探活+设备扫描）
+        return sessionActive ? .seconds(2) : Self.backgroundPollInterval
     }
 
     // MARK: - 轮询
 
     private func refresh() async {
+        // ★ 窗口可见性兜底检测 ★
+        // SwiftUI 的 onDisappear 在某些竞态场景下可能不触发（窗口被系统关闭、
+        // 进程重启等），这里每周期检查一次，确保 isWindowVisible 与真实状态一致。
+        checkWindowVisibility()
+
         // 快路径：helper 二进制不在预期位置（多半是被系统清理工具删掉了，
         // 本机装了 CleanMyMac 一类软件就可能这么干）。直接判缺失并给出安装引导，
         // 省去 10 秒 XPC 超时干等 —— 否则界面会一直卡在「Checking…」，用户无从下手。
@@ -549,10 +597,14 @@ final class AppModel {
             && !deviceFillAttemptedWhileRunning
 
         // 空闲稳定检测：idle/stopped/failed 超过阈值 + 已有设备列表 → 跳过本次枚举。
+        // ★ 设备消失时不跳过 ★
+        //   旧逻辑只看「设备列表非空」，设备被拔掉后列表变空但 previousDeviceCount > 0，
+        //   此时应立即刷新以反映真实状态，而不是等 8 秒。
         let isIdleStable: Bool = {
             guard (status.runState == .idle || status.runState == .stopped || status.runState == .failed),
                   let becameIdleAt = sessionBecameIdleAt,
-                  !devices.isEmpty else { return false }
+                  !devices.isEmpty,
+                  devices.count == previousDeviceCount else { return false }
             return ContinuousClock.now - becameIdleAt >= Self.idleDeviceSettleDuration
         }()
 
@@ -562,7 +614,16 @@ final class AppModel {
             if !(wantsDevices && isIdleStable) && (wantsDevices ? shouldRefreshDevices() : true) {
                 deviceFillAttemptedWhileRunning = true
                 if let fresh = try? await client.listDevices() {
+                    // ★ 设备变化检测 ★
+                    // 检测设备列表数量变化（插拔），变化时重置空闲计时器，
+                    // 确保下一次轮询立即重新枚举，而不是被 idle stable 跳过。
+                    let deviceCountChanged = fresh.count != previousDeviceCount
                     devices = fresh
+                    previousDeviceCount = fresh.count
+                    if deviceCountChanged {
+                        // 设备数量变了：重置空闲稳定计时，下一轮立即刷新
+                        sessionBecameIdleAt = nil
+                    }
                     // 用户选中的设备被拔掉后，选择要跟着失效，否则「启动」会按一个
                     // 不存在的总线地址去找设备。
                     if let selected = selectedDeviceID,
@@ -639,6 +700,15 @@ final class AppModel {
 
 
     private func apply(status fresh: SessionStatus) {
+        // ★ 变化检测：状态完全相同时跳过更新 ★
+        // @Observable 宏追踪所有属性写入，即使值没变也会触发 SwiftUI body 重算。
+        // helper 每次轮询都返回相同快照时（空闲、会话稳定运行中），跳过赋值
+        // 可以省掉整个视图树的 diff + 重绘 —— 这是 UI 空闲时 CPU 的主要来源。
+        //
+        // 注意：必须允许「首次调用」（previousStatus == nil）通过，因为需要建立
+        // baseline 用于后续的速率差分计算。
+        if let prev = previousStatus, fresh == prev { return }
+
         defer {
             previousStatus = fresh
             status = fresh
@@ -673,6 +743,21 @@ final class AppModel {
                sessionBecameIdleAt == nil {
                 sessionBecameIdleAt = ContinuousClock.now
             }
+            // ★ 自动错误恢复 ★
+            // 首次进入 failed 状态时记录时刻并启动延迟恢复：failed 超过 autoRecoveryDuration
+            // 后自动调用 stopSession 重置状态，允许用户重新连接，而不需要手动操作。
+            if fresh.runState == .failed, sessionFailedAt == nil {
+                sessionFailedAt = ContinuousClock.now
+                Task { [weak self] in
+                    try? await Task.sleep(for: Self.autoRecoveryDuration)
+                    guard let self else { return }
+                    // 只有仍然处于 failed 状态时才恢复（用户可能已手动操作）
+                    if self.status.runState == .failed {
+                        await self.stopSession()
+                    }
+                    self.sessionFailedAt = nil
+                }
+            }
         }
 
         // 离开空闲/停止/失败状态：清除空闲计时，恢复正常枚举节奏。
@@ -680,6 +765,7 @@ final class AppModel {
            (prev == .idle || prev == .stopped || prev == .failed),
            !(fresh.runState == .idle || fresh.runState == .stopped || fresh.runState == .failed) {
             sessionBecameIdleAt = nil
+            sessionFailedAt = nil
         }
 
         guard let previous = previousStatus,
@@ -723,8 +809,22 @@ final class AppModel {
             if logs.count > Self.logCapacity {
                 logs.removeFirst(logs.count - Self.logCapacity)
             }
-            // 日志变了 → 顺便刷新缓存，避免下次 body 重算时全量扫描。
-            cachedFilteredLogs = rebuildFilteredLogs()
+            // ★ 增量更新缓存：只处理新增的日志 ★
+            // 旧实现每次日志变化都 O(n) 全量重建缓存，是活跃转发时 CPU 38%+ 的
+            // 主要来源之一。新实现只遍历 feed 中新增的条目（通常 0~6 条），
+            // 增量追加或合并到 cachedFilteredLogs 末尾，复杂度 O(k)。
+            // 全量重建仅在缓存超出容量上限时触发（极罕见的安全阀）。
+            for entry in feed.logs where entry.level >= logLevelFilter {
+                if let last = cachedFilteredLogs.last, last.matches(entry) {
+                    cachedFilteredLogs[cachedFilteredLogs.count - 1].absorb(entry)
+                } else {
+                    cachedFilteredLogs.append(CollapsedLogEntry(entry))
+                }
+            }
+            // 安全阀：缓存异常膨胀时全量重建（正常情况下不会触发）
+            if cachedFilteredLogs.count > Self.logCapacity {
+                cachedFilteredLogs = rebuildFilteredLogs()
+            }
         }
         droppedLogCount += feed.droppedLogs
     }

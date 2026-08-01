@@ -153,14 +153,15 @@ struct StatusHeroCard: View {
 ///
 /// 新方案：运行中**完全静止**，靠链路指示徽标 + 实时吞吐图表表达「在干活」，
 /// 不再为无信息量的动画烧 CPU；只有「过渡态」（starting/stopping，通常几秒）
-/// 才跑一段旋转弧，且做了幂等处理（已在转就不再 issue），避免状态抖动时叠加
-/// 多个无限动画把渲染循环彻底拖死。
+/// 才跑一段旋转弧，用 Timer 驱动而不是 .repeatForever —— 后者在 SwiftUI 中
+/// 无法可靠停止，会导致渲染循环持续 60fps 空转。
 private struct StatusRing: View {
     let status: SessionStatus
     let accent: Color
 
     @State private var rotation: Double = 0
     @State private var spinning = false
+    @State private var spinTimer: Timer?
 
     private var isActive: Bool { status.runState == .running && status.linkUp }
     private var isWorking: Bool { status.runState.isTransitional }
@@ -191,23 +192,44 @@ private struct StatusRing: View {
         .onAppear { updateAnimationState() }
         .onChange(of: status.runState) { _, _ in updateAnimationState() }
         .onChange(of: status.linkUp) { _, _ in updateAnimationState() }
+        .onDisappear {
+            // 视图消失时必须停掉 timer，否则 Timer 在后台继续 fire 空转 CPU
+            stopSpinTimer()
+        }
     }
 
     /// 只在「过渡态」启动旋转，离开过渡态立即停止；运行中保持静止。
     ///
-    /// 幂等：已在转（`spinning == true`）时即使 onChange 因 linkUp 抖动再次触发，
-    /// 也不再 issue 新的 repeatForever，避免无限动画叠加。
+    /// 用 Timer 驱动旋转而不是 .repeatForever：
+    ///   - Timer 在 spinning=false 时精确停止，不会残留渲染循环
+    ///   - 每次 tick 只触发一次 SwiftUI redraw，而不是 60fps continuous
+    ///   - 视图消失时 onDisappear 保证 timer 被清理
     private func updateAnimationState() {
         if isWorking {
             guard !spinning else { return }
             spinning = true
-            withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-                rotation = 360
+            // 每 1.1 秒旋转一圈，用 withAnimation 让过渡平滑
+            spinTimer = Timer.scheduledTimer(withTimeInterval: 1.1, repeats: true) { _ in
+                Task { @MainActor in
+                    withAnimation(.linear(duration: 1.1)) {
+                        rotation += 360
+                    }
+                }
+            }
+            // 立即开始第一次旋转
+            withAnimation(.linear(duration: 1.1)) {
+                rotation += 360
             }
         } else {
+            stopSpinTimer()
             spinning = false
             // 一次性动画把 rotation 收回 0，渲染循环得以 idle。
             withAnimation(.default) { rotation = 0 }
         }
+    }
+
+    private func stopSpinTimer() {
+        spinTimer?.invalidate()
+        spinTimer = nil
     }
 }

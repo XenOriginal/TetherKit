@@ -163,9 +163,19 @@ private struct MainWindowRoot: View {
             }
             .onDisappear {
                 model.windowDidDisappear()
-                // 关掉窗口就退到「仅菜单栏」：常驻小工具挂着一个没有窗口的
-                // 程序坞图标只会让人想去点它。轮询与会话都不受影响。
-                NSApp.setActivationPolicy(.accessory)
+                // ★ 延迟切换激活策略 ★
+                // 旧实现立即设置 .accessory，可能与 SwiftUI 的窗口重建竞态 ——
+                // 窗口刚关 SwiftUI 可能马上重建一个，此时 .accessory 已经生效，
+                // 新窗口会落到别的应用后面或根本不显示。
+                //
+                // 延迟 0.1 秒后检查是否确实没有可见窗口，只有在确认没有时才切换。
+                // 这给了 SwiftUI 一帧时间完成可能的窗口重建。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    let hasVisibleWindows = NSApp.windows.contains { $0.isVisible && !$0.title.isEmpty }
+                    if !hasVisibleWindows {
+                        NSApp.setActivationPolicy(.accessory)
+                    }
+                }
             }
     }
 }
