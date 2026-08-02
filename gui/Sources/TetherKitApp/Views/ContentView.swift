@@ -145,6 +145,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     VStack(spacing: Design.Spacing.gutter) {
                         DeviceCard(model: model)
+                        AutoConnectCard(model: model)
                         NetworkCard(model: model)
                     }
                     Spacer(minLength: 0)

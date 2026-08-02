@@ -173,6 +173,23 @@ final class AppModel {
     private(set) var logs: [LogEntry] = []
     private(set) var droppedLogCount: UInt64 = 0
 
+    /// 注入自定义日志到主日志面板（供 AutoConnectManager 等内部模块使用）。
+    func injectLog(_ message: String, level: LogLevel = .info) {
+        let entry = LogEntry(level: level, timestamp: Date(), thread: "auto-connect",
+                             message: message)
+        logs.append(entry)
+        if logs.count > Self.logCapacity {
+            logs.removeFirst(logs.count - Self.logCapacity)
+        }
+        if level >= logLevelFilter {
+            if let last = cachedFilteredLogs.last, last.matches(entry) {
+                cachedFilteredLogs[cachedFilteredLogs.count - 1].absorb(entry)
+            } else {
+                cachedFilteredLogs.append(CollapsedLogEntry(entry))
+            }
+        }
+    }
+
     /// 缓存版的 filteredLogs。
     ///
     /// 原始 filteredLogs 是 O(n) 计算属性（n ≤ 2000），在 SwiftUI 每次 body 重算时
@@ -208,6 +225,16 @@ final class AppModel {
     /// （比如用户在「系统设置 → 登录项」里手动改过）。
     @ObservationIgnored
     @AppStorage("TetherKitLoginItem") var loginItemEnabled = false
+
+    /// 自动连接：检测到已授权的 ADB 设备时自动启用 RNDIS 并建立连接。
+    ///
+    /// 经 @AppStorage 持久化。默认关闭 —— 此功能依赖 adb，且会自动触发连接，
+    /// 只在用户明确需要时开启。
+    @ObservationIgnored
+    @AppStorage("TetherKitAutoConnect") var autoConnectEnabled = false
+
+    /// 自动连接管理器。持有 ADB 检测、白名单与自动连接编排逻辑。
+    let autoConnectManager = AutoConnectManager()
 
     /// 当前会话是否已执行过自动应用（防止每次轮询都重复触发）。
     private var autoAppliedForCurrentSession = false
@@ -430,6 +457,12 @@ final class AppModel {
         guard pollingTask == nil else { return }
         restoreLanguagePreference()
         syncLoginItemState()
+
+        // 自动连接：绑定模型引用，如果用户启用了就启动监控。
+        autoConnectManager.model = self
+        if autoConnectEnabled {
+            autoConnectManager.startMonitoring()
+        }
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -1025,6 +1058,13 @@ final class AppModel {
     func refreshDevices() async {
         lastDeviceRefresh = .now
         devices = (try? await client.listDevices()) ?? []
+    }
+
+    /// 轻量级设备枚举：只返回列表，不更新模型状态。
+    ///
+    /// 供 AutoConnectManager 轮询 RNDIS 设备用，避免干扰主界面的设备列表。
+    func probeDevices() async -> [DeviceDescriptor] {
+        (try? await client.listDevices()) ?? []
     }
 
     /// 距上次枚举是否已经够久。顺带记下这一次的时刻。

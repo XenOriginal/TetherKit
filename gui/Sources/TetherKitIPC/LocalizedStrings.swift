@@ -248,6 +248,26 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case loginItem
     case loginItemTooltip
 
+    // MARK: - 自动连接（AutoConnectCard.swift）
+
+    case autoConnect
+    case autoConnectTooltip
+    case adbAvailable
+    case adbUnavailable
+    case detectedDevices
+    case authorizedDevices
+    case refreshDevices
+    case addDevice
+    case removeDevice
+    case alreadyAdded
+    case autoConnectNoADBHint
+    case autoConnectMonitoring
+    case autoConnectEnabling
+    case autoConnectWaiting
+    case autoConnectConnecting
+    case autoConnectConnected
+    case autoConnectFailed
+
     // MARK: - 网络卡（NetworkCard.swift）
 
     case dnsEffectivenessTooltip
@@ -727,6 +747,30 @@ extension L10nKey {
         case .loginItemTooltip:
             return ("登录时自动打开 TetherKit，方便随时连接设备。",
                     "Automatically open TetherKit at login so you can connect devices right away.")
+
+        // MARK: 自动连接
+
+        case .autoConnect: return ("自动连接", "Auto-connect")
+        case .autoConnectTooltip:
+            return ("检测到已授权设备时自动启用 RNDIS 并建立连接。",
+                    "Automatically enable RNDIS and connect when an authorized device is detected.")
+        case .adbAvailable: return ("ADB 已就绪", "ADB available")
+        case .adbUnavailable: return ("ADB 未安装", "ADB not installed")
+        case .detectedDevices: return ("检测到的设备", "Detected devices")
+        case .authorizedDevices: return ("已授权设备", "Authorized devices")
+        case .refreshDevices: return ("刷新设备", "Refresh devices")
+        case .addDevice: return ("添加", "Add")
+        case .removeDevice: return ("移除", "Remove")
+        case .alreadyAdded: return ("已添加", "Added")
+        case .autoConnectNoADBHint:
+            return ("请安装 Android Platform Tools（包含 adb 命令）。",
+                    "Please install Android Platform Tools (which includes adb).")
+        case .autoConnectMonitoring: return ("监控中...", "Monitoring...")
+        case .autoConnectEnabling: return ("正在启用 RNDIS: %@", "Enabling RNDIS: %@")
+        case .autoConnectWaiting: return ("等待 RNDIS 设备: %@", "Waiting for RNDIS: %@")
+        case .autoConnectConnecting: return ("正在连接: %@", "Connecting: %@")
+        case .autoConnectConnected: return ("已自动连接: %@", "Auto-connected: %@")
+        case .autoConnectFailed: return ("自动连接失败: %@", "Auto-connect failed: %@")
 
         // MARK: 网络卡
 
