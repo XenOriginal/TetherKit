@@ -9,8 +9,6 @@ struct AutoConnectCard: View {
     @Bindable var model: AppModel
     @State private var detectedDevices: [ADBManager.ADBDevice] = []
     @State private var isLoading = false
-    /// 自动刷新定时器。
-    @State private var refreshTimer: Timer?
 
     var body: some View {
         Card(title: L(.autoConnect), systemImage: "bolt.autostartstop") {
@@ -18,96 +16,49 @@ struct AutoConnectCard: View {
                 // ADB 状态行
                 adbStatusRow
 
-                // 自动连接总开关
-                Toggle(L(.autoConnect), isOn: Binding(
-                    get: { model.autoConnectEnabled },
-                    set: { newValue in
-                        model.autoConnectEnabled = newValue
-                        let mgr = model.autoConnectManager
-                        mgr.model = model
-                        if newValue {
-                            mgr.startMonitoring()
-                        } else {
-                            mgr.stopMonitoring()
-                        }
-                    }
-                ))
-                .help(L(.autoConnectTooltip))
+                Divider()
 
-                if model.autoConnectEnabled {
+                // 已授权设备列表
+                authorizedDevicesSection
+
+                Divider()
+
+                // 检测到的设备列表
+                detectedDevicesSection
+
+                // 刷新按钮
+                HStack {
+                    Button {
+                        Task { await refreshDevices() }
+                    } label: {
+                        Label(L(.refreshDevices), systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .disabled(!ADBManager.isAvailable || isLoading)
+
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                }
+
+                // 自动连接状态
+                let mgr = model.autoConnectManager
+                if mgr.status != .idle && mgr.status != .monitoring {
                     Divider()
-
-                    // 已授权设备列表
-                    authorizedDevicesSection
-
-                    Divider()
-
-                    // 检测到的设备列表
-                    detectedDevicesSection
-
-                    // 刷新按钮
-                    HStack {
-                        Button {
-                            Task { await refreshDevices() }
-                        } label: {
-                            Label(L(.refreshDevices), systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                        .disabled(!ADBManager.isAvailable || isLoading)
-
-                        if isLoading {
-                            ProgressView()
-                                .controlSize(.mini)
-                        }
-                    }
-
-                    // 自动连接状态
-                    let mgr = model.autoConnectManager
-                    if mgr.status != .idle && mgr.status != .monitoring {
-                        Divider()
-                        autoConnectStatusView(mgr.status)
-                    }
+                    autoConnectStatusView(mgr.status)
                 }
             }
         }
         .task {
-            if model.autoConnectEnabled && ADBManager.isAvailable {
+            // 自动连接总开关常开：确保 model 引用已设置并启动监控
+            model.autoConnectManager.model = model
+            model.autoConnectManager.startMonitoring()
+            if ADBManager.isAvailable {
                 await refreshDevices()
             }
         }
-        .onAppear {
-            startAutoRefresh()
-        }
-        .onDisappear {
-            stopAutoRefresh()
-        }
-        .onChange(of: model.autoConnectEnabled) { _, newValue in
-            if newValue && ADBManager.isAvailable {
-                startAutoRefresh()
-            } else {
-                stopAutoRefresh()
-            }
-        }
-    }
-
-    // MARK: - 自动刷新
-
-    /// 启动周期性设备检测刷新（每 2 秒）。
-    private func startAutoRefresh() {
-        stopAutoRefresh()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak model] _ in
-            guard let model, model.autoConnectEnabled, ADBManager.isAvailable else { return }
-            Task { @MainActor in
-                await refreshDevices()
-            }
-        }
-    }
-
-    /// 停止自动刷新。
-    private func stopAutoRefresh() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
     }
 
     // MARK: - ADB 状态
@@ -162,6 +113,12 @@ struct AutoConnectCard: View {
                 get: { whitelist.isAutoConnectEnabled(serial: serial) },
                 set: { newValue in
                     model.autoConnectManager.whitelist.setAutoConnect(serial: serial, enabled: newValue)
+                    // 打开时立即触发自动连接流程（不用等 2 秒轮询）
+                    if newValue {
+                        Task {
+                            await model.autoConnectManager.toggleNetworkAndConnect(serial: serial, enable: true)
+                        }
+                    }
                 }
             )) {
                 Text(L(.autoConnect))

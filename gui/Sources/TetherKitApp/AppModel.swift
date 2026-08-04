@@ -231,7 +231,7 @@ final class AppModel {
     /// 经 @AppStorage 持久化。默认关闭 —— 此功能依赖 adb，且会自动触发连接，
     /// 只在用户明确需要时开启。
     @ObservationIgnored
-    @AppStorage("TetherKitAutoConnect") var autoConnectEnabled = false
+    @AppStorage("TetherKitAutoConnect") var autoConnectEnabled = true
 
     /// 自动连接管理器。持有 ADB 检测、白名单与自动连接编排逻辑。
     let autoConnectManager = AutoConnectManager()
@@ -241,14 +241,6 @@ final class AppModel {
 
     /// 本次启动是否已尝试过 helper 自动升级（防止每次轮询都重复触发）。
     private var helperAutoUpgradeAttempted = false
-
-    /// 是否已对「运行中会话的设备列表」做过首次填充尝试。
-    ///
-    /// 场景：App 启动即发现会话已在跑、而设备列表还空着（手机早就连上了）。
-    /// 这时必须枚举一次把设备填进去，但枚举要 libusb_open，运行中频繁做会
-    /// 干扰独占中的设备，所以只试一次——成功就填上了，失败也不再重试，
-    /// 等会话停止后标志复位、回到正常的「未运行时枚举」节奏。
-    private var deviceFillAttemptedWhileRunning = false
 
     /// 界面语言偏好。改它会**同时**做三件事：切 Swift 侧的文案表、把语言推给
     /// libtetherkit（否则日志卡里会混进另一种语言）、再推给 helper（它以 root
@@ -458,11 +450,9 @@ final class AppModel {
         restoreLanguagePreference()
         syncLoginItemState()
 
-        // 自动连接：绑定模型引用，如果用户启用了就启动监控。
+        // 自动连接：绑定模型引用，启动监控（总开关常开）。
         autoConnectManager.model = self
-        if autoConnectEnabled {
-            autoConnectManager.startMonitoring()
-        }
+        autoConnectManager.startMonitoring()
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -652,18 +642,11 @@ final class AppModel {
         //
         // 例外：**App 启动即发现会话已在跑、而设备列表还空着**——手机早就连上
         // 了，但设备枚举被「运行中不刷」的规矩跳过，列表永远填不进来，会卡在
-        // 「无设备」。这时必须至少枚举一次把设备填进去（只试一次，见下面标志），
-        // 不能因为「运行中」就永远不刷。
-        //
-        // ★ 空闲稳定跳过（修复 macOS 菜单栏 USB 图标闪烁）★
-        //   会话处于 idle 超过 idleDeviceSettleDuration（8 秒）且设备列表非空时，
-        //   完全跳过 libusb_open/close 枚举。每次 open/close 都会让 macOS 的 USB 子系统
-        //   刷新菜单栏 "Zubehör für virtuelle Maschinen" 图标，导致反复闪烁。
-        //   C 层的 ReconcileDeviceStrings 字符串记忆保证已知设备名称不会消失。
-        let wantsDevices = status.runState != .running
-        let mustFillEmpty = devices.isEmpty
-            && status.runState == .running
-            && !deviceFillAttemptedWhileRunning
+        // 「无设备」。这时必须从 SessionStatus 构造合成设备（而非调用 listDevices），
+        // 因为运行中设备已被 helper 独占，listDevices() 无法枚举到任何设备。
+        let mustFillEmpty = status.runState == .running
+            && devices.isEmpty
+            && !status.deviceMAC.isEmpty
 
         // 空闲稳定检测：idle/stopped/failed 超过阈值 + 已有设备列表 → 跳过本次枚举。
         // ★ 设备消失时不跳过 ★
@@ -677,11 +660,24 @@ final class AppModel {
             return ContinuousClock.now - becameIdleAt >= Self.idleDeviceSettleDuration
         }()
 
-        if wantsDevices || mustFillEmpty {
-            // 未运行时按节流节奏；运行中补空只做一次，不受节流限制。
-            // 空闲稳定时跳过（mustFillEmpty 不受影响，因为它只在 running 时为 true）。
-            if !(wantsDevices && isIdleStable) && (wantsDevices ? shouldRefreshDevices() : true) {
-                deviceFillAttemptedWhileRunning = true
+        if mustFillEmpty {
+            // 运行中：从 SessionStatus 构造合成设备 Descriptor，避免调用 listDevices()
+            // 导致 UI 在「有设备 ↔ 空列表」之间反复切换。
+            let device = DeviceDescriptor(
+                vendorID: 0,
+                productID: 0,
+                busNumber: 255,
+                deviceAddress: 255,
+                manufacturer: status.vendorDescription,
+                product: status.deviceDescription,
+                serial: status.deviceMAC,
+                summary: "RNDIS: \(status.deviceMAC)",
+                usedAndroidQuirk: false
+            )
+            devices = [device]
+        } else if status.runState != .running {
+            // 未运行时：正常枚举设备列表
+            if shouldRefreshDevices() && !isIdleStable {
                 if let fresh = try? await client.listDevices() {
                     // ★ 设备变化检测 ★
                     // 检测设备列表数量变化（插拔），变化时重置空闲计时器，
@@ -800,10 +796,21 @@ final class AppModel {
                     await self.applyNetworkConfiguration()
                 } }
             }
+            // systemInterface 可用时重试：首次 running 时 interface 可能为空，
+            // 导致 applyNetworkConfiguration() 跳过。interface 就绪后再试一次。
+            // 兜底处理非 auto-connect 路径（手动 Connect、 rndis-ctl 自动启动等）。
+            if fresh.runState == .running,
+               !fresh.systemInterface.isEmpty,
+               previousStatus?.systemInterface.isEmpty == true,
+               autoApplyEnabled && !autoAppliedForCurrentSession {
+                autoAppliedForCurrentSession = true
+                Task { await self.authorized(allowInteraction: false) { authorization in
+                    await self.applyNetworkConfiguration()
+                } }
+            }
         } else if fresh.runState != .running, fresh.runState != .stopping {
             sessionStartedAt = nil
             autoAppliedForCurrentSession = false
-            deviceFillAttemptedWhileRunning = false
             // 进入空闲/停止/失败状态：记录时刻，用于空闲稳定后停止设备枚举。
             // ★ 只在首次进入时记录，不在每次轮询时重置 —— 否则 now - becameIdleAt
             //   永远 ≈0，8 秒阈值永远达不到，isIdleStable 永远 false，枚举永不停止，
@@ -1055,8 +1062,38 @@ final class AppModel {
     /// 手动刷新设备列表（界面上的刷新按钮）。
     ///
     /// 手动触发时不受节流限制 —— 用户点了按钮就是想立刻看到结果。
+    ///
+    /// ★ 运行中会话的特别处理 ★
+    ///   当会话正在运行时，设备已被 helper 独占，listDevices() 无法枚举到
+    ///   任何设备（libusb_open 失败）。此时直接清空列表会导致 UI 闪烁，
+    ///   因为下一次 poll 又会从 SessionStatus 重新构造合成设备。
+    ///   改为：运行时从 SessionStatus 构造合成设备 Descriptor，保持列表稳定。
     func refreshDevices() async {
         lastDeviceRefresh = .now
+        if status.runState == .running {
+            // 运行中：listDevices() 会返回空（设备被 helper 独占），
+            // 用 SessionStatus 中的信息构造合成设备 Descriptor。
+            guard !status.deviceMAC.isEmpty else { return }
+            // 如果已经存在相同的合成设备（busNumber=255），跳过赋值，
+            // 避免每 2 秒刷新定时器反复触发 @Observable 重绘。
+            if devices.first?.busNumber == 255,
+               devices.first?.serial == status.deviceMAC {
+                return
+            }
+            let device = DeviceDescriptor(
+                vendorID: 0,
+                productID: 0,
+                busNumber: 255,
+                deviceAddress: 255,
+                manufacturer: status.vendorDescription,
+                product: status.deviceDescription,
+                serial: status.deviceMAC,
+                summary: "RNDIS: \(status.deviceMAC)",
+                usedAndroidQuirk: false
+            )
+            devices = [device]
+            return
+        }
         devices = (try? await client.listDevices()) ?? []
     }
 
